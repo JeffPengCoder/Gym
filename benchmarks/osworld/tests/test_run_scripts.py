@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -35,6 +36,40 @@ def test_vm_prepare_script_pins_the_verified_image_identity() -> None:
 def test_runtime_wrappers_delegate_to_current_gym_commands() -> None:
     assert "env start \\" in START_CONTROL_SCRIPT.read_text(encoding="utf-8")
     assert "eval run --no-serve \\" in RUN_EVAL_SCRIPT.read_text(encoding="utf-8")
+
+
+def test_runtime_wrappers_support_a_run_specific_env_file() -> None:
+    for script in (START_CONTROL_SCRIPT, RUN_EVAL_SCRIPT):
+        text = script.read_text(encoding="utf-8")
+        assert "OSWORLD_ENV_FILE" in text
+        assert 'cd "${ENV_DIR}"' in text
+        assert "must name env.yaml" in text
+
+
+@pytest.mark.parametrize("script", [START_CONTROL_SCRIPT, RUN_EVAL_SCRIPT])
+def test_runtime_wrappers_execute_from_run_specific_env_directory(tmp_path: Path, script: Path) -> None:
+    env_dir = tmp_path / "profile"
+    env_dir.mkdir()
+    (env_dir / "env.yaml").write_text("config_paths: []\n", encoding="utf-8")
+    cwd_capture = tmp_path / "cwd.txt"
+    fake_gym = tmp_path / "gym"
+    fake_gym.write_text('#!/bin/bash\nprintf "%s\\n" "$PWD" > "$PWD_CAPTURE"\n', encoding="utf-8")
+    fake_gym.chmod(0o755)
+
+    env = os.environ.copy()
+    env.pop("DOCKER_HOST", None)
+    env.update(
+        {
+            "GYM_BIN": str(fake_gym),
+            "NEMO_GYM_CONTROL_HOST": "127.0.0.1",
+            "OSWORLD_ENV_FILE": str(env_dir / "env.yaml"),
+            "OSWORLD_RUN_ID": "test-profile",
+            "PWD_CAPTURE": str(cwd_capture),
+        }
+    )
+    subprocess.run([str(script), str(tmp_path / "run")], check=True, env=env)
+
+    assert cwd_capture.read_text(encoding="utf-8").strip() == str(env_dir)
 
 
 def test_remote_docker_requires_a_reachable_publish_host() -> None:

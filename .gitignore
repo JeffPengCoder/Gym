@@ -257,16 +257,13 @@ env.yaml
 /benchmarks/osworld/tools/bringup_local_host.sh
 /benchmarks/osworld/tools/check_host_prerequisites.sh
 /benchmarks/osworld/tools/check_task_input_parity.py
-/benchmarks/osworld/tools/convert_osworld_tasks.py
 /benchmarks/osworld/tests/test_task_input_parity.py
 
 # Local-only OSWorld profile experiments. Public preparation supports Pointer,
 # Nano Omni, Gym Docker Sandbox, and the pinned native comparison.
-/benchmarks/osworld/configs/decoupled_omni_mini.yaml
 /benchmarks/osworld/configs/osworld_agent_m3.yaml
 /benchmarks/osworld/configs/osworld_agent_native_prompt_agent.yaml
 /benchmarks/osworld/configs/osworld_agent_qwen3_omni.yaml
-/benchmarks/osworld/configs/osworld_remote_docker.yaml
 
 # Claude Code agent runtime artifacts
 **/.claude_node/

@@ -217,11 +217,11 @@ tools/run_eval.sh /absolute/run/root
 
 ### Deterministic task sharding
 
-`prepare.py` owns task splitting. Use the same canonical input on every
-agent/control host and select one zero-based shard per host:
+`prepare.py` owns task splitting. Use the same canonical input for every
+agent/control profile and select one zero-based shard per profile:
 
 ```bash
-# Agent/control host A
+# Agent/control profile A
 python3 prepare.py \
   --profile nano_omni \
   --execution-backend gym_sandbox \
@@ -232,8 +232,8 @@ python3 prepare.py \
   --shard-index 0 \
   --force-env
 
-# Agent/control host B uses the same command with --shard-index 1 and its own
-# output directory.
+# Agent/control profile B uses the same command with --shard-index 1 and its
+# own output directory.
 ```
 
 Non-empty input rows are assigned by `row_index % num_shards`. This is stable,
@@ -326,6 +326,94 @@ endpoints on the environment host. Keep `DOCKER_HOST` exported when invoking
 remote OSWorld containers. No manually maintained interactive SSH session is
 required: the Docker CLI opens its SSH transport as needed, while Gym owns all
 container operations.
+
+### One agent with multiple environment hosts
+
+One agent host can run multiple shards against different environment hosts and
+a shared model endpoint. Use one checkout, but give every profile a distinct
+run root, `env.yaml`, run ID, and head port. `OSWORLD_ENV_FILE` tells the public
+wrappers which run-specific configuration to load.
+
+```mermaid
+flowchart LR
+    INPUT[Canonical task JSONL]
+
+    subgraph AGENT[Single agent / control host]
+        PA[Profile A<br/>prepare + control + eval<br/>shard 0 / head port A]
+        PB[Profile B<br/>prepare + control + eval<br/>shard 1 / head port B]
+        AA[OSWorld logic +<br/>Gym Sandbox adapter A]
+        AB[OSWorld logic +<br/>Gym Sandbox adapter B]
+        PA --> AA
+        PB --> AB
+    end
+
+    subgraph ENVA[Environment host A]
+        DA[Docker daemon]
+        SA[Ephemeral Gym Sandbox<br/>one per active task]
+        VA[QEMU/KVM desktop VM]
+        QA[(Read-only qcow2 baseline)]
+        DA --> SA --> VA
+        QA --> VA
+    end
+
+    subgraph ENVB[Environment host B]
+        DB[Docker daemon]
+        SB[Ephemeral Gym Sandbox<br/>one per active task]
+        VB[QEMU/KVM desktop VM]
+        QB[(Read-only qcow2 baseline)]
+        DB --> SB --> VB
+        QB --> VB
+    end
+
+    MODEL[Shared VLM endpoint<br/>OpenAI-compatible API]
+
+    INPUT -- row index modulo shard count --> PA
+    INPUT -- row index modulo shard count --> PB
+    AA -. Docker SSH lifecycle .-> DA
+    AB -. Docker SSH lifecycle .-> DB
+    AA -- published desktop HTTP endpoints --> VA
+    AB -- published desktop HTTP endpoints --> VB
+    AA -- model requests --> MODEL
+    AB -- model requests --> MODEL
+```
+
+The dashed links are lifecycle control through Docker's SSH transport. The
+solid environment links are direct OSWorld controller, observation, action,
+and evaluator HTTP traffic. The two profiles share neither `env.yaml` nor head
+port, but they may share the same checkout, input, model endpoint, and verified
+VM identity.
+
+For profile A, prepare and launch with:
+
+```bash
+export RUN_ROOT=/absolute/run/a
+export OSWORLD_RUN_ID=shard-a
+export OSWORLD_ENV_FILE=${RUN_ROOT}/config/env.yaml
+export DOCKER_HOST=ssh://REMOTE_USER@ENV_HOST_A
+export OSWORLD_SANDBOX_PUBLISH_HOST=ENV_HOST_A
+
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /same/absolute/path/on/all/hosts/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_all.jsonl \
+  --output ${RUN_ROOT}/results/${OSWORLD_RUN_ID}/rollouts.jsonl \
+  --num-shards 2 \
+  --shard-index 0 \
+  --head-port 11000 \
+  --env-file ${OSWORLD_ENV_FILE} \
+  --force-env
+
+tools/start_control.sh ${RUN_ROOT}
+# After control is ready, in a second supervisor with the same exports:
+tools/run_eval.sh ${RUN_ROOT}
+```
+
+Run profile B in two other supervisors with its own run root, `shard-index 1`,
+head port `11001`, `ENV_HOST_B`, and run ID. Both profiles may use the same
+`POLICY_BASE_URL`; task assignment remains disjoint and exhaustive. A single
+profile still uses the unchanged defaults and does not require
+`OSWORLD_ENV_FILE`.
 
 ## Configuration
 
@@ -456,6 +544,33 @@ OSWorld aggregate metrics report both `osworld/binary_success_rate` and
 raw reward preserves fractional evaluator credit. Both rates use the same
 completed-rollout denominator and are reported regardless of `reward_mode`,
 which continues to control the training reward returned by each rollout.
+
+## Source composition and external capability patches
+
+The OSWorld integration branch contains only changes owned by that branch.
+Third-party or still-unmerged fixes are not copied into it. A complete
+runtime may instead use a separate integration branch that contains the exact
+external commits as ancestors, preserving their authorship and review history.
+Record the final integration commit in every run manifest.
+
+External source requirements are capability-scoped in
+`runtime_dependencies.toml`. For example, Pointer running through Gym Sandbox
+currently requires Michal Bien's exact runtime-hardening commit, while Nano
+Omni training does not:
+
+```bash
+python benchmarks/osworld/tools/check_runtime_dependencies.py --list
+python benchmarks/osworld/tools/check_runtime_dependencies.py \
+  --repo-root "$PWD" \
+  --capability pointer-gym-sandbox
+```
+
+The second command intentionally fails on the plain OSWorld integration
+branch. Fetch the named source branch and merge its exact commit only into a
+separate runtime branch, resolve integration conflicts there, then rerun the
+checker. Do not copy or squash the external patch into the OSWorld feature
+branch. The checker is read-only and never performs a fetch, checkout, merge,
+or cherry-pick.
 
 ## Logs and artifacts
 
