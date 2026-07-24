@@ -16,7 +16,7 @@
 [project]
 name = "osworld-agent"
 version = "0.0.0"
-requires-python = ">=3.12"
+requires-python = ">=3.13.13,<3.14"
 dependencies = [
     "nemo-gym[dev]",
     # JeffPengCoder/OSWorld nv-gym at an immutable commit: upstream main
@@ -34,6 +34,15 @@ dependencies = [
     # OSWorld currently pins requests<2.32; prevent RequestsDependencyWarning
     # when transitive deps pull chardet 7.x.
     "chardet<6",
+    # Pin Ray to match the model server venv. Without this, ng_run can build
+    # the two server venvs at different times and pull different Ray versions.
+    "ray==2.55.1",
+    # The agent joins the parent Ray cluster, so its Python and Ray versions
+    # must match that cross-process boundary. Torch remains CPU-only and does
+    # not share the trainer's CUDA environment; pin its official matching
+    # Torch/TorchVision pair explicitly.
+    "torch==2.11.0",
+    "torchvision==0.26.0",
     # OSWorld imports these at runtime, but the repository-level Gym
     # pyproject excludes them globally to keep other server venvs lean. Keeping
     # this server on an agent-local pyproject lets uv install them here without
@@ -41,13 +50,20 @@ dependencies = [
     "cryptography",
     "cffi",
     "scipy",
-    "numpy<2",
+    # These versions provide Python 3.13 wheels.  The older OSWorld benchmark
+    # environment used NumPy 1.26 / OpenCV 4.8 / Matplotlib 3.7 on Python
+    # 3.12; carrying those pins into this Python 3.13 Ray process forces
+    # unsupported source builds or binary-ABI failures.
+    "numpy==2.5.1",
     "pynput",
     "ag2",
-    "opencv-python-headless~=4.8.1.78",
+    "opencv-python-headless==5.0.0.93",
+    "easyocr==1.7.2",
     "Pillow~=11.0.0",
     "scikit-learn",
-    "matplotlib~=3.7.4",
+    "matplotlib==3.10.6",
+    # google-generativeai (pulled by OSWorld) currently requires protobuf<6.
+    "protobuf==5.29.6",
     "flask~=3.0.0",
     "func-timeout",
 ]
