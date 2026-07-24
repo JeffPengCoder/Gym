@@ -90,6 +90,15 @@ def _resolve_server_dir(rel_path: Path) -> Path:
     )
 
 
+def _raise_for_failed_dry_run(process_name: str, process: Popen) -> None:
+    """Surface a server venv setup failure instead of accepting an empty venv."""
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"Process `{process_name}` failed during dry-run setup "
+            f"with exit code {process.returncode}"
+        )
+
+
 class RunConfig(BaseNeMoGymCLIConfig):
     """
     Start NeMo Gym servers for agents, models, and resources.
@@ -218,6 +227,7 @@ class RunHelper:  # pragma: no cover
             if global_config_dict[DRY_RUN_KEY_NAME]:
                 print("DRY_RUN enabled: setup commands are run serially")
                 process.communicate()
+                _raise_for_failed_dry_run(top_level_path, process)
 
             host = server_config_dict.get("host")
             port = server_config_dict.get("port")
