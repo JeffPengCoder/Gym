@@ -936,6 +936,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                         "'nemotron_v3_nano_omni_agent'"
                     )
                 effective_agent_kwargs["training_mode"] = True
+                effective_agent_kwargs["training_turn_strategy"] = self.config.training_turn_strategy
                 effective_agent_kwargs.setdefault("parse_retries", 1)
 
             runner_kwargs: Dict[str, Any] = {
@@ -1047,6 +1048,26 @@ def _build_response(
         if training_mode and training_turn_strategy == "last"
         else None
     )
+    last_prompt_step_start = 0
+    if last_training_step_idx is not None and steps:
+        last_agent_info = (steps[last_training_step_idx].get("info") or {}).get("agent") or {}
+        last_training = last_agent_info.get("training")
+        if isinstance(last_training, Mapping):
+            prompt_user_message_count = last_training.get("prompt_user_message_count")
+            if prompt_user_message_count is not None:
+                if (
+                    isinstance(prompt_user_message_count, bool)
+                    or not isinstance(prompt_user_message_count, int)
+                    or prompt_user_message_count < 1
+                ):
+                    raise ValueError(
+                        "OSWorld training trajectory prompt_user_message_count "
+                        "must be a positive integer"
+                    )
+                last_prompt_step_start = max(
+                    0,
+                    last_training_step_idx - prompt_user_message_count + 1,
+                )
     seen_token_ids: List[int] = []
     for step_idx, step in enumerate(steps):
         if not training_mode:
@@ -1077,6 +1098,12 @@ def _build_response(
         model_response = training.get("response")
         if not isinstance(user_message, Mapping) or not isinstance(model_response, Mapping):
             raise ValueError("OSWorld training trajectory payload has invalid user/response fields")
+
+        # For last-turn training, only return the user images that were present
+        # in the final bounded prompt. NeMo RL uses these items to construct
+        # multimodal tensors for the authoritative final prompt_token_ids.
+        if last_training_step_idx is not None and step_idx < last_prompt_step_start:
+            continue
 
         response_content: List[Dict[str, Any]] = []
         for part in user_message.get("content") or []:
