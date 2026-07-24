@@ -34,6 +34,7 @@ from nemo_gym.cli.env import (
     RunConfig,
     RunHelper,
     TestConfig,
+    _raise_for_failed_dry_run,
     _resolve_server_dir,
     _select_shard,
     dump_config,
@@ -79,6 +80,16 @@ class TestSelectShard:
         paths = [Path("resources_servers/s0")]
         with raises(AssertionError):
             _select_shard(paths, shard_index=4, num_shards=4)
+
+
+def test_failed_dry_run_setup_is_not_silently_accepted() -> None:
+    process = MagicMock(returncode=1)
+    with raises(RuntimeError, match=r"osworld_agent.*exit code 1"):
+        _raise_for_failed_dry_run("osworld_agent", process)
+
+
+def test_successful_dry_run_setup_is_accepted() -> None:
+    _raise_for_failed_dry_run("osworld_agent", MagicMock(returncode=0))
 
 
 # TODO: Eventually we want to add more tests to ensure that the CLI flows do not break

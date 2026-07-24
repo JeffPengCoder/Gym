@@ -53,6 +53,58 @@ class TestCLISetupCommandSetupEnvCommand:
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
+    def test_server_local_uv_settings(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        overrides_path = server_dir / "uv-overrides.txt"
+        overrides_path.write_text("torch==2.11.0\n")
+        (server_dir / "uv-torch-backend.txt").write_text("cpu\n")
+        (server_dir / "uv-python-version.txt").write_text("3.12\n")
+        (server_dir / "uv-managed-python.txt").write_text("true\n")
+
+        actual_command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict(tmp_path),
+            prefix="osworld agent",
+        )
+
+        assert f"--overrides {overrides_path}" in actual_command
+        assert "--torch-backend cpu" in actual_command
+        assert "--managed-python --python 3.12" in actual_command
+        assert actual_command.index("--overrides") < actual_command.index("-r requirements.txt")
+
+    def test_rejects_empty_server_python_version(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        (server_dir / "uv-python-version.txt").write_text("\n")
+
+        with raises(RuntimeError, match="Empty Python version"):
+            setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="osworld agent",
+            )
+
+    def test_rejects_invalid_managed_python_setting(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        (server_dir / "uv-managed-python.txt").write_text("yes\n")
+
+        with raises(RuntimeError, match="Expected 'true'"):
+            setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="osworld agent",
+            )
+
+    def test_rejects_invalid_server_torch_backend(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        (server_dir / "uv-torch-backend.txt").write_text("cuda-whatever\n")
+
+        with raises(RuntimeError, match="Invalid Torch backend"):
+            setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="osworld agent",
+            )
+
     def test_skips_install_when_venv_present(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
 
