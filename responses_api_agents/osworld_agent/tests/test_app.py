@@ -647,6 +647,7 @@ def test_build_training_response_defaults_to_last_turn_for_reasoning_models() ->
                                     }
                                 ],
                             },
+                            "prompt_user_message_count": 1,
                             "response": {
                                 "raw_content": "first",
                                 "prompt_token_ids": [1],
@@ -671,6 +672,7 @@ def test_build_training_response_defaults_to_last_turn_for_reasoning_models() ->
                                     }
                                 ],
                             },
+                            "prompt_user_message_count": 1,
                             "response": {
                                 "raw_content": "last",
                                 "prompt_token_ids": [9, 8],
@@ -687,13 +689,64 @@ def test_build_training_response_defaults_to_last_turn_for_reasoning_models() ->
     response = _build_response(request, result, "test-policy", 1.0, 0.9, training_mode=True)
     output = [item.model_dump(exclude_none=True) for item in response.response.output]
 
-    assert [item["role"] for item in output] == ["user", "user", "assistant"]
-    assert [item["content"][0]["image_url"] for item in output[:-1]] == [
-        "data:image/png;base64,Zmlyc3Q=",
-        "data:image/png;base64,bGFzdA==",
-    ]
+    assert [item["role"] for item in output] == ["user", "assistant"]
+    assert output[0]["content"][0]["image_url"] == "data:image/png;base64,bGFzdA=="
     assert output[-1]["content"][0]["text"] == "last"
     assert output[-1]["prompt_token_ids"] == [9, 8]
+
+
+def test_build_last_training_turn_returns_only_final_prompt_image_window() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    steps = []
+    for index in range(4):
+        training = {
+            "new_user_message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,aW1hZ2U{index + 1}="
+                        },
+                    }
+                ],
+            },
+            "response": {
+                "raw_content": f"step {index + 1}",
+                "prompt_token_ids": [10, index],
+                "generation_token_ids": [20 + index],
+                "generation_log_probs": [-0.1],
+            },
+        }
+        if index == 3:
+            training["prompt_user_message_count"] = 3
+        steps.append(
+            {
+                "step": index,
+                "info": {"agent": {"training": training}},
+            }
+        )
+
+    result = {**DEFAULT_RUN_RESULT, "steps": steps}
+    response = _build_response(
+        request,
+        result,
+        "test-policy",
+        1.0,
+        0.9,
+        training_mode=True,
+        training_turn_strategy="last",
+    )
+    output = [item.model_dump(exclude_none=True) for item in response.response.output]
+
+    assert [item["role"] for item in output] == ["user", "user", "user", "assistant"]
+    assert [item["content"][0]["image_url"] for item in output[:-1]] == [
+        "data:image/png;base64,aW1hZ2U2=",
+        "data:image/png;base64,aW1hZ2U3=",
+        "data:image/png;base64,aW1hZ2U4=",
+    ]
+    assert output[-1]["content"][0]["text"] == "step 4"
+    assert output[-1]["generation_token_ids"] == [23]
 
 
 def test_build_all_training_turns_rejects_noncontiguous_tokens() -> None:

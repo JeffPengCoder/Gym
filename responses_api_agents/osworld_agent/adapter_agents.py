@@ -463,6 +463,7 @@ class NemotronV3NanoOmniAgent:
         repeated_action_warning_threshold: int = 0,
         repeated_action_window: int = 12,
         training_mode: bool = False,
+        training_turn_strategy: str = "last",
         log_context: Mapping[str, Any] | None = None,
         **_kwargs: Any,
     ) -> None:
@@ -490,6 +491,9 @@ class NemotronV3NanoOmniAgent:
         self.training_mode = bool(training_mode)
         if self.training_mode and self.parse_retries != 1:
             raise ValueError("Nemotron training_mode currently requires parse_retries=1")
+        if training_turn_strategy not in {"last", "all"}:
+            raise ValueError("training_turn_strategy must be 'last' or 'all'")
+        self.training_turn_strategy = training_turn_strategy
         self.parse_error_feedback = bool(parse_error_feedback)
         self.parse_retry_temperature = (
             None if parse_retry_temperature is None else max(0.0, float(parse_retry_temperature))
@@ -587,7 +591,12 @@ class NemotronV3NanoOmniAgent:
         return "\n\n".join(guidance)
 
     def _messages(self, instruction: str, obs: Dict[str, Any]) -> List[Dict[str, Any]]:
-        if self.training_mode:
+        # Training the last turn does not require every prior screenshot to
+        # remain in the prompt. Reuse the benchmark's bounded image window
+        # below, while retaining the sampled token/logprob payload separately.
+        # The all-turn strategy still needs append-only raw messages so each
+        # trainable assistant turn remains token-contiguous with the next.
+        if self.training_mode and self.training_turn_strategy == "all":
             messages = (
                 list(self.training_messages)
                 if self.training_messages
@@ -734,6 +743,9 @@ class NemotronV3NanoOmniAgent:
                     # validation loses the terminal FAIL trajectory.
                     parsed_info["training"] = {
                         "new_user_message": request_messages[-1],
+                        "prompt_user_message_count": sum(
+                            message.get("role") == "user" for message in request_messages
+                        ),
                         "response": dict(response),
                     }
                 content, _reasoning = _response_parts(response)
@@ -802,7 +814,7 @@ class NemotronV3NanoOmniAgent:
             return last_error, ["FAIL"], parsed_info
 
         actions = [self._scale_windows_scroll(action) for action in actions]
-        if self.training_mode:
+        if self.training_mode and self.training_turn_strategy == "all":
             training = parsed_info["training"]
             self.training_messages = [
                 *request_messages,
