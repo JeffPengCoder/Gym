@@ -76,6 +76,25 @@ def _http_origin(host: str, port: int) -> str:
     return f"http://{formatted_host}:{port}"
 
 
+def _uses_remote_docker_daemon() -> bool:
+    """Return whether Docker bind mounts and devices resolve on another host."""
+
+    explicit = os.environ.get("OSWORLD_DOCKER_REMOTE", "").strip().lower()
+    if explicit:
+        if explicit in {"1", "true", "yes"}:
+            return True
+        if explicit in {"0", "false", "no"}:
+            return False
+        raise ValueError(
+            "OSWORLD_DOCKER_REMOTE must be one of 1/true/yes or 0/false/no"
+        )
+
+    docker_host = os.environ.get("DOCKER_HOST", "").strip()
+    if not docker_host:
+        return False
+    return urlsplit(docker_host).scheme.lower() not in {"", "unix", "npipe"}
+
+
 class GymSandboxDesktopProvider:
     """Implement OSWorld's provider contract with one Gym Docker Sandbox per VM."""
 
@@ -119,9 +138,14 @@ class GymSandboxDesktopProvider:
         if os_type.lower() not in {"ubuntu", "linux"}:
             raise ValueError(f"Gym Sandbox OSWorld adapter currently supports Ubuntu only, got {os_type!r}")
         vm_path = os.path.realpath(os.path.abspath(os.path.expanduser(path_to_vm)))
-        if not os.path.isfile(vm_path) or not os.access(vm_path, os.R_OK):
+        remote_docker = _uses_remote_docker_daemon()
+        if not remote_docker and (not os.path.isfile(vm_path) or not os.access(vm_path, os.R_OK)):
             raise FileNotFoundError(f"OSWorld base qcow2 is not readable: {vm_path}")
-        if self._require_kvm and (not os.path.exists("/dev/kvm") or not os.access("/dev/kvm", os.R_OK | os.W_OK)):
+        if (
+            self._require_kvm
+            and not remote_docker
+            and (not os.path.exists("/dev/kvm") or not os.access("/dev/kvm", os.R_OK | os.W_OK))
+        ):
             raise RuntimeError("OSWorld Gym Sandbox requires readable/writable /dev/kvm")
 
         values = copy.deepcopy(self._sandbox_spec)

@@ -72,6 +72,14 @@ _OSWORLD_LOG_CONTEXT_FIELDS = (
 _MODEL_LOG_CONTEXT_HEADERS = {
     field: f"x-nemo-gym-log-{field.replace('_', '-')}" for field in _OSWORLD_LOG_CONTEXT_FIELDS
 }
+_ROLLOUT_DIAGNOSTIC_ENV_VARS = (
+    "NEMO_GYM_RESPONSE_LOGGING",
+    "OSWORLD_MODEL_IO_LOG",
+    "OSWORLD_RUN_ID",
+    "OSWORLD_TASK_ARTIFACT_ROOT",
+    "OSWORLD_VM_EXEC_LOG",
+    "RUN_TAG",
+)
 
 
 def _normalize_log_context(context: Mapping[str, Any] | None) -> Dict[str, Any]:
@@ -241,6 +249,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     require_a11y_tree: bool = False
     client_password: str = "password"
     enable_proxy: bool = False
+    allow_direct_proxy_tasks: bool = False
     proxy_config_file: Optional[str] = None
     resources_server_token_env: str = "OSWORLD_RESOURCES_TOKEN"
     resources_request_timeout: float = Field(default=900.0, gt=0)
@@ -257,10 +266,12 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     top_p: Optional[float] = 0.9  # set to null in yaml when running a reasoning model that rejects top_p
     mem_limit_mb: int = 0  # the upstream Docker provider owns QEMU/container limits
     step_timeout: int = 60  # per-action subprocess timeout (forwarded to provider; advisory in client.py)
-    task_timeout: int = 1800  # whole-rollout wall-clock cap; trips mask_sample=True
+    task_timeout: int = 1800  # cooperative rollout deadline; Pointer model calls share it
     docker_port_lock_timeout: float = Field(default=300.0, gt=0)  # concurrent Docker VM port allocation
     evaluator_disable_gpu: bool = True
     reward_mode: Literal["binary", "raw"] = "binary"
+    training_mode: bool = False
+    training_turn_strategy: Literal["last", "all"] = "last"
     runner_name: str = DEFAULT_RUNNER_NAME
     action_space: Optional[str] = None
     observation_type: Optional[str] = None
@@ -576,7 +587,8 @@ def _normalize_chat_content(content: Any, *, _depth: int = 0) -> str:
 def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
     """Normalize OpenAI native tool calls for text-protocol OSWorld agents."""
 
-    content = _normalize_chat_content(message.content or "")
+    raw_content = message.content or ""
+    content = _normalize_chat_content(raw_content)
 
     # Tool-aware vLLM deployments can return native OpenAI tool_calls even
     # when the OSWorld agent scaffold expects textual <tool_call> blocks.
@@ -616,7 +628,23 @@ def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
                 reasoning = think_match.group(1).strip()
                 content = content[think_match.end() :]
         content = _normalize_chat_content(content)
-        return {"content": content, "reasoning_content": reasoning}
+        normalized = {
+            "content": content,
+            "reasoning_content": reasoning,
+            "raw_content": raw_content,
+        }
+        for field in (
+            "prompt_token_ids",
+            "generation_token_ids",
+            "generation_log_probs",
+            "routed_experts",
+        ):
+            value = getattr(message, field, None)
+            if value is None:
+                value = model_extra.get(field)
+            if value is not None:
+                normalized[field] = value
+        return normalized
     return content
 
 
@@ -800,6 +828,10 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             try:
                 requires_proxy = task_requires_proxy(task_config)
                 enable_proxy = parse_env_bool("OSWORLD_ENABLE_PROXY", self.config.enable_proxy)
+                allow_direct_proxy_tasks = parse_env_bool(
+                    "OSWORLD_ALLOW_DIRECT_PROXY_TASKS",
+                    self.config.allow_direct_proxy_tasks,
+                )
             except ValueError as exc:
                 return _empty_response(
                     body,
@@ -813,7 +845,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 # A remote Resources Server owns its proxy configuration; do
                 # not leak a control-plane path into the environment plane.
                 proxy_config_file = None
-            if requires_proxy and not enable_proxy:
+            if requires_proxy and not enable_proxy and not allow_direct_proxy_tasks:
                 return _empty_response(
                     body,
                     error=("ProxyRequiredButDisabled: task requires a proxy, but OSWORLD_ENABLE_PROXY is disabled"),
@@ -822,7 +854,21 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     proxy_enabled=False,
                     proxy_configured=bool(proxy_config_file),
                 )
-            if requires_proxy and not remote_resources:
+            if requires_proxy and not enable_proxy and allow_direct_proxy_tasks:
+                if remote_resources:
+                    return _empty_response(
+                        body,
+                        error=(
+                            "ProxyConfigurationError: direct proxy task mode is not supported "
+                            "by the remote Resources Server"
+                        ),
+                        termination_reason="proxy_configuration_error",
+                        proxy_required=True,
+                        proxy_enabled=False,
+                        proxy_configured=False,
+                    )
+                proxy_config_file = None
+            if requires_proxy and enable_proxy and not remote_resources:
                 try:
                     proxy_config_file = inspect_proxy_config_file(proxy_config_file).path
                 except ValueError as exc:
@@ -882,6 +928,16 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 }
             )
 
+            effective_agent_kwargs = dict(self.config.agent_kwargs)
+            if self.config.training_mode:
+                if self.config.runner_name != "nemotron_v3_nano_omni_agent":
+                    raise ValueError(
+                        "OSWorld training_mode currently requires runner_name="
+                        "'nemotron_v3_nano_omni_agent'"
+                    )
+                effective_agent_kwargs["training_mode"] = True
+                effective_agent_kwargs.setdefault("parse_retries", 1)
+
             runner_kwargs: Dict[str, Any] = {
                 "provider_name": self.config.provider_name,
                 "container_image": self.config.container_image,
@@ -890,6 +946,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "require_a11y_tree": self.config.require_a11y_tree,
                 "client_password": self.config.client_password,
                 "enable_proxy": enable_proxy,
+                "allow_direct_proxy_tasks": allow_direct_proxy_tasks,
                 "proxy_config_file": proxy_config_file,
                 "resources_server_url": resources_server_url,
                 "resources_server_auth_token": os.environ.get(
@@ -929,13 +986,24 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "observation_type": self.config.observation_type,
                 "env_class_path": self.config.env_class_path,
                 "agent_class_path": self.config.agent_class_path,
-                "agent_kwargs": self.config.agent_kwargs,
+                "agent_kwargs": effective_agent_kwargs,
                 "log_context": log_context,
             }
 
             try:
+                # Child Ray tasks do not reliably inherit the NemoGym actor's
+                # runtime environment. Forward diagnostic paths explicitly so
+                # parse failures retain their model I/O and task trajectory.
+                rollout_env = {
+                    name: os.environ[name]
+                    for name in _ROLLOUT_DIAGNOSTIC_ENV_VARS
+                    if os.environ.get(name)
+                }
+                runtime_env: Dict[str, Any] = {"py_executable": sys.executable}
+                if rollout_env:
+                    runtime_env["env_vars"] = rollout_env
                 future = _run_osworld_task_remote.options(
-                    runtime_env={"py_executable": sys.executable},
+                    runtime_env=runtime_env,
                 ).remote(task_config, runner_kwargs)
                 result_dict: Dict[str, Any] = await asyncio.to_thread(ray.get, future)
             except Exception as exc:  # noqa: BLE001
@@ -949,7 +1017,15 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             result_dict["proxy_enabled"] = enable_proxy
             result_dict["proxy_configured"] = bool(proxy_config_file)
 
-            return _build_response(body, result_dict, policy_model_name, temperature, top_p)
+            return _build_response(
+                body,
+                result_dict,
+                policy_model_name,
+                temperature,
+                top_p,
+                training_mode=self.config.training_mode,
+                training_turn_strategy=self.config.training_turn_strategy,
+            )
 
 
 def _build_response(
@@ -958,30 +1034,114 @@ def _build_response(
     policy_model_name: str,
     temperature: float,
     top_p: Optional[float],
+    *,
+    training_mode: bool = False,
+    training_turn_strategy: Literal["last", "all"] = "last",
 ) -> OSWorldVerifyResponse:
     """Pack the OSWorld rollout into the shape the verify pipeline expects."""
+
+    output: List[Dict[str, Any]] = []
+    steps = result.get("steps", [])
+    last_training_step_idx = (
+        len(steps) - 1
+        if training_mode and training_turn_strategy == "last"
+        else None
+    )
+    seen_token_ids: List[int] = []
+    for step_idx, step in enumerate(steps):
+        if not training_mode:
+            output.append(
+                {
+                    "id": f"msg-step-{step['step']}",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "annotations": [],
+                            "text": step["model_text"],
+                        }
+                    ],
+                }
+            )
+            continue
+
+        agent_info = (step.get("info") or {}).get("agent") or {}
+        training = agent_info.get("training")
+        if not isinstance(training, Mapping):
+            raise ValueError(
+                f"OSWorld training_mode step {step.get('step')} has no training trajectory payload"
+            )
+        user_message = training.get("new_user_message")
+        model_response = training.get("response")
+        if not isinstance(user_message, Mapping) or not isinstance(model_response, Mapping):
+            raise ValueError("OSWorld training trajectory payload has invalid user/response fields")
+
+        response_content: List[Dict[str, Any]] = []
+        for part in user_message.get("content") or []:
+            if not isinstance(part, Mapping):
+                continue
+            if part.get("type") == "text":
+                response_content.append({"type": "input_text", "text": str(part.get("text") or "")})
+            elif part.get("type") == "image_url":
+                image_url = part.get("image_url")
+                url = image_url.get("url") if isinstance(image_url, Mapping) else image_url
+                response_content.append(
+                    {"type": "input_image", "image_url": str(url or ""), "detail": "high"}
+                )
+        output.append({"type": "message", "role": "user", "content": response_content})
+
+        # The last-turn strategy keeps the final assistant response's complete
+        # prompt token IDs. Preserve every user image referenced by that prompt
+        # while omitting the earlier assistant responses from training. NeMo RL
+        # accumulates these user images until it reaches the one trainable
+        # assistant item.
+        if last_training_step_idx is not None and step_idx != last_training_step_idx:
+            continue
+
+        required = ("prompt_token_ids", "generation_token_ids", "generation_log_probs")
+        missing = [field for field in required if model_response.get(field) is None]
+        if missing:
+            raise ValueError(
+                "OSWorld training trajectory response is missing required fields: "
+                + ", ".join(missing)
+            )
+        prompt_token_ids = [int(token_id) for token_id in model_response["prompt_token_ids"]]
+        generation_token_ids = [
+            int(token_id) for token_id in model_response["generation_token_ids"]
+        ]
+        if prompt_token_ids[: len(seen_token_ids)] != seen_token_ids:
+            raise ValueError(
+                f"OSWorld training trajectory is not token-contiguous at step {step.get('step')}"
+            )
+        assistant_item: Dict[str, Any] = {
+            "id": f"msg-step-{step['step']}",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "annotations": [],
+                    "text": str(model_response.get("raw_content") or ""),
+                }
+            ],
+            "prompt_token_ids": prompt_token_ids,
+            "generation_token_ids": generation_token_ids,
+            "generation_log_probs": model_response["generation_log_probs"],
+        }
+        if model_response.get("routed_experts") is not None:
+            assistant_item["routed_experts"] = model_response["routed_experts"]
+        output.append(assistant_item)
+        seen_token_ids = [*prompt_token_ids, *generation_token_ids]
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
         "created_at": 0.0,
         "model": policy_model_name,
         "object": "response",
-        "output": [
-            {
-                "id": f"msg-step-{step['step']}",
-                "type": "message",
-                "role": "assistant",
-                "status": "completed",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "annotations": [],
-                        "text": step["model_text"],
-                    }
-                ],
-            }
-            for step in result.get("steps", [])
-        ],
+        "output": output,
         "parallel_tool_calls": True,
         "tool_choice": "auto",
         "tools": [],

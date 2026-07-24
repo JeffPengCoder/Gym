@@ -28,6 +28,7 @@ from responses_api_agents.osworld_agent.app import (
     OSWorldVerifyResponse,
     _append_model_io,
     _build_messages_model_fn,
+    _build_response,
     _log_context_headers,
     _model_io_images,
     _normalize_chat_message,
@@ -223,6 +224,28 @@ def test_normalize_chat_message_preserves_reasoning_and_native_tool_calls() -> N
     assert "<tool_call>" in normalized["content"]
     assert '"name": "computer_use"' in normalized["content"]
     assert '"coordinate": [500, 250]' in normalized["content"]
+
+
+def test_normalize_chat_message_preserves_training_metadata_from_model_extra() -> None:
+    raw_content = (
+        "<think>Inspect the screenshot.</think>## Action:\nClick.\n## Code:\n```python\npyautogui.click(1, 2)\n```"
+    )
+    message = SimpleNamespace(
+        content=raw_content,
+        tool_calls=[],
+        model_extra={
+            "prompt_token_ids": [10, 11],
+            "generation_token_ids": [20, 21],
+            "generation_log_probs": [-0.1, -0.2],
+        },
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["raw_content"] == raw_content
+    assert normalized["prompt_token_ids"] == [10, 11]
+    assert normalized["generation_token_ids"] == [20, 21]
+    assert normalized["generation_log_probs"] == [-0.1, -0.2]
 
 
 def test_normalize_chat_message_recovers_vllm_wrapped_reasoning() -> None:
@@ -452,6 +475,279 @@ def make_run_request(
     )
 
 
+def test_build_training_response_interleaves_images_and_trainable_turns() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "steps": [
+            {
+                "step": 0,
+                "model_text": "normalized action",
+                "info": {
+                    "agent": {
+                        "training": {
+                            "new_user_message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": "data:image/png;base64,YWJj"},
+                                    },
+                                    {"type": "text", "text": "Step 1"},
+                                ],
+                            },
+                            "response": {
+                                "raw_content": "<think>inspect</think>action one",
+                                "prompt_token_ids": [10, 11],
+                                "generation_token_ids": [20, 21],
+                                "generation_log_probs": [-0.1, -0.2],
+                            },
+                        }
+                    }
+                },
+            },
+            {
+                "step": 1,
+                "model_text": "normalized done",
+                "info": {
+                    "agent": {
+                        "training": {
+                            "new_user_message": {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "Step 2"},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": "data:image/png;base64,ZGVm"},
+                                    },
+                                ],
+                            },
+                            "response": {
+                                "raw_content": "<think>verify</think>done",
+                                "prompt_token_ids": [10, 11, 20, 21, 30],
+                                "generation_token_ids": [40],
+                                "generation_log_probs": [-0.3],
+                            },
+                        }
+                    }
+                },
+            },
+        ],
+    }
+
+    response = _build_response(
+        request,
+        result,
+        "test-policy",
+        1.0,
+        0.9,
+        training_mode=True,
+        training_turn_strategy="all",
+    )
+    output = [item.model_dump(exclude_none=True) for item in response.response.output]
+
+    assert [item["role"] for item in output] == ["user", "assistant", "user", "assistant"]
+    assert output[0]["content"][0]["type"] == "input_image"
+    assert output[0]["content"][0]["image_url"] == "data:image/png;base64,YWJj"
+    assert output[1]["content"][0]["text"] == "<think>inspect</think>action one"
+    assert output[1]["prompt_token_ids"] == [10, 11]
+    assert output[1]["generation_token_ids"] == [20, 21]
+    assert output[3]["prompt_token_ids"][:4] == [10, 11, 20, 21]
+
+
+def test_build_training_response_rejects_missing_token_metadata() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "steps": [
+            {
+                "step": 0,
+                "info": {
+                    "agent": {
+                        "training": {
+                            "new_user_message": {"role": "user", "content": []},
+                            "response": {"raw_content": "action"},
+                        }
+                    }
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="missing required fields"):
+        _build_response(request, result, "test-policy", 1.0, 0.9, training_mode=True)
+
+
+def test_build_training_response_accepts_terminal_malformed_sample() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "reward": 0.0,
+        "score": 0.0,
+        "termination_reason": "agent_fail",
+        "steps": [
+            {
+                "step": 0,
+                "model_text": "Invalid Python action: unexpected EOF",
+                "actions": ["FAIL"],
+                "info": {
+                    "agent": {
+                        "training": {
+                            "new_user_message": {
+                                "role": "user",
+                                "content": [{"type": "text", "text": "Step 1"}],
+                            },
+                            "response": {
+                                "raw_content": "pyautogui.write('truncated",
+                                "prompt_token_ids": [10, 11],
+                                "generation_token_ids": [20, 21],
+                                "generation_log_probs": [-0.1, -0.2],
+                            },
+                        }
+                    }
+                },
+            }
+        ],
+    }
+
+    response = _build_response(
+        request,
+        result,
+        "test-policy",
+        1.0,
+        0.9,
+        training_mode=True,
+        training_turn_strategy="last",
+    )
+    output = [item.model_dump(exclude_none=True) for item in response.response.output]
+
+    assert response.reward == 0.0
+    assert response.mask_sample is False
+    assert response.verifier_metadata["osworld_termination_reason"] == "agent_fail"
+    assert output[-1]["content"][0]["text"] == "pyautogui.write('truncated"
+    assert output[-1]["generation_token_ids"] == [20, 21]
+
+
+def test_build_training_response_defaults_to_last_turn_for_reasoning_models() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "steps": [
+            {
+                "step": 0,
+                "info": {
+                    "agent": {
+                        "training": {
+                            "new_user_message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": "data:image/png;base64,Zmlyc3Q="},
+                                    }
+                                ],
+                            },
+                            "response": {
+                                "raw_content": "first",
+                                "prompt_token_ids": [1],
+                                "generation_token_ids": [2],
+                                "generation_log_probs": [-0.1],
+                            },
+                        }
+                    }
+                },
+            },
+            {
+                "step": 1,
+                "info": {
+                    "agent": {
+                        "training": {
+                            "new_user_message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": "data:image/png;base64,bGFzdA=="},
+                                    }
+                                ],
+                            },
+                            "response": {
+                                "raw_content": "last",
+                                "prompt_token_ids": [9, 8],
+                                "generation_token_ids": [7],
+                                "generation_log_probs": [-0.2],
+                            },
+                        }
+                    }
+                },
+            },
+        ],
+    }
+
+    response = _build_response(request, result, "test-policy", 1.0, 0.9, training_mode=True)
+    output = [item.model_dump(exclude_none=True) for item in response.response.output]
+
+    assert [item["role"] for item in output] == ["user", "user", "assistant"]
+    assert [item["content"][0]["image_url"] for item in output[:-1]] == [
+        "data:image/png;base64,Zmlyc3Q=",
+        "data:image/png;base64,bGFzdA==",
+    ]
+    assert output[-1]["content"][0]["text"] == "last"
+    assert output[-1]["prompt_token_ids"] == [9, 8]
+
+
+def test_build_all_training_turns_rejects_noncontiguous_tokens() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "steps": [
+            {
+                "step": 0,
+                "info": {
+                    "agent": {
+                        "training": {
+                            "new_user_message": {"role": "user", "content": []},
+                            "response": {
+                                "raw_content": "first",
+                                "prompt_token_ids": [1],
+                                "generation_token_ids": [2],
+                                "generation_log_probs": [-0.1],
+                            },
+                        }
+                    }
+                },
+            },
+            {
+                "step": 1,
+                "info": {
+                    "agent": {
+                        "training": {
+                            "new_user_message": {"role": "user", "content": []},
+                            "response": {
+                                "raw_content": "second",
+                                "prompt_token_ids": [1, 99],
+                                "generation_token_ids": [3],
+                                "generation_log_probs": [-0.2],
+                            },
+                        }
+                    }
+                },
+            },
+        ],
+    }
+
+    with pytest.raises(ValueError, match="not token-contiguous"):
+        _build_response(
+            request,
+            result,
+            "test-policy",
+            1.0,
+            0.9,
+            training_mode=True,
+            training_turn_strategy="all",
+        )
+
+
 def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict):
     mock_client = MagicMock()
     mock_client.global_config_dict = {
@@ -626,6 +922,39 @@ class TestApp:
             "domain": "chrome",
             "task_attempt": 1,
         }
+        runtime_env = mock_remote.options.call_args.kwargs["runtime_env"]
+        assert runtime_env["py_executable"]
+        assert runtime_env["env_vars"]["RUN_TAG"] == "run-001"
+
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_run_forwards_rollout_diagnostic_paths_to_ray_child(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        monkeypatch,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", "/workspace/output/r6f/osworld-model-io.jsonl")
+        monkeypatch.setenv("OSWORLD_TASK_ARTIFACT_ROOT", "/workspace/output/r6f/osworld-tasks")
+        monkeypatch.setenv("OSWORLD_VM_EXEC_LOG", "/workspace/output/r6f/osworld-vm-exec.jsonl")
+        mock_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        runtime_env = mock_remote.options.call_args.kwargs["runtime_env"]
+        expected_env = {
+            "OSWORLD_MODEL_IO_LOG": "/workspace/output/r6f/osworld-model-io.jsonl",
+            "OSWORLD_TASK_ARTIFACT_ROOT": "/workspace/output/r6f/osworld-tasks",
+            "OSWORLD_VM_EXEC_LOG": "/workspace/output/r6f/osworld-vm-exec.jsonl",
+        }
+        assert {name: runtime_env["env_vars"][name] for name in expected_env} == expected_env
 
     @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
@@ -689,6 +1018,54 @@ class TestApp:
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
+    async def test_proxy_required_task_can_run_directly_when_explicitly_allowed(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        monkeypatch,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        monkeypatch.setenv("OSWORLD_ALLOW_DIRECT_PROXY_TASKS", "1")
+        monkeypatch.setenv("PROXY_CONFIG_FILE", "/unused/proxy.json")
+        mock_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+        task = {**DEFAULT_OSWORLD_TASK, "proxy": True}
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+
+        response = await agent.run(make_run_request(osworld_task=task))
+
+        positional_args, _ = mock_remote.options.return_value.remote.call_args
+        assert positional_args[1]["enable_proxy"] is False
+        assert positional_args[1]["allow_direct_proxy_tasks"] is True
+        assert positional_args[1]["proxy_config_file"] is None
+        assert response.mask_sample is False
+        assert response.verifier_metadata["osworld_proxy_required"] is True
+        assert response.verifier_metadata["osworld_proxy_enabled"] is False
+
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    async def test_direct_proxy_mode_rejects_remote_resources_before_ray(self, mock_remote) -> None:
+        task = {**DEFAULT_OSWORLD_TASK, "proxy": True}
+        agent = OSWorldAgent(
+            config=make_config(
+                allow_direct_proxy_tasks=True,
+                resources_server={"type": "resources_servers", "name": "osworld_resources"},
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = await agent.run(make_run_request(osworld_task=task))
+
+        assert response.mask_sample is True
+        assert response.verifier_metadata["osworld_termination_reason"] == "proxy_configuration_error"
+        assert "remote Resources Server" in response.verifier_metadata["osworld_error"]
+        mock_remote.options.assert_not_called()
+
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
     async def test_proxy_enable_env_validates_and_reaches_ray(
         self,
         mock_to_thread,
@@ -720,6 +1097,15 @@ class TestApp:
 
     async def test_invalid_proxy_env_value_is_masked(self, monkeypatch) -> None:
         monkeypatch.setenv("OSWORLD_ENABLE_PROXY", "sometimes")
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+
+        response = await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        assert response.mask_sample is True
+        assert response.verifier_metadata["osworld_termination_reason"] == "proxy_configuration_error"
+
+    async def test_invalid_direct_proxy_env_value_is_masked(self, monkeypatch) -> None:
+        monkeypatch.setenv("OSWORLD_ALLOW_DIRECT_PROXY_TASKS", "sometimes")
         agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
 
         response = await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))

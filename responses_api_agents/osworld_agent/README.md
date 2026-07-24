@@ -124,7 +124,9 @@ Environment and execution:
   `sandbox_ready_poll_s` control the OSWorld Sandbox startup gate.
 - `concurrency` limits simultaneous `/run` requests.
 - `max_steps`, `sleep_after_execution`, `step_timeout`, and `task_timeout`
-  bound rollout work.
+  bound rollout work. `task_timeout` is checked between steps and applied to
+  Pointer model requests; deployment orchestration must bound other lifecycle
+  operations such as environment reset and evaluation.
 - `cache_dir` is OSWorld's mutable per-run cache; `setup_cache_dir` points to
   the read-only cache populated by benchmark preparation.
 
@@ -144,7 +146,8 @@ Evaluation and operations:
 - `evaluator_disable_gpu` prevents evaluator helpers from reserving rollout
   GPU memory.
 - `enable_proxy` and `proxy_config_file` apply only to tasks explicitly marked
-  `proxy: true`.
+  `proxy: true`. `allow_direct_proxy_tasks` explicitly attempts those tasks
+  without a proxy on local and Gym Sandbox backends.
 - `asset_input_jsonl` lets server startup idempotently fill missing prepared
   assets before accepting work.
 

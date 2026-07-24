@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, List
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -23,6 +24,15 @@ class FakeController:
     def __init__(self) -> None:
         self.started = 0
         self.ended_paths: List[str] = []
+        self.setup_commands: List[Dict[str, Any]] = []
+
+    def _execute_setup(self, command: List[str], **kwargs: Any) -> Dict[str, Any]:
+        self.setup_commands.append({"command": command, **kwargs})
+        return {
+            "returncode": 0,
+            "output": osworld_client._IDLE_INHIBITOR_OK,
+            "error": "",
+        }
 
     def start_recording(self) -> None:
         self.started += 1
@@ -39,6 +49,7 @@ class FakeEnv:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.controller = FakeController()
+        self.setup_controller = self.controller
         self.vm_ip = "127.0.0.1"
         self.actions: List[Any] = []
         FakeEnv.instances.append(self)
@@ -331,6 +342,59 @@ def test_gym_policy_runner_preserves_existing_pyautogui_flow(monkeypatch) -> Non
     assert FakeEnv.instances[0].actions == ["DONE"]
 
 
+def test_guest_idle_inhibitor_uses_non_login_shell_without_changing_settings() -> None:
+    controller = FakeController()
+
+    osworld_client._install_guest_idle_inhibitor(controller, osworld_client.LOG)
+
+    script = osworld_client._IDLE_INHIBITOR_SCRIPT
+    assert 'DBUS_SESSION_BUS_ADDRESS="unix:path=$bus_path"' in script
+    assert "gnome-session-inhibit" in script
+    assert "--inhibit idle" in script
+    assert "org.gnome.SessionManager.IsInhibited 8" in script
+    assert "gsettings" not in script
+    assert controller.setup_commands == [
+        {
+            "command": ["/bin/bash", "-c", script],
+            "expected_returncodes": [0],
+        }
+    ]
+
+
+def test_guest_idle_inhibitor_failure_aborts_before_pointer_starts(monkeypatch, tmp_path: Path) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setenv("OSWORLD_POINTER_RESULTS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        FakeController,
+        "_execute_setup",
+        lambda self, command, **kwargs: {
+            "returncode": 20,
+            "output": "",
+            "error": "DBus user session is unavailable",
+        },
+    )
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-idle-inhibitor", "instruction": "Use Pointer."},
+        model_fn=lambda *_args: pytest.fail("model must not run"),
+        runner_name="pointer_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePointerAgent",
+        sandbox_provider_config={"docker": {}},
+        sandbox_spec={"image": "docker://osworld@sha256:fixed"},
+        vm_path="/assets/Ubuntu.qcow2",
+        policy_base_url="https://inference-api.nvidia.com",
+        policy_api_key="test-key",  # pragma: allowlist secret
+        policy_model_name="azure/anthropic/claude-opus-4-7",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.mask_sample is True
+    assert "DBus user session is unavailable" in (result.error or "")
+    assert FakePointerAgent.instances == []
+
+
 def test_gym_sandbox_backend_is_passed_as_plain_env_configuration(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 
@@ -412,6 +476,42 @@ def test_proxy_required_task_is_masked_without_starting_an_environment(monkeypat
     assert result.mask_sample is True
     assert result.termination_reason == "proxy_required_but_disabled"
     assert "ProxyRequiredButDisabled" in (result.error or "")
+    assert FakeEnv.instances == []
+
+
+def test_proxy_required_task_can_run_directly_when_explicitly_allowed(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "proxy-direct", "instruction": "Open the website.", "proxy": True},
+        model_fn=lambda *_args: "```DONE```",
+        env_class_path="fake.FakeEnv",
+        enable_proxy=False,
+        allow_direct_proxy_tasks=True,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.reward == 1.0
+    assert result.mask_sample is False
+    assert FakeEnv.instances[0].kwargs["enable_proxy"] is False
+    assert FakeEnv.instances[0].task_config["proxy"] is True
+
+
+def test_direct_proxy_mode_rejects_remote_resources_before_environment_start(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "proxy-direct-remote", "instruction": "Open the website.", "proxy": True},
+        model_fn=lambda *_args: pytest.fail("model must not run"),
+        resources_server_url="http://resources.example",
+        enable_proxy=False,
+        allow_direct_proxy_tasks=True,
+    )
+
+    assert result.mask_sample is True
+    assert result.termination_reason == "proxy_configuration_error"
+    assert "remote Resources Server" in (result.error or "")
     assert FakeEnv.instances == []
 
 
@@ -751,6 +851,80 @@ def test_pointer_agent_runner_uses_native_pointer_predict_loop(monkeypatch, tmp_
     assert pointer.predict_calls == 1
     assert pointer.log_usage_calls == 1
     assert (Path(pointer.reset_calls[0]["task_results_dir"]) / "pointer.log").exists()
+
+
+@pytest.mark.parametrize(
+    ("task_deadline", "expected_reason"),
+    [(True, "timeout"), (False, "rollout_error")],
+)
+def test_pointer_retry_deadline_is_reported_invalid(
+    monkeypatch,
+    tmp_path: Path,
+    task_deadline: bool,
+    expected_reason: str,
+) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setenv("OSWORLD_POINTER_RESULTS_DIR", str(tmp_path))
+
+    def stop_retry(_self, _obs):
+        reason = "task deadline" if task_deadline else "quota retry window exhausted"
+        raise osworld_client._PointerRetryDeadline(reason, task_deadline=task_deadline)
+
+    monkeypatch.setattr(FakePointerAgent, "predict", stop_retry)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-pointer-retry-deadline", "instruction": "Use Pointer."},
+        model_fn=lambda *_args: pytest.fail("model must not run"),
+        runner_name="pointer_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePointerAgent",
+        policy_base_url="https://inference-api.nvidia.com",
+        policy_api_key="test-key",  # pragma: allowlist secret
+        policy_model_name="azure/anthropic/claude-opus-4-7",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.mask_sample is True
+    assert result.termination_reason == expected_reason
+    assert ("task deadline" if task_deadline else "quota retry window exhausted") in (result.error or "")
+
+
+@pytest.mark.parametrize(
+    ("task_deadline", "expected_reason"),
+    [(True, "timeout"), (False, "rollout_error")],
+)
+def test_pointer_retry_deadline_during_reset_is_reported_invalid(
+    monkeypatch,
+    tmp_path: Path,
+    task_deadline: bool,
+    expected_reason: str,
+) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setenv("OSWORLD_POINTER_RESULTS_DIR", str(tmp_path))
+
+    def stop_retry(_self, *_args):
+        raise osworld_client._PointerRetryDeadline("provider retry stopped", task_deadline=task_deadline)
+
+    monkeypatch.setattr(FakePointerAgent, "reset", stop_retry)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-pointer-reset-retry-deadline", "instruction": "Use Pointer."},
+        model_fn=lambda *_args: pytest.fail("model must not run"),
+        runner_name="pointer_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePointerAgent",
+        sandbox_provider_config={"docker": {}},
+        sandbox_spec={"image": "docker://osworld@sha256:fixed"},
+        vm_path="/assets/Ubuntu.qcow2",
+        policy_base_url="https://inference-api.nvidia.com",
+        policy_api_key="test-key",  # pragma: allowlist secret
+        policy_model_name="azure/anthropic/claude-opus-4-7",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.mask_sample is True
+    assert result.termination_reason == expected_reason
+    assert "provider retry stopped" in (result.error or "")
 
 
 def test_m3_agent_runner_uses_messages_endpoint_and_native_predict_loop(monkeypatch, tmp_path) -> None:
@@ -1102,6 +1276,82 @@ def test_setup_on_nonzero_score_zero_is_a_valid_evaluator_outcome(monkeypatch, t
     ) == pytest.approx(0.0)
 
 
+def _install_fake_chrome_setup_module(
+    monkeypatch,
+    *,
+    pages: List[Any] | None = None,
+    upstream_cdp_helper: bool = False,
+):
+    desktop_env = ModuleType("desktop_env")
+    controllers = ModuleType("desktop_env.controllers")
+    setup_module = ModuleType("desktop_env.controllers.setup")
+    context = MagicMock()
+    context.pages = pages or [MagicMock(url="about:blank")]
+    browser = MagicMock()
+    browser.contexts = [context]
+    playwright = MagicMock()
+    playwright.chromium.connect_over_cdp.return_value = browser
+    playwright_context = MagicMock()
+    playwright_context.__enter__.return_value = playwright
+
+    class SetupController:
+        vm_ip = "127.0.0.1"
+        chromium_port = 9223
+
+        def _chrome_open_tabs_setup(self, _urls):
+            raise AssertionError("unpatched open-tabs setup called")
+
+        def _chrome_close_tabs_setup(self, _urls):
+            raise AssertionError("unpatched close-tabs setup called")
+
+    setup_module.SetupController = SetupController
+    setup_module.sync_playwright = MagicMock(return_value=playwright_context)
+    setup_module.compare_urls = lambda actual, expected: actual == expected
+    setup_module.time = SimpleNamespace(sleep=lambda _seconds: None)
+    setup_module.logger = osworld_client.logging.getLogger("desktopenv.setup.fake")
+    setup_module.logger.setLevel(osworld_client.logging.DEBUG)
+    if upstream_cdp_helper:
+        setup_module._connect_chrome_over_cdp = MagicMock()
+    controllers.setup = setup_module
+    desktop_env.controllers = controllers
+    monkeypatch.setitem(sys.modules, "desktop_env", desktop_env)
+    monkeypatch.setitem(sys.modules, "desktop_env.controllers", controllers)
+    monkeypatch.setitem(sys.modules, "desktop_env.controllers.setup", setup_module)
+    return SetupController, browser, context, playwright
+
+
+def test_chrome_setup_cdp_patch_commits_navigation_and_detaches(monkeypatch) -> None:
+    blank_page = MagicMock(url="about:blank")
+    opened_page = MagicMock()
+    controller_class, browser, context, playwright = _install_fake_chrome_setup_module(
+        monkeypatch,
+        pages=[blank_page],
+    )
+    context.new_page.return_value = opened_page
+
+    osworld_client._patch_chrome_setup_cdp_lifecycle()
+    patched_method = controller_class._chrome_open_tabs_setup
+    osworld_client._patch_chrome_setup_cdp_lifecycle()
+    controller_class()._chrome_open_tabs_setup(["https://example.test"])
+
+    assert controller_class._chrome_open_tabs_setup is patched_method
+    opened_page.goto.assert_called_once_with("https://example.test", timeout=60000, wait_until="commit")
+    blank_page.close.assert_called_once_with()
+    playwright.chromium.connect_over_cdp.assert_called_once_with("http://127.0.0.1:9223", timeout=30_000)
+    browser.close.assert_called_once_with()
+
+
+def test_chrome_setup_cdp_patch_preserves_newer_upstream_implementation(monkeypatch) -> None:
+    controller_class, _, _, _ = _install_fake_chrome_setup_module(monkeypatch, upstream_cdp_helper=True)
+    open_tabs = controller_class._chrome_open_tabs_setup
+    close_tabs = controller_class._chrome_close_tabs_setup
+
+    osworld_client._patch_chrome_setup_cdp_lifecycle()
+
+    assert controller_class._chrome_open_tabs_setup is open_tabs
+    assert controller_class._chrome_close_tabs_setup is close_tabs
+
+
 def test_docker_port_lock_timeout_is_configurable(monkeypatch) -> None:
     desktop_env = ModuleType("desktop_env")
     providers = ModuleType("desktop_env.providers")
@@ -1353,6 +1603,156 @@ def test_pointer_anthropic_client_options_are_configurable(monkeypatch) -> None:
     )
 
 
+class _PointerResponse:
+    def __init__(self, status_code: int, error_type: str | None = None) -> None:
+        self.status_code = status_code
+        self.error_type = error_type
+        self.closed = False
+
+    def json(self) -> Dict[str, Any]:
+        return {"error": {"type": self.error_type}}
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _PointerRequest:
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.timeouts: List[float] = []
+
+    def copy(self, *, timeout: float):
+        self.timeouts.append(timeout)
+        return self
+
+
+def test_pointer_budget_retry_targets_only_budget_message_calls(monkeypatch) -> None:
+    clock = SimpleNamespace(now=0.0, sleeps=[])
+
+    def sleep(delay: float) -> None:
+        clock.sleeps.append(delay)
+        clock.now += delay
+
+    monkeypatch.setattr(osworld_client.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(osworld_client.time, "sleep", sleep)
+    monkeypatch.setattr(osworld_client.random, "random", lambda: 0.0)
+    budget = [_PointerResponse(400, "budget_exceeded"), _PointerResponse(429, "budget_exceeded")]
+    success = _PointerResponse(200)
+    responses = iter([*budget, success])
+    request = _PointerRequest("/v1/messages?beta=true")
+    retry = osworld_client._pointer_budget_retry("executor", 1000.0)
+
+    assert retry(request, lambda _request: next(responses)) is success
+    assert clock.sleeps == [30.0, 60.0]
+    assert request.timeouts == [120.0, 120.0, 120.0]
+    assert all(response.closed for response in budget)
+
+    rate_limit = _PointerResponse(429, "rate_limit")
+    assert retry(request, lambda _request: rate_limit) is rate_limit
+    marker = object()
+    count_request = _PointerRequest("/v1/messages/count_tokens?beta=true")
+    assert retry(count_request, lambda _request: marker) is marker
+    assert count_request.timeouts == []
+
+    clock.now = 995.0
+    deadline_request = _PointerRequest("/v1/messages")
+    assert retry(deadline_request, lambda _request: success) is success
+    assert deadline_request.timeouts == [5.0]
+
+
+@pytest.mark.parametrize(
+    ("error_code", "error_message", "expected_status"),
+    [
+        ("content_length_limit", None, 413),
+        (None, "Content length exceeded 32 MB", 413),
+        ("invalid_model", "Model not found", 400),
+    ],
+)
+def test_pointer_content_length_normalization_matches_anthropic_response_contract(
+    error_code: str | None,
+    error_message: str | None,
+    expected_status: int,
+) -> None:
+    anthropic = pytest.importorskip("anthropic")
+    httpx = pytest.importorskip("httpx")
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": error_code,
+                    "message": error_message,
+                }
+            },
+            request=request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        client = anthropic.Anthropic(
+            api_key="test-key",  # pragma: allowlist secret
+            base_url="https://inference-api.nvidia.com",
+            max_retries=0,
+            http_client=http_client,
+            middleware=(osworld_client._pointer_budget_retry("executor", float("inf")),),
+        )
+        error_class = anthropic.RequestTooLargeError if expected_status == 413 else anthropic.BadRequestError
+        with pytest.raises(error_class) as raised:
+            client.beta.messages.create(
+                max_tokens=1,
+                messages=[{"role": "user", "content": "hi"}],
+                model="azure/anthropic/claude-sonnet-4-6",
+                betas=[],
+            )
+
+    assert raised.value.status_code == expected_status
+    assert str(expected_status) in str(raised.value)
+    assert calls == 1
+
+
+def test_pointer_budget_retry_stops_at_window_or_task_deadline(monkeypatch) -> None:
+    clock = SimpleNamespace(now=0.0, sleeps=[])
+
+    def sleep(delay: float) -> None:
+        clock.sleeps.append(delay)
+        clock.now += delay
+
+    monkeypatch.setattr(osworld_client.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(osworld_client.time, "sleep", sleep)
+    monkeypatch.setattr(osworld_client.random, "random", lambda: 0.0)
+    request = _PointerRequest("/v1/messages")
+    calls = SimpleNamespace(value=0)
+
+    def budget(_request: Any) -> _PointerResponse:
+        calls.value += 1
+        return _PointerResponse(429, "budget_exceeded")
+
+    with pytest.raises(osworld_client._PointerRetryDeadline, match="quota retry window exhausted") as quota:
+        osworld_client._pointer_budget_retry("planner", 1000.0)(request, budget)
+    assert quota.value.task_deadline is False
+    assert calls.value == 8
+    assert sum(clock.sleeps) == 900.0
+
+    clock.now = 0.0
+    clock.sleeps.clear()
+    calls.value = 0
+    with pytest.raises(osworld_client._PointerRetryDeadline, match="task deadline") as deadline:
+        osworld_client._pointer_budget_retry("planner", 20.0)(request, budget)
+    assert deadline.value.task_deadline is True
+    assert calls.value == 1
+    assert clock.sleeps == [20.0]
+
+    clock.now = 0.0
+    calls.value = 0
+    with pytest.raises(osworld_client._PointerRetryDeadline, match="task deadline"):
+        osworld_client._pointer_budget_retry("planner", 0.0)(request, budget)
+    assert calls.value == 0
+
+
 def test_pointer_anthropic_proxy_logs_schema_v2_request_and_response(tmp_path: Path) -> None:
     class Response:
         def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
@@ -1489,11 +1889,15 @@ def test_pointer_anthropic_patch_wraps_clients_only_in_logging_context(monkeypat
     monkeypatch.setitem(sys.modules, "mm_agents.pointer.utils", utils_module)
     monkeypatch.setitem(sys.modules, "anthropic", anthropic_module)
 
-    osworld_client._patch_pointer_anthropic_client("https://inference-api.nvidia.com/")
+    osworld_client._patch_pointer_anthropic_client(
+        "https://inference-api.nvidia.com/",
+        deadline_monotonic=1000.0,
+    )
     client = LLMClient()
     unlogged = client._create_client(APIProvider.ANTHROPIC)
     assert isinstance(unlogged, Anthropic)
     assert unlogged.kwargs["base_url"] == "https://inference-api.nvidia.com"
+    assert len(unlogged.kwargs["middleware"]) == 1
     assert client._create_client("other") == ("original", "other")
 
     context = osworld_client._PointerModelIOContext(
@@ -1640,7 +2044,7 @@ def test_pointer_rollout_sets_and_resets_model_io_context(monkeypatch, tmp_path:
     monkeypatch.setattr(
         osworld_client,
         "_patch_pointer_anthropic_client",
-        lambda _base_url: observed_contexts.append(osworld_client._POINTER_MODEL_IO_CONTEXT.get()),
+        lambda _base_url, **_kwargs: observed_contexts.append(osworld_client._POINTER_MODEL_IO_CONTEXT.get()),
     )
 
     result = osworld_client.run_osworld_task(

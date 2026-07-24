@@ -25,6 +25,7 @@ osworld_simple_agent:
       require_a11y_tree: false    # a11y_tree gives precise UI coords from OS AT-SPI — info a human user wouldn't have. Set false for pure-VLM evaluation (matches OSWorld paper's vision-only baseline + OpenAI/Anthropic computer-use benchmarks). Set true if you want max accuracy on small-UI clicks at the cost of much larger prompts (one a11y dump can be 100s of KB of XML, which blows the context window quickly with max_trajectory_length>1).
       client_password: password  # pragma: allowlist secret
       enable_proxy: false        # global opt-in; only tasks with proxy: true use it
+      allow_direct_proxy_tasks: false  # explicit compatibility mode for attempting proxy-tagged tasks directly
       proxy_config_file: null    # local JSON path; PROXY_CONFIG_FILE overrides this value
       resources_server_token_env: OSWORLD_RESOURCES_TOKEN
       resources_request_timeout: 900.0
@@ -47,7 +48,9 @@ osworld_simple_agent:
       agent_kwargs: {}            # extra kwargs merged into the runner's native mm_agent constructor.
       mem_limit_mb: 0           # upstream Docker owns QEMU/container limits; nonzero only emits a warning
       step_timeout: 60          # per-action subprocess timeout
-      task_timeout: 1800        # whole-rollout wall-clock cap; trips mask_sample=True
+      task_timeout: 1800        # cooperative deadline checked between steps and by Pointer model calls
       docker_port_lock_timeout: 300.0  # infrastructure-only wait for concurrent Docker VM port allocation
       evaluator_disable_gpu: true  # keep EasyOCR from reserving rollout GPU memory
       reward_mode: binary          # raw preserves OSWorld partial scores; binary keeps the historical Gym training convention
+      training_mode: false         # true preserves append-only token/logprob/image trajectories for NeMo RL
+      training_turn_strategy: last # last is robust to reasoning-template replay; all requires token-contiguous turns
