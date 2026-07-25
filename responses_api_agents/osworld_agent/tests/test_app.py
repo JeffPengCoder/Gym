@@ -485,7 +485,7 @@ class TestApp:
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
         def load_pointer(_path: str) -> None:
-            assert os.environ["ANTHROPIC_API_KEY"] == "__nemo_gym_anthropic_key_deferred__"
+            assert os.environ["ANTHROPIC_API_KEY"] == "__nemo_gym_anthropic_key_deferred__"  # pragma: allowlist secret
 
         mock_load_attr.side_effect = load_pointer
 
