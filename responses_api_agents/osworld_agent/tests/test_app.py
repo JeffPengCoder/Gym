@@ -482,11 +482,18 @@ class TestApp:
     @patch("responses_api_agents.osworld_agent.app.load_attr")
     def test_pointer_startup_disables_unconfigured_parallel_tools(self, mock_load_attr, monkeypatch) -> None:
         monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        def load_pointer(_path: str) -> None:
+            assert os.environ["ANTHROPIC_API_KEY"] == "__nemo_gym_anthropic_key_deferred__"
+
+        mock_load_attr.side_effect = load_pointer
 
         class_path = _validate_runner_runtime(make_config(runner_name="pointer_agent"))
 
         assert class_path == "mm_agents.pointer.PointerAgent"
         assert os.environ["PARALLEL_API_KEY"] == "__nemo_gym_parallel_tools_disabled__"  # pragma: allowlist secret
+        assert "ANTHROPIC_API_KEY" not in os.environ
         mock_load_attr.assert_called_once_with(class_path)
 
     def test_metrics_report_binary_and_raw_osworld_scores(self) -> None:
@@ -590,8 +597,17 @@ class TestApp:
         mock_remote.options.return_value.remote.return_value = future
         mock_to_thread.return_value = DEFAULT_RUN_RESULT
 
-        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": True}
+        agent = OSWorldAgent(config=make_config(), server_client=server_client)
         request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK, temperature=0.7, top_p=0.95)
+        request = OSWorldRunRequest.model_validate(
+            {
+                **request.model_dump(),
+                "_ng_task_index": 4,
+                "_ng_rollout_index": 0,
+            }
+        )
 
         response = await agent.run(request)
 
@@ -615,6 +631,7 @@ class TestApp:
         mock_remote.options.return_value.remote.assert_called_once()
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         assert positional_args[0] == DEFAULT_OSWORLD_TASK
+        assert positional_args[1]["base_url"] == "http://127.0.0.1:8000/ng-rollout/4-0/v1"
         assert positional_args[1]["evaluator_disable_gpu"] is True
         assert positional_args[1]["docker_port_lock_timeout"] == 300.0
         assert positional_args[1]["enable_proxy"] is False
@@ -663,6 +680,7 @@ class TestApp:
         assert response.reward == 1.0
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         runner_kwargs = positional_args[1]
+        assert runner_kwargs["base_url"] == "http://127.0.0.1:8000/v1"
         assert runner_kwargs["sandbox_provider_config"] == {"docker": {"create": {"use_init": False}}}
         assert runner_kwargs["sandbox_spec"] == {
             "image": "docker://osworld@sha256:fixed",
@@ -671,19 +689,34 @@ class TestApp:
         assert runner_kwargs["vm_path"] == "/assets/Ubuntu.qcow2"
         assert runner_kwargs["sandbox_vm_path"] is None
 
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
-    async def test_proxy_required_task_is_masked_before_ray_when_disabled(self, mock_remote) -> None:
+    @patch("asyncio.to_thread")
+    async def test_proxy_required_task_runs_directly_when_proxy_is_disabled(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        monkeypatch,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        monkeypatch.setenv("PROXY_CONFIG_FILE", "/unused/proxy.json")
+        mock_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
         task = {**DEFAULT_OSWORLD_TASK, "proxy": True}
         agent = OSWorldAgent(config=make_config(enable_proxy=False), server_client=MagicMock(spec=ServerClient))
 
         response = await agent.run(make_run_request(osworld_task=task))
 
-        assert response.reward == 0.0
-        assert response.mask_sample is True
-        assert response.verifier_metadata["osworld_termination_reason"] == "proxy_required_but_disabled"
+        positional_args, _ = mock_remote.options.return_value.remote.call_args
+        assert positional_args[1]["enable_proxy"] is False
+        assert positional_args[1]["proxy_config_file"] is None
+        assert response.mask_sample is False
         assert response.verifier_metadata["osworld_proxy_required"] is True
         assert response.verifier_metadata["osworld_proxy_enabled"] is False
-        mock_remote.options.assert_not_called()
+        assert response.verifier_metadata["osworld_proxy_configured"] is False
 
     @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
