@@ -25,6 +25,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
+    SupportsSandboxEndpoint,
 )
 from nemo_gym.sandbox.providers.registry import (
     create_provider,
@@ -45,6 +46,7 @@ __all__ = [
     "SandboxResources",
     "SandboxSpec",
     "SandboxStatus",
+    "SupportsSandboxEndpoint",
     "create_provider",
     "get_provider_class",
     "list_providers",

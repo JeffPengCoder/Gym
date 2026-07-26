@@ -30,6 +30,7 @@ from nemo_gym.sandbox.providers import (
     SandboxProvider,
     SandboxSpec,
     SandboxStatus,
+    SupportsSandboxEndpoint,
     create_provider,
 )
 
@@ -131,11 +132,10 @@ class AsyncSandbox:
             raise ValueError(
                 f"Sandbox port {port} was not declared in SandboxSpec.ports; declared ports: {list(declared_ports)!r}"
             )
-        resolver = getattr(self._provider, "endpoint", None)
-        if resolver is None:
+        if not isinstance(self._provider, SupportsSandboxEndpoint):
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support service endpoints")
-        resolved = await resolver(self._require_handle(), port)
+        resolved = await self._provider.endpoint(self._require_handle(), port)
         if not isinstance(resolved, SandboxEndpoint):
             raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
         return resolved

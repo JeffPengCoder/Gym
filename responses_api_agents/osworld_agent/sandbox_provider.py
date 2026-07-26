@@ -121,8 +121,6 @@ class GymSandboxDesktopProvider:
         vm_path = os.path.realpath(os.path.abspath(os.path.expanduser(path_to_vm)))
         if not os.path.isfile(vm_path) or not os.access(vm_path, os.R_OK):
             raise FileNotFoundError(f"OSWorld base qcow2 is not readable: {vm_path}")
-        if self._require_kvm and (not os.path.exists("/dev/kvm") or not os.access("/dev/kvm", os.R_OK | os.W_OK)):
-            raise RuntimeError("OSWorld Gym Sandbox requires readable/writable /dev/kvm")
 
         values = copy.deepcopy(self._sandbox_spec)
         if not values.get("image"):

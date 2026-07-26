@@ -35,23 +35,7 @@ class FakeSandbox:
         self.stopped += 1
 
 
-def _patch_kvm(monkeypatch: pytest.MonkeyPatch) -> None:
-    real_exists = osworld_sandbox.os.path.exists
-    real_access = osworld_sandbox.os.access
-    monkeypatch.setattr(
-        osworld_sandbox.os.path,
-        "exists",
-        lambda path: True if path == "/dev/kvm" else real_exists(path),
-    )
-    monkeypatch.setattr(
-        osworld_sandbox.os,
-        "access",
-        lambda path, mode: True if path == "/dev/kvm" else real_access(path, mode),
-    )
-
-
 def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, monkeypatch) -> None:
-    _patch_kvm(monkeypatch)
     monkeypatch.setenv("OSWORLD_RUN_ID", "smoke-run")
     vm_path = tmp_path / "Ubuntu.qcow2"
     vm_path.write_bytes(b"qcow2")
@@ -88,6 +72,31 @@ def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, mon
     )
 
 
+def test_build_spec_leaves_kvm_validation_to_docker_host(tmp_path, monkeypatch) -> None:
+    vm_path = tmp_path / "Ubuntu.qcow2"
+    vm_path.write_bytes(b"qcow2")
+    real_exists = osworld_sandbox.os.path.exists
+    real_access = osworld_sandbox.os.access
+    monkeypatch.setattr(
+        osworld_sandbox.os.path,
+        "exists",
+        lambda path: False if path == "/dev/kvm" else real_exists(path),
+    )
+    monkeypatch.setattr(
+        osworld_sandbox.os,
+        "access",
+        lambda path, mode: False if path == "/dev/kvm" else real_access(path, mode),
+    )
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"docker": {}},
+        {"image": "osworld:fixed"},
+    )
+
+    spec = provider._build_spec(str(vm_path), headless=True, os_type="Ubuntu")
+
+    assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--device", "/dev/kvm")
+
+
 def test_build_spec_docker_tcg_mode_does_not_map_kvm(tmp_path) -> None:
     vm_path = tmp_path / "Ubuntu.qcow2"
     vm_path.write_bytes(b"qcow2")
@@ -112,8 +121,7 @@ def test_provider_rejects_non_docker_config() -> None:
         )
 
 
-def test_build_spec_rejects_non_string_docker_options(tmp_path, monkeypatch) -> None:
-    _patch_kvm(monkeypatch)
+def test_build_spec_rejects_non_string_docker_options(tmp_path) -> None:
     vm_path = tmp_path / "Ubuntu.qcow2"
     vm_path.write_bytes(b"qcow2")
     provider = osworld_sandbox.GymSandboxDesktopProvider(
@@ -144,7 +152,6 @@ def test_endpoint_contract_rejects_proxy_headers_and_paths() -> None:
 
 def test_lifecycle_recreates_from_snapshot_and_close_is_idempotent(tmp_path, monkeypatch) -> None:
     FakeSandbox.instances.clear()
-    _patch_kvm(monkeypatch)
     monkeypatch.setattr(osworld_sandbox, "Sandbox", FakeSandbox)
     vm_path = tmp_path / "Ubuntu.qcow2"
     vm_path.write_bytes(b"qcow2")
@@ -176,7 +183,6 @@ def test_start_failure_cleans_up_sandbox(tmp_path, monkeypatch) -> None:
                 headers={"authorization": "secret"},
             )
 
-    _patch_kvm(monkeypatch)
     monkeypatch.setattr(osworld_sandbox, "Sandbox", BadEndpointSandbox)
     vm_path = tmp_path / "Ubuntu.qcow2"
     vm_path.write_bytes(b"qcow2")

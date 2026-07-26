@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 
@@ -103,8 +103,8 @@ class SandboxSpec:
     metadata: dict[str, str] = field(default_factory=dict)
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
     entrypoint: list[str] | None = None
-    ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
     provider_options: dict[str, Any] = field(default_factory=dict)
+    ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
@@ -210,18 +210,19 @@ class SandboxProvider(Protocol):
         """Return the current sandbox lifecycle status."""
         ...
 
-    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
-        """Resolve a declared service port to a caller-reachable endpoint.
-
-        Providers without service networking may omit this optional capability;
-        the public API raises ``NotImplementedError`` in that case.
-        """
-        ...
-
     async def close(self, handle: SandboxHandle) -> None:
         """End the sandbox lifecycle and close provider resources for it."""
         ...
 
     async def aclose(self) -> None:
         """Close provider-scoped resources such as SDK clients."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxEndpoint(Protocol):
+    """Optional provider capability for resolving declared service ports."""
+
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        """Resolve a declared service port to a caller-reachable endpoint."""
         ...

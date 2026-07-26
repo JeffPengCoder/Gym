@@ -414,17 +414,6 @@ def test_conflicting_vm_path_aliases_are_rejected(monkeypatch) -> None:
         )
 
 
-def test_gym_sandbox_and_remote_resources_are_mutually_exclusive(monkeypatch) -> None:
-    _patch_client_for_fake_runtime(monkeypatch)
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        osworld_client.run_osworld_task(
-            {"id": "task-invalid", "instruction": "Finish the task."},
-            model_fn=lambda *_args: "```DONE```",
-            resources_server_url="http://resources.example",
-            sandbox_provider_config={"docker": {}},
-        )
-
-
 def test_proxy_required_task_runs_directly_when_proxy_is_disabled(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 

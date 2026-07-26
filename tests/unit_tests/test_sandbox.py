@@ -34,6 +34,7 @@ from nemo_gym.sandbox import (
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
+    SupportsSandboxEndpoint,
     create_provider,
     get_provider_class,
     list_providers,
@@ -392,6 +393,30 @@ def test_sandbox_resources_validation() -> None:
         SandboxSpec(ports=[8000.5])
     with pytest.raises(ValueError, match="absolute URL"):
         SandboxEndpoint(endpoint="/relative/path")
+
+
+def test_sandbox_endpoint_is_an_optional_provider_capability() -> None:
+    assert isinstance(FakeSandboxProvider(), SupportsSandboxEndpoint)
+    assert not isinstance(PlainSandboxProvider(), SupportsSandboxEndpoint)
+
+
+def test_sandbox_spec_keeps_legacy_positional_provider_options() -> None:
+    provider_options = {"legacy": True}
+    spec = SandboxSpec(
+        "image:tag",
+        60,
+        30,
+        "/workspace",
+        {},
+        {},
+        {},
+        SandboxResources(cpu=1),
+        ["/bin/sh"],
+        provider_options,
+    )
+
+    assert spec.provider_options == provider_options
+    assert spec.ports == ()
 
 
 def test_provider_registry_validation_and_listing(monkeypatch: pytest.MonkeyPatch) -> None:

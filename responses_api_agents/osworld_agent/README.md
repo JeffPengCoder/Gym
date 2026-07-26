@@ -28,10 +28,10 @@ A completed response includes:
 - one assistant output item per executed model step.
 
 OSWorld continues to evaluate inside `env.evaluate()`. The environment backend
-is selectable: OSWorld's provider directly, a Gym Resources Server, or Gym
-Sandbox. In the Sandbox path, OSWorld still owns `DesktopEnv`, setup,
-controllers, actions, and evaluators; Gym Sandbox owns only the VM container
-lifecycle, dynamic service endpoints, status, and cleanup.
+is selectable between OSWorld's provider directly and Gym Sandbox. In the
+Sandbox path, OSWorld still owns `DesktopEnv`, setup, controllers, actions,
+and evaluators; Gym Sandbox owns only the VM container lifecycle, dynamic
+service endpoints, status, and cleanup.
 
 ## Runtime components
 
@@ -118,8 +118,7 @@ Environment and execution:
   `screen_height` configure `DesktopEnv`.
 - `sandbox_provider` selects a named Gym Sandbox provider configuration;
   `sandbox_spec` supplies the provider-neutral image/resources/entrypoint, and
-  `sandbox_vm_path` selects the read-only OSWorld qcow2 base. It is mutually
-  exclusive with `resources_server`.
+  `sandbox_vm_path` selects the read-only OSWorld qcow2 base.
 - `sandbox_require_kvm`, `sandbox_ready_timeout_s`, and
   `sandbox_ready_poll_s` control the OSWorld Sandbox startup gate.
 - `concurrency` limits simultaneous `/run` requests.

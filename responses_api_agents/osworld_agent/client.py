@@ -1510,11 +1510,6 @@ def run_osworld_task(
     client_password: str = "password",
     enable_proxy: bool = False,
     proxy_config_file: Optional[str] = None,
-    resources_server_url: str = "",
-    resources_server_auth_token: str = "",
-    resources_request_timeout: float = 900.0,
-    resources_connect_timeout: float = 10.0,
-    resources_request_retries: int = 3,
     sandbox_provider_config: Optional[Dict[str, Any]] = None,
     sandbox_spec: Optional[Dict[str, Any]] = None,
     vm_path: Optional[str] = None,
@@ -1574,17 +1569,12 @@ def run_osworld_task(
         requires_proxy = task_requires_proxy(task_config)
     except ValueError as exc:
         return proxy_precondition_failure("proxy_configuration_error", f"ProxyConfigurationError: {exc}")
-    use_remote_resources = bool(resources_server_url.strip())
     use_gym_sandbox = sandbox_provider_config is not None
-    if use_remote_resources and use_gym_sandbox:
-        raise ValueError("resources_server and sandbox_provider are mutually exclusive OSWorld backends")
     if vm_path and sandbox_vm_path and os.path.realpath(vm_path) != os.path.realpath(sandbox_vm_path):
         raise ValueError("vm_path and deprecated sandbox_vm_path refer to different qcow2 files")
     effective_vm_path = vm_path or sandbox_vm_path
-    if use_remote_resources and effective_vm_path:
-        raise ValueError("vm_path is only valid for local OSWorld providers")
     proxy_info = None
-    if requires_proxy and enable_proxy and not use_remote_resources:
+    if requires_proxy and enable_proxy:
         try:
             proxy_info = inspect_proxy_config_file(proxy_config_file)
         except ValueError as exc:
@@ -1618,27 +1608,22 @@ def run_osworld_task(
         agent_class_path=agent_class_path,
         agent_kwargs=agent_kwargs,
     )
-    if use_remote_resources:
-        from responses_api_agents.osworld_agent.remote_environment import RemoteDesktopEnv
-
-        env_cls = RemoteDesktopEnv
+    if use_gym_sandbox:
+        sandbox_env_class = {
+            "desktop_env.desktop_env.DesktopEnv": SANDBOX_DESKTOP_ENV_CLASS,
+            "desktop_env.desktop_env_pointer.DesktopEnv": SANDBOX_POINTER_DESKTOP_ENV_CLASS,
+        }.get(runner_spec.env_class_path)
+        if sandbox_env_class is None and env_class_path is None:
+            raise ValueError(
+                "This runner uses a specialized DesktopEnv; set an explicit Gym Sandbox-compatible "
+                "env_class_path before enabling sandbox_provider"
+            )
+        env_cls = load_attr(sandbox_env_class or runner_spec.env_class_path)
     else:
-        if use_gym_sandbox:
-            sandbox_env_class = {
-                "desktop_env.desktop_env.DesktopEnv": SANDBOX_DESKTOP_ENV_CLASS,
-                "desktop_env.desktop_env_pointer.DesktopEnv": SANDBOX_POINTER_DESKTOP_ENV_CLASS,
-            }.get(runner_spec.env_class_path)
-            if sandbox_env_class is None and env_class_path is None:
-                raise ValueError(
-                    "This runner uses a specialized DesktopEnv; set an explicit Gym Sandbox-compatible "
-                    "env_class_path before enabling sandbox_provider"
-                )
-            env_cls = load_attr(sandbox_env_class or runner_spec.env_class_path)
-        else:
-            env_cls = load_attr(runner_spec.env_class_path)
-        _patch_setup_execute_contract()
-        if provider_name == "docker" and not use_gym_sandbox:
-            _configure_docker_port_lock_timeout(docker_port_lock_timeout)
+        env_cls = load_attr(runner_spec.env_class_path)
+    _patch_setup_execute_contract()
+    if provider_name == "docker" and not use_gym_sandbox:
+        _configure_docker_port_lock_timeout(docker_port_lock_timeout)
     instruction = task_config.get("instruction", "")
     event_context = dict(log_context or {})
     event_context.update(
@@ -1651,9 +1636,8 @@ def run_osworld_task(
         }
     )
     event_context = {key: value for key, value in event_context.items() if value is not None and value != ""}
-    if not use_remote_resources:
-        _patch_extension_name_aliases()
-        _patch_pdf_image_evaluator_cleanup()
+    _patch_extension_name_aliases()
+    _patch_pdf_image_evaluator_cleanup()
 
     env: Optional[Any] = None
     steps: List[StepRecord] = []
@@ -1679,9 +1663,7 @@ def run_osworld_task(
             "observation_type": runner_spec.observation_type,
             "provider_name": provider_name,
             "container_image": container_image,
-            "execution_backend": "gym_sandbox"
-            if use_gym_sandbox
-            else ("resources_server" if use_remote_resources else "osworld_provider"),
+            "execution_backend": "gym_sandbox" if use_gym_sandbox else "osworld_provider",
             "sandbox_provider": (next(iter(sandbox_provider_config)) if sandbox_provider_config else None),
             "sandbox_image": (sandbox_spec or {}).get("image") if use_gym_sandbox else None,
             "headless": headless,
@@ -1700,7 +1682,6 @@ def run_osworld_task(
             "proxy_config_file": proxy_info.path if proxy_info is not None else None,
             "proxy_config_sha256": proxy_info.sha256 if proxy_info is not None else None,
             "proxy_config_entry_count": proxy_info.entry_count if proxy_info is not None else 0,
-            "resources_server_url": resources_server_url or None,
         },
     )
     task_logger = task_artifacts.task_logger if task_artifacts is not None else LOG
@@ -1733,17 +1714,7 @@ def run_osworld_task(
             "cache_dir": cache_dir,
             "enable_proxy": enable_proxy,
         }
-        if use_remote_resources:
-            env_kwargs.update(
-                {
-                    "resources_server_url": resources_server_url,
-                    "auth_token": resources_server_auth_token,
-                    "request_timeout": resources_request_timeout,
-                    "connect_timeout": resources_connect_timeout,
-                    "request_retries": resources_request_retries,
-                }
-            )
-        elif use_gym_sandbox:
+        if use_gym_sandbox:
             effective_sandbox_spec = dict(sandbox_spec or {})
             effective_sandbox_spec.setdefault("image", container_image)
             env_kwargs.update(
@@ -1755,12 +1726,12 @@ def run_osworld_task(
                     "sandbox_ready_poll_s": sandbox_ready_poll_s,
                 }
             )
-        if not use_remote_resources and effective_vm_path:
+        if effective_vm_path:
             env_kwargs["path_to_vm"] = effective_vm_path
         env = env_cls(
             **env_kwargs,
         )
-        linked_cache_files = 0 if use_remote_resources else _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
+        linked_cache_files = _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
         if linked_cache_files:
             LOG.info(
                 "Linked %d pre-staged setup cache entries for task %s", linked_cache_files, _safe_task_id(task_config)
