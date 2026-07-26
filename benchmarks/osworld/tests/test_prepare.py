@@ -6,12 +6,13 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from benchmarks.osworld import assets
 from benchmarks.osworld.assets import asset_specs_from_task, ensure_osworld_assets
 from benchmarks.osworld.prepare import (
     DEFAULT_INPUT,
-    GYM_SANDBOX_CONFIG,
+    NANO_OMNI_AGENT_CONFIG,
     POINTER_AGENT_CONFIG,
     main,
     prepare,
@@ -82,6 +83,7 @@ def test_write_env_is_private_and_preserves_existing_file(tmp_path: Path) -> Non
     assert "asset_input_jsonl:" in contents
     assert "num_samples_in_parallel: 5" in contents
     assert "concurrency: 5" in contents
+    assert "sandbox_provider: null" in contents
     assert "max_output_tokens: 4096" in contents
     assert "temperature: 0.6" in contents
     assert "top_p: 0.95" in contents
@@ -108,7 +110,48 @@ def test_prepare_composes_profile_and_backend_for_gym_env() -> None:
     paths = select_config_paths(profile="pointer", execution_backend="gym_sandbox")
 
     assert POINTER_AGENT_CONFIG.resolve() in paths
-    assert paths[-1] == GYM_SANDBOX_CONFIG.resolve()
+    assert len(paths) == 3
+
+
+def test_nano_omni_profile_is_one_complete_benchmark_config() -> None:
+    paths = select_config_paths(profile="nano_omni", execution_backend="gym_sandbox")
+
+    assert paths == (NANO_OMNI_AGENT_CONFIG.resolve(),)
+
+
+def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path) -> None:
+    vm_path = tmp_path / "Ubuntu.qcow2"
+    vm_path.write_bytes(b"qcow2-base")
+    env_path = tmp_path / "env.yaml"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare.py",
+            "--input",
+            str(DEFAULT_INPUT),
+            "--output",
+            str(tmp_path / "rollouts.jsonl"),
+            "--skip-assets",
+            "--profile",
+            "nano_omni",
+            "--execution-backend",
+            "gym_sandbox",
+            "--vm-path",
+            str(vm_path),
+            "--env-file",
+            str(env_path),
+        ],
+    )
+
+    main()
+
+    config = yaml.safe_load(env_path.read_text(encoding="utf-8"))
+    assert config["config_paths"] == [str(NANO_OMNI_AGENT_CONFIG.resolve())]
+    assert config["agent_name"] == "osworld_nano_omni_agent"
+    agent = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
+    assert agent["sandbox_provider"] == "osworld_sandbox"
+    assert agent["vm_path"] == str(vm_path.resolve())
 
 
 def test_write_task_shards_are_disjoint_complete_and_manifested(tmp_path: Path) -> None:
@@ -169,13 +212,17 @@ def test_write_env_pins_vm_path_for_sandbox(tmp_path: Path) -> None:
         policy_base_url="http://model.test/v1",
         policy_api_key="local",  # pragma: allowlist secret
         policy_model_name="model",
+        agent_name="osworld_nano_omni_agent",
         execution_backend="gym_sandbox",
         vm_path=vm_path,
         head_port=21001,
     )
 
     contents = env_path.read_text(encoding="utf-8")
+    assert "agent_name: osworld_nano_omni_agent" in contents
+    assert "\nosworld_nano_omni_agent:\n" in contents
     assert f'vm_path: "{vm_path.resolve()}"' in contents
+    assert "sandbox_provider: osworld_sandbox" in contents
     assert "port: 21001" in contents
 
 

@@ -177,7 +177,7 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(mock_open
 
 
 def test_omni_runtime_model_overrides_stale_global_provenance(monkeypatch, caplog) -> None:
-    monkeypatch.setenv("OMNI_MINI_VLLM_MODEL", "nvidia/nemotron-3-nano-omni")
+    monkeypatch.setenv("NANO_OMNI_VLLM_MODEL", "nvidia/nemotron-3-nano-omni")
     monkeypatch.delenv("OSWORLD_POLICY_MODEL_NAME", raising=False)
 
     with caplog.at_level("WARNING"):
@@ -191,7 +191,7 @@ def test_omni_runtime_model_overrides_stale_global_provenance(monkeypatch, caplo
 
 
 def test_non_omni_runner_keeps_configured_policy_model(monkeypatch) -> None:
-    monkeypatch.setenv("OMNI_MINI_VLLM_MODEL", "nvidia/nemotron-3-nano-omni")
+    monkeypatch.setenv("NANO_OMNI_VLLM_MODEL", "nvidia/nemotron-3-nano-omni")
     monkeypatch.delenv("OSWORLD_POLICY_MODEL_NAME", raising=False)
 
     assert (

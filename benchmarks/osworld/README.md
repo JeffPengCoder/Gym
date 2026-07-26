@@ -156,11 +156,11 @@ Pointer's optional web tools require `PARALLEL_API_KEY`. Without that variable,
 the adapter explicitly disables those tools while retaining the desktop-agent
 loop. Set it when leaderboard-aligned web-tool behavior is required.
 
-This appends `benchmarks/osworld/configs/osworld_sandbox.yaml`, which pins the
-OSWorld image digest, requests KVM, publishes all four OSWorld service ports on
-dynamic loopback ports, and mounts the qcow2 read-only. Preparation fails before
-starting Gym if the VM file is missing; the adapter checks `/dev/kvm` again at
-Sandbox startup.
+The reusable OSWorld agent config defines the Docker Sandbox provider. The
+generated `env.yaml` activates it, pins the OSWorld image digest, requests KVM,
+publishes all four OSWorld service ports on dynamic ports, and supplies the
+read-only qcow2 path. Preparation fails before starting Gym if the VM file is
+missing; the adapter checks `/dev/kvm` again at Sandbox startup.
 
 ### Nemotron 3 Nano Omni with vLLM
 
@@ -329,11 +329,13 @@ container operations.
 
 ## Configuration
 
-`benchmarks/osworld/config.yaml` is the single default benchmark config. It
-chains the base `responses_api_agents/osworld_agent/configs/osworld_agent.yaml`
-runtime with the generic OpenAI-compatible model transport. Advanced model and
-runner overlays remain under `benchmarks/osworld/configs/` and should be listed
-after the base config so their values win.
+`benchmarks/osworld/config.yaml` is the default benchmark config. It chains the
+base `responses_api_agents/osworld_agent/configs/osworld_agent.yaml` runtime
+with the generic OpenAI-compatible model transport. The complete Nano Omni
+profile lives in
+`benchmarks/osworld/configs/osworld_agent_nano_omni.yaml`; it selects the base
+agent, vLLM transport, Nano Omni runner settings, and Gym Docker Sandbox in one
+benchmark-local config.
 
 The [agent configuration reference](../../responses_api_agents/osworld_agent/README.md#configuration)
 documents the shared environment, runner, timeout, cache, proxy, evaluation,

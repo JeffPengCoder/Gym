@@ -839,7 +839,7 @@ def test_nemotron_v3_nano_omni_runner_uses_gym_messages_transport(monkeypatch) -
         return {"content": "Nemotron response", "reasoning_content": "Inspect then finish."}
 
     result = osworld_client.run_osworld_task(
-        {"id": "task-omni-mini", "instruction": "Use the Nemotron Omni scaffold."},
+        {"id": "task-nano-omni", "instruction": "Use the Nemotron Nano Omni scaffold."},
         model_fn=lambda *_args: (_ for _ in ()).throw(AssertionError("Nemotron should use messages_model_fn")),
         runner_name="nemotron_v3_nano_omni_agent",
         env_class_path="fake.FakeEnv",

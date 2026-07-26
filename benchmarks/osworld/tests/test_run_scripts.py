@@ -14,7 +14,7 @@ MODEL_PROBE_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/probe_model_endpoint.
 START_CONTROL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/start_control.sh"
 RUN_EVAL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_eval.sh"
 CLEANUP_RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_run.sh"
-SANDBOX_CONFIG = REPO_ROOT / "benchmarks/osworld/configs/osworld_sandbox.yaml"
+OSWORLD_AGENT_CONFIG = REPO_ROOT / "responses_api_agents/osworld_agent/configs/osworld_agent.yaml"
 
 
 @pytest.mark.parametrize(
@@ -41,7 +41,7 @@ def test_runtime_wrappers_delegate_to_current_gym_commands() -> None:
 
 def test_remote_docker_requires_a_reachable_publish_host() -> None:
     start_text = START_CONTROL_SCRIPT.read_text(encoding="utf-8")
-    sandbox_text = SANDBOX_CONFIG.read_text(encoding="utf-8")
+    sandbox_text = OSWORLD_AGENT_CONFIG.read_text(encoding="utf-8")
 
     assert "DOCKER_HOST" in start_text
     assert "OSWORLD_SANDBOX_PUBLISH_HOST" in start_text

@@ -101,26 +101,26 @@ def test_pointer_config_overrides_the_osworld_server_config() -> None:
 
 
 def test_nano_omni_runner_overlay() -> None:
-    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_omni_mini.yaml"
+    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_nano_omni.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-    server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
+    server_config = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
     assert server_config["runner_name"] == "nemotron_v3_nano_omni_agent"
     assert server_config["max_steps"] == 100
     assert server_config["max_tokens"] == 4096
     assert server_config["task_timeout"] == 7200
 
 
-def test_omni_mini_overlay_is_model_transport_agnostic() -> None:
-    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_omni_mini.yaml"
+def test_nano_omni_profile_includes_model_transport_and_sandbox() -> None:
+    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_nano_omni.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-    assert "policy_model" not in config
-    server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
+    assert "policy_model" in config
+    assert config["policy_model"]["responses_api_models"]["vllm_model"]["uses_reasoning_parser"] is True
+    server_config = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
     assert server_config["runner_name"] == "nemotron_v3_nano_omni_agent"
-    assert server_config["agent_kwargs"]["thinking"] is True
-    assert server_config["agent_kwargs"]["max_image_history_length"] == 3
-    assert server_config["agent_kwargs"]["parse_retries"] == 5
+    assert server_config["sandbox_provider"] == "osworld_sandbox"
+    assert server_config["max_trajectory_length"] == 3
 
 
 @pytest.mark.parametrize(

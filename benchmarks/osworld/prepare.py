@@ -38,18 +38,23 @@ DEFAULT_ENV = BENCHMARK_DIR / "env.yaml"
 BASE_AGENT_CONFIG = REPO_ROOT / "responses_api_agents" / "osworld_agent" / "configs" / "osworld_agent.yaml"
 OPENAI_MODEL_CONFIG = REPO_ROOT / "responses_api_models" / "openai_model" / "configs" / "openai_model.yaml"
 POINTER_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_pointer.yaml"
-NANO_OMNI_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_omni_mini.yaml"
-NANO_OMNI_MODEL_CONFIG = BENCHMARK_DIR / "configs" / "vllm_model_omni_mini.yaml"
-GYM_SANDBOX_CONFIG = BENCHMARK_DIR / "configs" / "osworld_sandbox.yaml"
+NANO_OMNI_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_nano_omni.yaml"
 OSWORLD_PROVIDER_CONFIG = BENCHMARK_DIR / "configs" / "osworld_docker_pinned.yaml"
 
 PROFILE_CONFIGS: dict[str, tuple[Path, ...]] = {
     "default": (DEFAULT_CONFIG,),
     "pointer": (BASE_AGENT_CONFIG, POINTER_AGENT_CONFIG, OPENAI_MODEL_CONFIG),
-    "nano_omni": (BASE_AGENT_CONFIG, NANO_OMNI_AGENT_CONFIG, NANO_OMNI_MODEL_CONFIG),
+    "nano_omni": (NANO_OMNI_AGENT_CONFIG,),
 }
-BACKEND_CONFIGS = {
-    "gym_sandbox": GYM_SANDBOX_CONFIG,
+PROFILE_AGENT_NAMES = {
+    "default": "osworld_simple_agent",
+    "pointer": "osworld_simple_agent",
+    "nano_omni": "osworld_nano_omni_agent",
+}
+BACKEND_CONFIGS: dict[str, Path | None] = {
+    # The reusable OSWorld agent config defines the Docker Sandbox provider;
+    # env.yaml activates it for this backend.
+    "gym_sandbox": None,
     "osworld_provider": OSWORLD_PROVIDER_CONFIG,
 }
 
@@ -109,7 +114,8 @@ def select_config_paths(
         raise ValueError(f"Unsupported OSWorld execution backend: {execution_backend!r}") from exc
 
     selected = tuple(explicit_configs) if explicit_configs else profile_configs
-    config_paths = tuple(Path(path).resolve() for path in (*selected, backend_config))
+    backend_configs = () if backend_config is None else (backend_config,)
+    config_paths = tuple(Path(path).resolve() for path in (*selected, *backend_configs))
     missing = [path for path in config_paths if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"OSWorld Gym config does not exist: {missing[0]}")
@@ -251,6 +257,7 @@ def write_env(
     max_output_tokens: int = 1500,
     temperature: float = 1.0,
     top_p: float | None = None,
+    agent_name: str = "osworld_simple_agent",
     execution_backend: str = "osworld_provider",
     vm_path: Path | None = None,
     head_host: str = "127.0.0.1",
@@ -292,7 +299,7 @@ def write_env(
             f"  host: {_yaml_string(head_host)}",
             f"  port: {head_port}",
             *([] if server_venv_root is None else [f"uv_venv_dir: {_yaml_string(server_venv_root.resolve())}"]),
-            "agent_name: osworld_simple_agent",
+            f"agent_name: {agent_name}",
             f"input_jsonl_fpath: {_yaml_string(input_jsonl.resolve())}",
             f"output_jsonl_fpath: {_yaml_string(output_jsonl)}",
             "num_repeats: 1",
@@ -305,12 +312,13 @@ def write_env(
             f"policy_base_url: {_yaml_string(policy_base_url)}",
             f"policy_api_key: {_yaml_string(policy_api_key)}  # pragma: allowlist secret",
             f"policy_model_name: {_yaml_string(policy_model_name)}",
-            "osworld_simple_agent:",
+            f"{agent_name}:",
             "  responses_api_agents:",
             "    osworld_agent:",
             f"      concurrency: {num_samples_in_parallel}",
             f"      setup_cache_dir: {_yaml_string(setup_cache_dir.resolve())}",
             f"      asset_input_jsonl: {_yaml_string((asset_input_jsonl or input_jsonl).resolve())}",
+            f"      sandbox_provider: {'osworld_sandbox' if execution_backend == 'gym_sandbox' else 'null'}",
             *([] if resolved_vm_path is None else [f"      vm_path: {_yaml_string(resolved_vm_path)}"]),
             *([] if max_steps is None else [f"      max_steps: {max_steps}"]),
             "",
@@ -493,6 +501,7 @@ def main() -> None:
             max_output_tokens=args.max_output_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
+            agent_name=PROFILE_AGENT_NAMES[args.profile],
             execution_backend=args.execution_backend,
             vm_path=vm_path,
             head_host=args.head_host,

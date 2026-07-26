@@ -175,7 +175,7 @@ def _resolve_policy_model_name(global_config: Dict[str, Any], runner_name: str) 
     """Resolve the model that the rollout actually sends to the policy endpoint.
 
     Deployment snapshots may retain a stale ``policy_model_name`` in env.yaml.
-    Local Omni runs already use ``OMNI_MINI_VLLM_MODEL`` to configure the
+    Local Nano Omni runs already use ``NANO_OMNI_VLLM_MODEL`` to configure the
     outbound vLLM adapter, so prefer that runtime source of truth and surface a
     warning when it disagrees with the global config instead of mislabelling
     every rollout (for example, as Claude Opus).
@@ -184,7 +184,7 @@ def _resolve_policy_model_name(global_config: Dict[str, Any], runner_name: str) 
     configured_name = str(global_config.get("policy_model_name") or "").strip()
     runtime_name = os.environ.get("OSWORLD_POLICY_MODEL_NAME", "").strip()
     if not runtime_name and runner_name == "nemotron_v3_nano_omni_agent":
-        runtime_name = os.environ.get("OMNI_MINI_VLLM_MODEL", "").strip()
+        runtime_name = os.environ.get("NANO_OMNI_VLLM_MODEL", "").strip()
     if runtime_name:
         if configured_name and configured_name != runtime_name:
             LOG.warning(
