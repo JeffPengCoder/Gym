@@ -44,6 +44,9 @@ interactive SSH session is part of runtime communication.
 - A reachable vision-language model endpoint. Text-only models cannot act on
   screenshot observations.
 - Read/write access to `/dev/kvm` for the Gym Docker Sandbox path.
+- A C compiler and Python development headers on the agent/control host. On
+  Ubuntu, install `build-essential` and `python3-dev`; Gym's first server start
+  builds the pinned `evdev` dependency in its managed environment.
 
 ## Quickstart
 
@@ -160,7 +163,8 @@ The reusable OSWorld agent config defines the Docker Sandbox provider. The
 generated `env.yaml` activates it, pins the OSWorld image digest, requests KVM,
 publishes all four OSWorld service ports on dynamic ports, and supplies the
 read-only qcow2 path. Preparation fails before starting Gym if the VM file is
-missing; the adapter checks `/dev/kvm` again at Sandbox startup.
+missing. At Sandbox startup the adapter requests `--device /dev/kvm`; the
+Docker daemon on the environment host validates that the device is available.
 
 ### Nemotron 3 Nano Omni with vLLM
 

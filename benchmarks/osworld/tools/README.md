@@ -15,7 +15,7 @@ abnormal recovery -> cleanup_run.sh
 | --- | --- |
 | `probe_model_endpoint.py` | Require the configured model identity and optionally exercise the one- or three-image chat-completions request shape |
 | `check_environment.sh` | Validate local or SSH-reached Linux/Docker/KVM/qcow2 environment-host readiness |
-| `start_control.sh` | Supervisor-friendly wrapper around `gym env start` |
+| `start_control.sh` | Preflight the agent/control build toolchain, then run `gym env start` |
 | `run_eval.sh` | Supervisor-friendly wrapper around `gym eval run --no-serve` |
 | `cleanup_run.sh` | Recovery-only cleanup for stale processes or labeled Sandbox containers after abnormal termination |
 | `prepare_osworld_vm.sh` | Download and verify the pinned OSWorld qcow2 baseline |

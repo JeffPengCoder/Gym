@@ -7,12 +7,23 @@ RUN_ROOT=${1:-${OSWORLD_RUN_ROOT:-${GYM_ROOT}}}
 RUN_ID=${OSWORLD_RUN_ID:?set OSWORLD_RUN_ID}
 CONTROL_HOST=${NEMO_GYM_CONTROL_HOST:-127.0.0.1}
 GYM_BIN=${GYM_BIN:-${GYM_ROOT}/.venv/bin/gym}
+GYM_PYTHON=${GYM_PYTHON:-$(dirname "${GYM_BIN}")/python}
 ENV_FILE=${GYM_ROOT}/benchmarks/osworld/env.yaml
 STATE_DIR=${RUN_ROOT}/run/osworld/${RUN_ID}
 PID_FILE=${STATE_DIR}/control.pid
 
 [[ -x "${GYM_BIN}" ]] || { echo "Gym executable is not available: ${GYM_BIN}" >&2; exit 2; }
+[[ -x "${GYM_PYTHON}" ]] || { echo "Gym Python is not available: ${GYM_PYTHON}" >&2; exit 2; }
 [[ -r "${ENV_FILE}" ]] || { echo "prepared Gym environment is not readable: ${ENV_FILE}" >&2; exit 2; }
+command -v cc >/dev/null 2>&1 || {
+    echo "A C compiler is required to build the OSWorld agent environment" >&2
+    exit 2
+}
+python_include=$("${GYM_PYTHON}" -c 'import sysconfig; print(sysconfig.get_path("include"))')
+[[ -r "${python_include}/Python.h" ]] || {
+    echo "Python development headers are required (for example: apt install python3-dev)" >&2
+    exit 2
+}
 
 case "${DOCKER_HOST:-}" in
     ssh://*|tcp://*)

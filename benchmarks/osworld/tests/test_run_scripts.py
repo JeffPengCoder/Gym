@@ -39,6 +39,14 @@ def test_runtime_wrappers_delegate_to_current_gym_commands() -> None:
     assert "eval run --no-serve \\" in RUN_EVAL_SCRIPT.read_text(encoding="utf-8")
 
 
+def test_start_control_preflights_native_build_toolchain() -> None:
+    text = START_CONTROL_SCRIPT.read_text(encoding="utf-8")
+
+    assert "command -v cc" in text
+    assert "Python.h" in text
+    assert "python3-dev" in text
+
+
 def test_remote_docker_requires_a_reachable_publish_host() -> None:
     start_text = START_CONTROL_SCRIPT.read_text(encoding="utf-8")
     sandbox_text = OSWORLD_AGENT_CONFIG.read_text(encoding="utf-8")
