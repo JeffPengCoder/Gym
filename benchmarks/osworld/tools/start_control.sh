@@ -40,6 +40,9 @@ case "${DOCKER_HOST:-}" in
             exit 2
         }
         ;;
+    *)
+        export OSWORLD_SANDBOX_PUBLISH_HOST=${OSWORLD_SANDBOX_PUBLISH_HOST:-127.0.0.1}
+        ;;
 esac
 
 umask 077

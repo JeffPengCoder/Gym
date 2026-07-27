@@ -115,7 +115,8 @@ Python component dependencies are installed by `gym env start` from the agent
 and model server project files.
 
 Asset preparation is idempotent: `gym env start` checks the same selected JSONL and
-shared cache at server startup, then each rollout links only its task's
+shared cache at server startup without contacting the remote source for task
+files that are already materialized, then each rollout links only its task's
 read-only files into the OSWorld cache. Use `--skip-assets` only to retain
 OSWorld's upstream runtime-download behavior. A normal run connects directly;
 `OSWORLD_ASSET_PROXY_URL` is an optional fallback used only after an official
@@ -316,6 +317,7 @@ python3 prepare.py \
   --output /absolute/run/root/results/my-shard-0/rollouts.jsonl \
   --num-shards 2 \
   --shard-index 0 \
+  --server-venv-root /absolute/run/root/server-venvs \
   --force-env
 
 tools/start_control.sh /absolute/run/root
@@ -329,7 +331,10 @@ endpoints on the environment host. Keep `DOCKER_HOST` exported when invoking
 `tools/cleanup_run.sh`; its three-label filter then removes only this run's
 remote OSWorld containers. No manually maintained interactive SSH session is
 required: the Docker CLI opens its SSH transport as needed, while Gym owns all
-container operations.
+container operations. For local Docker, an unset or empty publish host defaults
+to `127.0.0.1`. A persistent `--server-venv-root` reuses complete server
+environments on retries; remove that run-owned directory after dependency
+changes to force a rebuild.
 
 ## Configuration
 

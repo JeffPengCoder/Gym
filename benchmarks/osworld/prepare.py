@@ -298,7 +298,14 @@ def write_env(
             "head_server:",
             f"  host: {_yaml_string(head_host)}",
             f"  port: {head_port}",
-            *([] if server_venv_root is None else [f"uv_venv_dir: {_yaml_string(server_venv_root.resolve())}"]),
+            *(
+                []
+                if server_venv_root is None
+                else [
+                    f"uv_venv_dir: {_yaml_string(server_venv_root.resolve())}",
+                    "skip_venv_if_present: true",
+                ]
+            ),
             f"agent_name: {agent_name}",
             f"input_jsonl_fpath: {_yaml_string(input_jsonl.resolve())}",
             f"output_jsonl_fpath: {_yaml_string(output_jsonl)}",

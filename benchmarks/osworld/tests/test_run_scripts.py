@@ -53,6 +53,7 @@ def test_remote_docker_requires_a_reachable_publish_host() -> None:
 
     assert "DOCKER_HOST" in start_text
     assert "OSWORLD_SANDBOX_PUBLISH_HOST" in start_text
+    assert "OSWORLD_SANDBOX_PUBLISH_HOST:-127.0.0.1" in start_text
     assert "docker info" in start_text
     assert "${oc.env:OSWORLD_SANDBOX_PUBLISH_HOST,127.0.0.1}" in sandbox_text
 

@@ -89,6 +89,7 @@ def test_write_env_is_private_and_preserves_existing_file(tmp_path: Path) -> Non
     assert "top_p: 0.95" in contents
     assert 'host: "127.0.0.1"' in contents
     assert "port: 11000" in contents
+    assert "skip_venv_if_present" not in contents
 
     env_path.write_text("user-owned: true\n", encoding="utf-8")
     assert (
@@ -139,6 +140,8 @@ def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path) -> 
             "gym_sandbox",
             "--vm-path",
             str(vm_path),
+            "--server-venv-root",
+            str(tmp_path / "server-venvs"),
             "--env-file",
             str(env_path),
         ],
@@ -149,6 +152,8 @@ def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path) -> 
     config = yaml.safe_load(env_path.read_text(encoding="utf-8"))
     assert config["config_paths"] == [str(NANO_OMNI_AGENT_CONFIG.resolve())]
     assert config["agent_name"] == "osworld_nano_omni_agent"
+    assert config["skip_venv_if_present"] is True
+    assert config["uv_venv_dir"] == str((tmp_path / "server-venvs").resolve())
     agent = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
     assert agent["sandbox_provider"] == "osworld_sandbox"
     assert agent["vm_path"] == str(vm_path.resolve())
@@ -303,14 +308,23 @@ def test_ensure_osworld_assets_is_idempotent(monkeypatch, tmp_path: Path) -> Non
     }
     input_jsonl = tmp_path / "tasks.jsonl"
     input_jsonl.write_text(json.dumps({"verifier_metadata": {"osworld_task": task}}) + "\n", encoding="utf-8")
-    monkeypatch.setattr(assets, "_download_asset", lambda *_args, **_kwargs: source)
+    downloads = 0
+
+    def download(*_args, **_kwargs):
+        nonlocal downloads
+        downloads += 1
+        return source
+
+    monkeypatch.setattr(assets, "_download_asset", download)
 
     cache_dir = tmp_path / "setup-cache"
     first = ensure_osworld_assets(input_jsonl, cache_dir)
+    (cache_dir / "task-1" / "gold.bin").unlink()
     second = ensure_osworld_assets(input_jsonl, cache_dir)
 
     assert first.asset_count == 1
     assert first.materialized_count == 2
-    assert second.materialized_count == 0
+    assert second.materialized_count == 1
+    assert downloads == 1
     assert (cache_dir / "task-1" / "gold.bin").read_bytes() == b"asset"
     assert len(list((cache_dir / "task-1").glob("*_input.bin"))) == 1

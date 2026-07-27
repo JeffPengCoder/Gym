@@ -249,9 +249,15 @@ def ensure_osworld_assets(
         task_dir = setup_cache_dir / task_id
         for spec in asset_specs_from_task(task):
             asset_count += 1
-            source = _download_asset(spec.url, setup_cache_dir, token, proxy_url)
-            for cache_name in spec.cache_names:
-                materialized_count += int(_materialize(source, _safe_target(task_dir, cache_name)))
+            targets = [_safe_target(task_dir, cache_name) for cache_name in spec.cache_names]
+            source = next(
+                (target.resolve() for target in targets if target.is_file() and target.stat().st_size > 0),
+                None,
+            )
+            if source is None:
+                source = _download_asset(spec.url, setup_cache_dir, token, proxy_url)
+            for target in targets:
+                materialized_count += int(_materialize(source, target))
             manifest.append(
                 {
                     "task_id": task_id,
