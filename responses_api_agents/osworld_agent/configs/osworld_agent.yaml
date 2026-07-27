@@ -79,6 +79,11 @@ osworld_sandbox:
       # --init wrapper while preserving its entrypoint.
       use_init: false
       start_timeout_s: 600
+      # A remote Docker transport can lose a response after the daemon has
+      # already created the named container. Retry with the same name and
+      # reconcile exact label/image ownership before creating again.
+      transport_retries: 4
+      transport_retry_delay_s: 1.0
       apply_resource_limits: true
       publish_host: ${oc.env:OSWORLD_SANDBOX_PUBLISH_HOST,127.0.0.1}
     exec:
