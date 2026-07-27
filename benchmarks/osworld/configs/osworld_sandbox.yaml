@@ -15,6 +15,11 @@ osworld_sandbox:
       # second Docker --init process when Sandbox preserves that entrypoint.
       use_init: false
       start_timeout_s: 600
+      # The remote Docker transport can lose a response after the daemon has
+      # already created the named container. Retry with the same name and
+      # reconcile exact label/image ownership before creating again.
+      transport_retries: 4
+      transport_retry_delay_s: 1.0
       apply_resource_limits: true
       # Keep loopback for the normal single-host path.  When DOCKER_HOST
       # targets a remote OSWorld worker, set this to that worker's
