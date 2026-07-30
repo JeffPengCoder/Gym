@@ -18,7 +18,9 @@ name = "osworld-agent"
 version = "0.0.0"
 requires-python = ">=3.12"
 dependencies = [
-    "nemo-gym[dev]",
+    # The managed agent server gets its own venv. Include the sandbox extra
+    # here so OpenSandbox-backed runs have the SDK in that isolated runtime.
+    "nemo-gym[dev,sandbox]",
     # JeffPengCoder/OSWorld nv-gym at an immutable commit: upstream main
     # 83e85344 plus the nv-gym provider overlay and explicit proxy-runtime
     # repair. Use an archive because uv recursively initializes git
