@@ -3,6 +3,7 @@
 
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ START_CONTROL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/start_control.sh"
 RUN_EVAL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_eval.sh"
 CLEANUP_RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_run.sh"
 OSWORLD_AGENT_CONFIG = REPO_ROOT / "responses_api_agents/osworld_agent/configs/osworld_agent.yaml"
+OSWORLD_AGENT_PYPROJECT = REPO_ROOT / "responses_api_agents/osworld_agent/pyproject.toml"
 
 
 @pytest.mark.parametrize(
@@ -87,6 +89,12 @@ def test_runtime_wrappers_execute_from_run_specific_env_directory(tmp_path: Path
     subprocess.run([str(script), str(tmp_path / "run")], check=True, env=env)
 
     assert cwd_capture.read_text(encoding="utf-8").strip() == str(env_dir)
+
+
+def test_managed_osworld_agent_installs_opensandbox_sdk() -> None:
+    project = tomllib.loads(OSWORLD_AGENT_PYPROJECT.read_text(encoding="utf-8"))
+
+    assert "nemo-gym[dev,sandbox]" in project["project"]["dependencies"]
 
 
 def test_remote_docker_requires_a_reachable_publish_host() -> None:
