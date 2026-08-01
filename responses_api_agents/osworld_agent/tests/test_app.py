@@ -133,8 +133,11 @@ def test_log_context_headers_do_not_change_model_payload() -> None:
     }
 
 
+@patch("openai.DefaultHttpxClient")
 @patch("openai.OpenAI")
-def test_messages_model_fn_propagates_task_context_in_headers_and_logs(mock_openai, monkeypatch, tmp_path) -> None:
+def test_messages_model_fn_propagates_task_context_in_headers_and_logs(
+    mock_openai, mock_http_client, monkeypatch, tmp_path
+) -> None:
     log_path = tmp_path / "model-io-agent.jsonl"
     monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(log_path))
     message = SimpleNamespace(content="done", tool_calls=[], model_extra={})
@@ -159,6 +162,12 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(mock_open
 
     call(messages, payload)
 
+    mock_http_client.assert_called_once_with(trust_env=False)
+    mock_openai.assert_called_once_with(
+        base_url="http://policy/v1",
+        api_key="test-key",  # pragma: allowlist secret
+        http_client=mock_http_client.return_value,
+    )
     sent = client.chat.completions.create.call_args.kwargs
     assert sent["messages"] == messages
     assert "_osworld_log_context" not in sent

@@ -293,6 +293,23 @@ class OSWorldVerifyResponse(BaseVerifyResponse):
     mask_sample: bool = False
 
 
+def _build_policy_openai_client(*, base_url: str, api_key: str):
+    """Build a client for the Gym-managed, internal policy endpoint.
+
+    The process may need an environment proxy for unrelated services such as
+    W&B, but agent-to-policy traffic must remain inside the cluster. Disabling
+    ``trust_env`` also prevents httpx from eagerly constructing an unused
+    SOCKS transport when the target is covered by ``NO_PROXY``.
+    """
+    from openai import DefaultHttpxClient, OpenAI  # noqa: PLC0415
+
+    return OpenAI(
+        base_url=base_url,
+        api_key=api_key or "dummy",
+        http_client=DefaultHttpxClient(trust_env=False),
+    )
+
+
 # Imported lazily by ``_run_osworld_task_remote`` so this module imports
 # cleanly without OSWorld installed.
 def _build_model_fn(
@@ -311,9 +328,7 @@ def _build_model_fn(
     completions / responses API, so an OpenAI-compatible client over its
     ``host:port/v1`` URL is the right shape.
     """
-    from openai import OpenAI  # noqa: PLC0415  (lazy — heavy import)
-
-    client = OpenAI(base_url=base_url, api_key=api_key or "dummy")
+    client = _build_policy_openai_client(base_url=base_url, api_key=api_key)
 
     def _call(system_prompt: str, instruction: str, observation_history: List[Dict[str, Any]]) -> str:
         # Build chat-style messages: system → (prev screenshots) → current screenshot+task.
@@ -390,9 +405,7 @@ def _build_messages_model_fn(
     messages. Gym still owns the actual policy endpoint, so this thin adapter
     forwards those messages to the configured model server.
     """
-    from openai import OpenAI  # noqa: PLC0415
-
-    client = OpenAI(base_url=base_url, api_key=api_key or "dummy")
+    client = _build_policy_openai_client(base_url=base_url, api_key=api_key)
     call_index = 0
     base_log_context = _normalize_log_context(log_context)
 

@@ -30,6 +30,9 @@ dependencies = [
     "boto3",
     "parallel-web",
     "requests-toolbelt~=1.0.0",
+    # Remote Docker workers may publish OSWorld service ports on a network
+    # reachable only through a deployment-scoped SSH SOCKS tunnel.
+    "PySocks~=1.7.1",
     # OSWorld currently pins requests<2.32; prevent RequestsDependencyWarning
     # when transitive deps pull chardet 7.x.
     "chardet<6",

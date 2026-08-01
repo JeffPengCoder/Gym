@@ -94,6 +94,32 @@ class TestServerUtils:
         actual_client = ServerClient.load_from_global_config()
         assert {"a": 2} == actual_client.global_config_dict
 
+    def test_ServerClient_uses_loopback_for_wildcard_bind_hosts(self, monkeypatch: MonkeyPatch) -> None:
+        global_config_dict = DictConfig(
+            {
+                "head_server": {
+                    "host": "0.0.0.0",
+                    "port": 11000,
+                }
+            }
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+        response = MagicMock(content=b'"head_server: {}"')
+        requests_get = MagicMock(return_value=response)
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", requests_get)
+
+        client = ServerClient.load_from_global_config()
+
+        requests_get.assert_called_once_with("http://127.0.0.1:11000/global_config_dict_yaml")
+        assert client._build_server_base_url(DictConfig({"host": "0.0.0.0", "port": 11000})) == (
+            "http://127.0.0.1:11000"
+        )
+        assert client._build_server_base_url(DictConfig({"host": "::", "port": 11000})) == ("http://[::1]:11000")
+
     def test_ServerClient_load_from_global_config_propogate_ConnectionError(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig(
             {
