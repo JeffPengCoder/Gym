@@ -295,6 +295,21 @@ class ServerClient(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    @staticmethod
+    def _client_host(host: str) -> str:
+        """Return a connectable host for a server bind address.
+
+        Wildcard addresses are valid for binding a server but are not valid
+        advertised client targets. In particular, proxy-aware HTTP clients can
+        route ``0.0.0.0`` through an external proxy instead of reaching the
+        local server.
+        """
+        if host == "0.0.0.0":
+            return "127.0.0.1"
+        if host in {"::", "[::]"}:
+            return "[::1]"
+        return host
+
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
         global_config_dict = get_global_config_dict()
@@ -308,7 +323,8 @@ class ServerClient(BaseModel):
             head_server_config = cls.load_head_server_config()
 
         # It's critical we use requests here instead of the global httpx client since a FastAPI server may be run downstream of this function call.
-        head_server_url = f"http://{head_server_config.host}:{head_server_config.port}"
+        head_server_host = cls._client_host(head_server_config.host)
+        head_server_url = f"http://{head_server_host}:{head_server_config.port}"
         try:
             response = requests.get(
                 f"{head_server_url}/global_config_dict_yaml",
@@ -324,7 +340,8 @@ class ServerClient(BaseModel):
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
     def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
-        return f"http://{server_config_dict.host}:{server_config_dict.port}"
+        host = self._client_host(server_config_dict.host)
+        return f"http://{host}:{server_config_dict.port}"
 
     async def request(
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
@@ -415,7 +432,14 @@ class ServerClient(BaseModel):
             return "connection_error"
         except requests.exceptions.Timeout:
             return "timeout"
-        except Exception:
+        except Exception as error:
+            getLogger(__name__).warning(
+                "Unexpected error while polling NeMo Gym server %s at %s: %s: %s",
+                server_name,
+                self._build_server_base_url(server_config_dict),
+                type(error).__name__,
+                error,
+            )
             return "unknown_error"
 
 
