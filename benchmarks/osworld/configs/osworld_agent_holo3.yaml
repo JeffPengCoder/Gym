@@ -1,0 +1,20 @@
+# Holo3 structured computer-use adapter.  The Holo3 prompt, JSON schema,
+# image-history handling, tool parser, and coordinate projection are owned by
+# Gym; OSWorld continues to own DesktopEnv and evaluation.
+
+osworld_simple_agent:
+  responses_api_agents:
+    osworld_agent:
+      runner_name: holo3_agent
+      provider_name: docker
+      max_steps: 100
+      max_trajectory_length: 3
+      max_tokens: 4096
+      temperature: 0.6
+      top_p: 0.95
+      sleep_after_execution: 5.0
+      task_timeout: 7200
+      agent_kwargs:
+        max_image_history_length: 3
+        parse_retries: 3
+        reasoning_effort: ${oc.env:HOLO3_REASONING_EFFORT,medium}

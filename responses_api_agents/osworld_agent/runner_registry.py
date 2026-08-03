@@ -20,6 +20,7 @@ RunnerKind = Literal[
     "prompt_agent",
     "pointer_agent",
     "m3_agent",
+    "holo3_agent",
     "nemotron_v3_nano_omni_agent",
     "qwen3_omni_agent",
 ]
@@ -44,6 +45,7 @@ DEFAULT_RUNNER_NAME = "gym_pyautogui"
 _PROMPT_AGENT = "mm_agents.agent.PromptAgent"
 _POINTER_AGENT = "mm_agents.pointer.PointerAgent"
 _M3_AGENT = "mm_agents.m3.M3Agent"
+_HOLO3_AGENT = "responses_api_agents.osworld_agent.holo3_agent.Holo3Agent"
 _NEMOTRON_V3_NANO_OMNI_AGENT = "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent"
 _QWEN3_OMNI_AGENT = "mm_agents.qwen3vl_agent.Qwen3VLAgent"
 
@@ -127,6 +129,21 @@ RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
         action_space="pyautogui",
         observation_type="screenshot",
         agent_class_path=_M3_AGENT,
+    ),
+    # Holo3's structured prompt, image-history policy, JSON schema, tool
+    # parser, and coordinate projection live in the Gym adapter.  The
+    # upstream OSWorld Holo3 submission delegates to an external AGP service;
+    # this runner is the local-vLLM path and deliberately does not import it.
+    "holo3_agent": RunnerSpec(
+        name="holo3_agent",
+        kind="holo3_agent",
+        action_space="pyautogui",
+        observation_type="screenshot",
+        agent_class_path=_HOLO3_AGENT,
+        agent_kwargs={
+            "max_image_history_length": 3,
+            "parse_retries": 3,
+        },
     ),
     # Nemotron's prompt, history, parser, and coordinate projection live in
     # the Gym adapter so the OSWorld dependency remains unmodified.

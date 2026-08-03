@@ -1770,6 +1770,35 @@ def run_osworld_task(
                 native_agent.reset(task_logger, vm_ip=getattr(env, "vm_ip", None))
             except TypeError:
                 native_agent.reset(task_logger)
+        elif runner_spec.kind == "holo3_agent":
+            if not runner_spec.agent_class_path:
+                raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
+            if messages_model_fn is None:
+                raise ValueError(f"runner {runner_spec.name!r} requires messages_model_fn")
+            agent_cls = load_attr(runner_spec.agent_class_path)
+            holo3_kwargs: Dict[str, Any] = {
+                "platform": "ubuntu",
+                "model": policy_model_name or "policy_model",
+                "max_steps": max_steps,
+                "max_tokens": policy_max_tokens,
+                "top_p": policy_top_p,
+                "temperature": policy_temperature,
+                "action_space": runner_spec.action_space,
+                "observation_type": runner_spec.observation_type,
+                "screen_size": screen_size,
+                "client_password": client_password,
+                "max_image_history_length": max_trajectory_length,
+                "max_time_s": task_timeout,
+            }
+            holo3_kwargs.update(runner_spec.agent_kwargs)
+            holo3_kwargs["log_context"] = event_context
+            native_agent = agent_cls(**holo3_kwargs)
+
+            def _call_holo3_llm(payload: Dict[str, Any], _model: Optional[str] = None) -> Any:
+                return messages_model_fn(payload["messages"], payload)
+
+            native_agent.call_llm = _call_holo3_llm
+            native_agent.reset(task_logger)
         elif runner_spec.kind == "nemotron_v3_nano_omni_agent":
             if not runner_spec.agent_class_path:
                 raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
@@ -2115,6 +2144,13 @@ def run_osworld_task(
                         **_observation_identity(obs),
                     },
                 )
+                if native_agent is not None and hasattr(native_agent, "record_action_result"):
+                    native_agent.record_action_result(
+                        actions=[],
+                        done=False,
+                        info={},
+                        error="The adapter produced no executable action.",
+                    )
                 continue
 
             step_done = False
@@ -2142,6 +2178,19 @@ def run_osworld_task(
                 if _is_terminal_action(action):
                     step_done = True
                     break
+
+            if native_agent is not None and hasattr(native_agent, "record_action_result"):
+                try:
+                    native_agent.record_action_result(
+                        actions=actions,
+                        reward=step_reward,
+                        done=step_done,
+                        info=step_info,
+                        error=error,
+                    )
+                except Exception as exc:  # noqa: BLE001 - preserve a coherent model history or stop.
+                    task_logger.exception("Native agent action-result callback failed at step %d", step_idx)
+                    error = f"native agent action-result callback failed at step {step_idx}: {exc}"
 
             steps.append(
                 StepRecord(

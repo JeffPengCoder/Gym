@@ -172,6 +172,36 @@ class FakeNemotronAgent:
         return response["content"], ["DONE"], {"thought": response["reasoning_content"]}
 
 
+class FakeHolo3Agent:
+    instances: List["FakeHolo3Agent"] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.reset_calls = 0
+        self.result_calls: List[Dict[str, Any]] = []
+        FakeHolo3Agent.instances.append(self)
+
+    def reset(self, *_args: Any, **_kwargs: Any) -> None:
+        self.reset_calls += 1
+
+    def predict(self, instruction: str, obs: Dict[str, Any]):
+        response = self.call_llm(
+            {
+                "model": self.kwargs["model"],
+                "messages": [{"role": "user", "content": instruction}],
+                "chat_template_kwargs": {"enable_thinking": True},
+                "extra_body": {"structured_outputs": {"json": {"type": "object"}}},
+                "_nemo_gym_return_message": True,
+            },
+            self.kwargs["model"],
+        )
+        assert obs["screenshot"] == b"not-black"
+        return response["content"], ["DONE"], {"thought": "Finish."}
+
+    def record_action_result(self, **kwargs: Any) -> None:
+        self.result_calls.append(kwargs)
+
+
 class FakeQwenAgent:
     instances: List["FakeQwenAgent"] = []
 
@@ -212,6 +242,7 @@ def _patch_client_for_fake_runtime(monkeypatch) -> None:
     FakePromptAgent.next_actions = [{"action_type": "DONE"}]
     FakePointerAgent.instances.clear()
     FakeM3Agent.instances.clear()
+    FakeHolo3Agent.instances.clear()
     FakeNemotronAgent.instances.clear()
     FakeQwenAgent.instances.clear()
 
@@ -230,6 +261,8 @@ def _patch_client_for_fake_runtime(monkeypatch) -> None:
             return FakePointerAgent
         if import_path == "fake.FakeM3Agent":
             return FakeM3Agent
+        if import_path == "fake.FakeHolo3Agent":
+            return FakeHolo3Agent
         if import_path == "fake.FakeNemotronAgent":
             return FakeNemotronAgent
         if import_path == "fake.FakeQwenAgent":
@@ -852,6 +885,51 @@ def test_nemotron_v3_nano_omni_runner_uses_gym_messages_transport(monkeypatch) -
     assert calls[0]["payload"]["_nemo_gym_return_message"] is True
     assert FakeNemotronAgent.instances[0].kwargs["model"] == "nemotron-3-nano-omni-under-test"
     assert FakeNemotronAgent.instances[0].kwargs["max_steps"] == 100
+
+
+def test_holo3_runner_uses_gym_transport_and_receives_vm_result(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    calls: List[Dict[str, Any]] = []
+
+    def messages_model_fn(messages: List[Dict[str, Any]], payload: Dict[str, Any]) -> Dict[str, str]:
+        calls.append({"messages": messages, "payload": payload})
+        return {"content": '{"tool_call":{"tool_name":"answer"}}', "reasoning_content": "Finish."}
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-holo3", "instruction": "Use the Holo3 scaffold."},
+        model_fn=lambda *_args: (_ for _ in ()).throw(AssertionError("Holo3 should use messages_model_fn")),
+        runner_name="holo3_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakeHolo3Agent",
+        messages_model_fn=messages_model_fn,
+        policy_model_name="Hcompany/Holo3-35B-A3B",
+        policy_max_tokens=4096,
+        policy_temperature=0.6,
+        policy_top_p=0.95,
+        max_steps=100,
+        max_trajectory_length=3,
+        sleep_after_execution=0,
+        task_timeout=7200,
+    )
+
+    assert result.reward == 1.0
+    assert result.finished is True
+    assert result.steps[0].actions == ["DONE"]
+    assert calls[0]["payload"]["chat_template_kwargs"] == {"enable_thinking": True}
+    assert "structured_outputs" in calls[0]["payload"]["extra_body"]
+    agent = FakeHolo3Agent.instances[0]
+    assert agent.kwargs["model"] == "Hcompany/Holo3-35B-A3B"
+    assert agent.kwargs["screen_size"] == (1920, 1080)
+    assert agent.kwargs["max_image_history_length"] == 3
+    assert agent.result_calls == [
+        {
+            "actions": ["DONE"],
+            "reward": 1.0,
+            "done": True,
+            "info": {"done": True, "agent": {"thought": "Finish."}},
+            "error": None,
+        }
+    ]
 
 
 def test_qwen3_omni_runner_retries_and_merges_adjacent_pyautogui_actions(monkeypatch) -> None:

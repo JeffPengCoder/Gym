@@ -1,0 +1,27 @@
+# External vLLM 0.23 transport for the public Holo3 checkpoint.  The Holo3
+# agent supplies its structured-output schema per request through Gym's
+# metadata side channel; this config keeps model-wide reasoning behavior
+# explicit without baking an experiment-specific endpoint into source.
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:HOLO3_VLLM_BASE_URL,http://127.0.0.1:8000/v1}
+      api_key: ${oc.env:HOLO3_VLLM_API_KEY,local-vllm}  # pragma: allowlist secret
+      model: ${oc.env:HOLO3_VLLM_MODEL,Hcompany/Holo3-35B-A3B}
+      return_token_id_information: false
+      # Launch vLLM with a parser compatible with the checkpoint's <think>
+      # stream (the pinned vLLM 0.23 recipe uses deepseek_r1).
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      # Holo3 explicitly drops past hidden reasoning and replays only parsed
+      # {note, thought, tool_call} content.
+      preserve_reasoning_in_assistant_content: false
+      replace_developer_role_with_system: false
+      sequential_reasoning_allowed: true
+      is_responses_native: false
+      chat_template_kwargs:
+        enable_thinking: true
+      extra_body: null
+      default_headers: {}

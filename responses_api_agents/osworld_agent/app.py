@@ -407,6 +407,31 @@ def _build_messages_model_fn(
         }
         if payload.get("top_p") is not None:
             create_kwargs["top_p"] = payload["top_p"]
+        # Model-specific native agents may need vLLM request extensions while
+        # still routing through Gym's model server.  Encode those extensions
+        # in the model server's established metadata side channel; the vLLM
+        # model merges them into its actual upstream request.  This keeps the
+        # transport generic and makes the fully materialized request visible
+        # in the existing transport log.
+        metadata: Dict[str, str] = {}
+        for metadata_key in ("chat_template_kwargs", "extra_body"):
+            metadata_value = payload.get(metadata_key)
+            if metadata_value is not None:
+                if not isinstance(metadata_value, dict):
+                    raise TypeError(f"{metadata_key} must be a mapping, got {type(metadata_value).__name__}")
+                metadata[metadata_key] = json.dumps(
+                    metadata_value,
+                    ensure_ascii=False,
+                    # Preserve insertion order.  vLLM's structured-output
+                    # grammar uses schema property order while decoding; a
+                    # canonical sort can move a required discriminator such
+                    # as ``tool_name`` behind action arguments and change the
+                    # model's otherwise valid action selection.
+                    sort_keys=False,
+                    separators=(",", ":"),
+                )
+        if metadata:
+            create_kwargs["metadata"] = metadata
         model_io_enabled = bool(os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip())
         current_call = 0
         started_ns = 0
@@ -612,7 +637,13 @@ def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
 
     if structured:
         model_extra = getattr(message, "model_extra", None) or {}
-        reasoning = getattr(message, "reasoning_content", None) or model_extra.get("reasoning_content") or ""
+        reasoning = (
+            getattr(message, "reasoning", None)
+            or getattr(message, "reasoning_content", None)
+            or model_extra.get("reasoning")
+            or model_extra.get("reasoning_content")
+            or ""
+        )
         # Gym's external-vLLM proxy must return a schema-valid OpenAI message,
         # so it wraps vLLM's separate reasoning field in <think> tags. Recover
         # that field here for NemotronV3NanoOmniAgent, matching a direct vLLM call.

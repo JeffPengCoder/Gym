@@ -176,6 +176,58 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(mock_open
     }
 
 
+@patch("openai.OpenAI")
+def test_messages_model_fn_forwards_native_agent_vllm_extensions_through_metadata(mock_openai) -> None:
+    message = SimpleNamespace(content='{"ok":true}', tool_calls=[], model_extra={})
+    response = SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")])
+    client = mock_openai.return_value
+    client.chat.completions.create.return_value = response
+    call = _build_messages_model_fn(
+        base_url="http://policy/v1",
+        model_name="policy",
+        api_key="test-key",  # pragma: allowlist secret
+    )
+    messages = [{"role": "user", "content": "inspect"}]
+    schema = {
+        "type": "object",
+        "properties": {
+            "tool_call": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "tool_name": {"const": "hotkey"},
+                            "keys": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["tool_name", "keys"],
+                    }
+                ]
+            }
+        },
+    }
+
+    call(
+        messages,
+        {
+            "messages": messages,
+            "chat_template_kwargs": {"enable_thinking": True},
+            "extra_body": {"structured_outputs": {"json": schema}},
+            "_nemo_gym_return_message": True,
+        },
+    )
+
+    sent = client.chat.completions.create.call_args.kwargs
+    assert json.loads(sent["metadata"]["chat_template_kwargs"]) == {"enable_thinking": True}
+    decoded_extra_body = json.loads(sent["metadata"]["extra_body"])
+    assert decoded_extra_body == {"structured_outputs": {"json": schema}}
+    action_properties = decoded_extra_body["structured_outputs"]["json"]["properties"]["tool_call"]["oneOf"][0][
+        "properties"
+    ]
+    assert list(action_properties) == ["tool_name", "keys"]
+    assert "chat_template_kwargs" not in sent
+    assert "extra_body" not in sent
+
+
 def test_omni_runtime_model_overrides_stale_global_provenance(monkeypatch, caplog) -> None:
     monkeypatch.setenv("NANO_OMNI_VLLM_MODEL", "nvidia/nemotron-3-nano-omni")
     monkeypatch.delenv("OSWORLD_POLICY_MODEL_NAME", raising=False)
@@ -223,6 +275,20 @@ def test_normalize_chat_message_preserves_reasoning_and_native_tool_calls() -> N
     assert "<tool_call>" in normalized["content"]
     assert '"name": "computer_use"' in normalized["content"]
     assert '"coordinate": [500, 250]' in normalized["content"]
+
+
+def test_normalize_chat_message_reads_vllm_reasoning_field() -> None:
+    message = SimpleNamespace(
+        content='{"note":null,"thought":"Act.","tool_call":{"tool_name":"answer","content":"done"}}',
+        reasoning="Inspect the screenshot first.",
+        tool_calls=[],
+        model_extra={},
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["reasoning_content"] == "Inspect the screenshot first."
+    assert json.loads(normalized["content"])["tool_call"]["tool_name"] == "answer"
 
 
 def test_normalize_chat_message_recovers_vllm_wrapped_reasoning() -> None:
