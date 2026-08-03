@@ -16,6 +16,7 @@ abnormal recovery -> cleanup_run.sh
 | `probe_model_endpoint.py` | Require the configured model identity and optionally exercise the one- or three-image chat-completions request shape |
 | `probe_holo3_vllm.py` | Exercise Holo3's exact three-image structured-output request and parser contract |
 | `probe_sagent_holotron3_vllm.py` | Exercise Yi Sagent/Holotron3's exact two-image structured-note request and parser contract |
+| `check_task_input_parity.py` | Compare task IDs and canonical instruction/config/evaluator definitions across OSWorld JSON/JSONL inputs |
 | `check_environment.sh` | Validate local or SSH-reached Linux/Docker/KVM/qcow2 environment-host readiness |
 | `start_control.sh` | Preflight the agent/control build toolchain, then run `gym env start` |
 | `run_eval.sh` | Supervisor-friendly wrapper around `gym eval run --no-serve` |
