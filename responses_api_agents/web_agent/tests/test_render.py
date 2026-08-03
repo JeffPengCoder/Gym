@@ -8,7 +8,11 @@ from nemo_gym.web.models import (
     WebObservationProfile,
     WebTask,
 )
-from responses_api_agents.web_agent.render import compact_som_text, render_observation
+from responses_api_agents.web_agent.render import (
+    compact_som_text,
+    parse_error_message,
+    render_observation,
+)
 
 
 def _block_types(message):
@@ -97,3 +101,38 @@ def test_compact_som_text_has_a_hard_character_budget():
 
     assert len(compact) < 550
     assert compact.endswith("[Additional labelled elements omitted.]")
+
+
+def test_browsergym_guidance_uses_nemotron_compatible_code_block():
+    task = WebTask(benchmark=WebBenchmark.VISUALWEBARENA, task_id="234")
+    message = render_observation(
+        WebObservation(),
+        task,
+        step_index=0,
+        action_prompt_profile="code_block",
+    )
+    text = _block_text(message.content[0])
+
+    assert "## Action:" in text
+    assert "## Code:" in text
+    assert "```python\nclick('bid')\n```" in text
+    assert "[297] link 'pics'" in text
+    assert "click('297')" in text
+    assert "never pass visible text" in text
+
+    retry = parse_error_message(
+        ValueError("bad action"),
+        action_prompt_profile="code_block",
+    )
+    assert "executable BrowserGym call" in retry.content
+    assert "```python\nclick('bid')\n```" in retry.content
+
+
+def test_browsergym_guidance_defaults_to_standard_action_shape():
+    task = WebTask(benchmark=WebBenchmark.VISUALWEBARENA, task_id="234")
+    message = render_observation(WebObservation(), task, step_index=0)
+    text = _block_text(message.content[0])
+
+    assert "Thought: concise reasoning\nAction: click('bid')" in text
+    assert "## Code:" not in text
+    assert "corrected Thought and Action only" in parse_error_message(ValueError("bad action")).content

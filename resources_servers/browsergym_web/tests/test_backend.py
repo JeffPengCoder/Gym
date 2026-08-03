@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from nemo_gym.web.models import WebAction, WebBenchmark, WebTask
+from resources_servers.browsergym_web import backend as backend_module
 from resources_servers.browsergym_web.artifacts import WebArtifactStore
 from resources_servers.browsergym_web.backend import BrowserGymBackend
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
@@ -15,7 +16,12 @@ class FakeEnv:
     @staticmethod
     def _observation(last_action="", last_action_error=""):
         return {
-            "goal_object": [{"type": "text", "text": "Do the task"}],
+            # BrowserGym 0.14.3 emits goal_object as a tuple, including the
+            # image_url blocks used by VisualWebArena.
+            "goal_object": (
+                {"type": "text", "text": "Do the task"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+            ),
             "open_pages_urls": ["https://example.test"],
             "open_pages_titles": ["Example"],
             "active_page_index": [0],
@@ -66,6 +72,7 @@ def test_backend_keeps_execution_and_benchmark_scores_separate(tmp_path, monkeyp
     assert observation.screenshot is not None
     assert observation.active_tab_index == 0
     assert observation.elapsed_time == 1.25
+    assert [block["type"] for block in observation.goal] == ["text", "image_url"]
     assert info["env_id"] == "browsergym/webarena.0"
 
     step = backend.step(WebAction(name="noop", script="noop()"))
@@ -79,3 +86,28 @@ def test_backend_keeps_execution_and_benchmark_scores_separate(tmp_path, monkeyp
 
     backend.close()
     assert env.closed is True
+
+
+def test_visualwebarena_evaluator_hook_runs_after_upstream_reset(tmp_path, monkeypatch):
+    events = []
+
+    class OrderedEnv(FakeEnv):
+        def reset(self, seed):
+            events.append("reset")
+            return super().reset(seed)
+
+    config = _config(tmp_path).model_copy(
+        update={"visualwebarena_evaluator_model": "azure/anthropic/claude-opus-4-7"}
+    )
+    backend = BrowserGymBackend(config, "session-vwa", WebArtifactStore(tmp_path))
+    monkeypatch.setattr(backend, "_make_environment", lambda _spec: OrderedEnv())
+    monkeypatch.setattr(
+        backend_module,
+        "configure_evaluator_model",
+        lambda model: events.append(f"configure:{model}"),
+    )
+
+    backend.reset(WebTask(benchmark=WebBenchmark.VISUALWEBARENA, task_id="0", seed=7))
+
+    assert events == ["reset", "configure:azure/anthropic/claude-opus-4-7"]
+    backend.close()

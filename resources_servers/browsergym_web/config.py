@@ -26,7 +26,8 @@ class BrowserGymWebResourcesServerConfig(BaseResourcesServerConfig):
     reaper_interval_seconds: int = Field(default=60, ge=5)
     require_auth: bool = False
     auth_token_env: str = "BROWSERGYM_WEB_RESOURCES_TOKEN"
-    site_pool_mode: Literal["unmanaged"] = "unmanaged"
+    site_pool_mode: Literal["unmanaged", "local_locks"] = "unmanaged"
+    visualwebarena_evaluator_model: str | None = None
     allowed_benchmarks: list[WebBenchmark] = Field(default_factory=lambda: list(WebBenchmark))
 
     @model_validator(mode="after")

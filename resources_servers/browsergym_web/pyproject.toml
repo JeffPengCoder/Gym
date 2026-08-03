@@ -9,6 +9,13 @@ dependencies = [
     "nemo-gym[dev]",
     "browsergym-webarena==0.14.3",
     "browsergym-visualwebarena==0.14.3",
+    # libvisualwebarena 0.0.15 pins beartype 0.12.0, whose NumPy NDArray
+    # annotations are not understood when resolved against NumPy 2.x.
+    "numpy>=1.26.4,<2",
+    # Keep the benchmark-era NLTK behavior. Newer NLTK import-security hooks
+    # reject component-local virtualenv imports when Gym starts this server
+    # with the component directory as its working directory.
+    "nltk==3.8.1",
     "Pillow>=10",
 ]
 

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import threading
 from typing import Any
 
 import pytest
@@ -49,6 +51,34 @@ class FakeBackend:
 
     def close(self):
         self.closed = True
+
+
+class ThreadAffinityBackend(FakeBackend):
+    call_threads: set[int] = set()
+
+    @classmethod
+    def _record_thread(cls):
+        cls.call_threads.add(threading.get_ident())
+
+    def reset(self, task: WebTask):
+        self._record_thread()
+        return super().reset(task)
+
+    def observe(self):
+        self._record_thread()
+        return super().observe()
+
+    def step(self, action: WebAction):
+        self._record_thread()
+        return super().step(action)
+
+    def evaluate(self, final_answer=None):
+        self._record_thread()
+        return super().evaluate(final_answer)
+
+    def close(self):
+        self._record_thread()
+        return super().close()
 
 
 def _config(tmp_path, **updates: Any) -> BrowserGymWebResourcesServerConfig:
@@ -103,6 +133,7 @@ async def test_session_lifecycle_is_idempotent(tmp_path):
     assert await manager.close_session("session-a") is True
     assert backends[0].closed is True
     assert (await manager.health())["site_pool"]["active_leases"] == 0
+    await manager.stop()
 
 
 @pytest.mark.asyncio
@@ -116,3 +147,37 @@ async def test_capacity_and_session_identity_are_enforced(tmp_path):
         await manager.seed_session("session-a", WebSeedSessionRequest(task=_task("1")))
 
     await manager.close_session("session-a")
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sessions_keep_browser_calls_on_one_thread(tmp_path):
+    ThreadAffinityBackend.call_threads = set()
+    manager = BrowserGymSessionManager(
+        _config(tmp_path, max_sessions=2),
+        backend_factory=ThreadAffinityBackend,
+    )
+    event_loop_thread = threading.get_ident()
+
+    await asyncio.gather(
+        manager.seed_session("session-a", WebSeedSessionRequest(task=_task("0"))),
+        manager.seed_session("session-b", WebSeedSessionRequest(task=_task("1"))),
+    )
+    await asyncio.gather(
+        manager.step(
+            "session-a",
+            WebStepRequest(operation_id="a-1", action=WebAction(name="noop", script="noop()")),
+        ),
+        manager.step(
+            "session-b",
+            WebStepRequest(operation_id="b-1", action=WebAction(name="noop", script="noop()")),
+        ),
+    )
+    await asyncio.gather(
+        manager.evaluate("session-a"),
+        manager.evaluate("session-b"),
+    )
+    await manager.stop()
+
+    assert len(ThreadAffinityBackend.call_threads) == 1
+    assert event_loop_thread not in ThreadAffinityBackend.call_threads

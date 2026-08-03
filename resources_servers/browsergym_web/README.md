@@ -27,13 +27,28 @@ WebArena these are `WA_SHOPPING`, `WA_SHOPPING_ADMIN`, `WA_REDDIT`,
 `VWA_SHOPPING`, `VWA_REDDIT`, `VWA_WIKIPEDIA`, `VWA_CLASSIFIEDS`,
 `VWA_CLASSIFIEDS_RESET_TOKEN`, and `VWA_HOMEPAGE`.
 
-## Isolation boundary
+VisualWebArena 0.0.15 also hard-codes `gpt-4-1106-preview` for fuzzy and
+unachievable-answer evaluator calls. Set `OPENAI_BASE_URL` and
+`OPENAI_API_KEY` for the judge endpoint, then set
+`visualwebarena_evaluator_model` to an available OpenAI-compatible model. The
+adapter remaps only the model argument; upstream evaluator prompts and score
+parsing remain unchanged. Leave the setting null to retain exact upstream
+behavior.
 
-The first version exposes `site_pool_mode: unmanaged` and defaults to one live
-session. A fresh browser context does not reset mutable websites. This is an
-explicit deployment limitation, not an implied isolation guarantee. A future
-site-pool implementation can replace the lease boundary without changing the
-agent or benchmark row contract.
+## Isolation and scheduling boundary
+
+The default `site_pool_mode: unmanaged` retains the single-session behavior.
+For scheduler-annotated datasets, `site_pool_mode: local_locks` allows shared
+`read_only`/`session_only` leases and takes exclusive leases for every other
+`mutation_class`. Cross-site tasks acquire every `site_locks` entry atomically,
+so writers on different sites can proceed concurrently without same-site
+overlap. BrowserGym calls themselves remain on one thread-affine Playwright
+executor because BrowserGym 0.14.x owns a process-global Sync API object.
+
+Neither mode resets or clones a mutable website. Local locks coordinate tasks
+within one resource-server process only; parallel processes require an
+external lock/replica manager. A fresh browser context is not a site reset, and
+state-changing suites must still use the benchmark's official reset procedure.
 
 Step `execution_ok` reports whether the browser action executed; evaluator
 score is returned separately as `benchmark_reward`. Browser/evaluator

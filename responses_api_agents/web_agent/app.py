@@ -38,6 +38,7 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     max_image_history: int = Field(default=3, ge=1, le=20)
     judge_max_screenshots: int = Field(default=3, ge=1, le=20)
     visual_observation_text: Literal["full_axtree", "som_only", "none"] = "full_axtree"
+    action_prompt_profile: Literal["standard", "code_block"] = "standard"
     redact_old_visual_observations: bool = False
 
 
@@ -215,6 +216,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                     task,
                     step_index=0,
                     visual_observation_text=self.config.visual_observation_text,
+                    action_prompt_profile=self.config.action_prompt_profile,
                 )
             ]
 
@@ -254,7 +256,12 @@ class WebAgent(SimpleResponsesAPIAgent):
                                 )
                             )
                             break
-                        trajectory.append(parse_error_message(exc))
+                        trajectory.append(
+                            parse_error_message(
+                                exc,
+                                action_prompt_profile=self.config.action_prompt_profile,
+                            )
+                        )
 
                 if action is None:
                     break
@@ -289,6 +296,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                         task,
                         step_index=step_index + 1,
                         visual_observation_text=self.config.visual_observation_text,
+                        action_prompt_profile=self.config.action_prompt_profile,
                     )
                 )
 

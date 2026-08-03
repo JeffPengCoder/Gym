@@ -8,7 +8,9 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Callable
 
 from nemo_gym.web.models import WebObservation, WebTask, WebVerifierResult
@@ -25,7 +27,12 @@ from resources_servers.browsergym_web.models import (
     WebStepRequest,
     WebStepResponse,
 )
-from resources_servers.browsergym_web.site_pool import SiteLease, SitePool, UnmanagedSitePool
+from resources_servers.browsergym_web.site_pool import (
+    LocalSiteLockPool,
+    SiteLease,
+    SitePool,
+    UnmanagedSitePool,
+)
 
 
 LOG = logging.getLogger("nemo_gym.resources_servers.browsergym_web")
@@ -77,7 +84,7 @@ class BrowserGymSessionManager:
     ) -> None:
         self.config = config
         self._backend_factory = backend_factory
-        self._site_pool = site_pool or UnmanagedSitePool()
+        self._site_pool = site_pool or self._make_site_pool(config)
         self._artifacts = WebArtifactStore(
             config.resolved_artifact_dir(),
             inline_screenshots=config.inline_screenshots,
@@ -86,6 +93,17 @@ class BrowserGymSessionManager:
         self._creating: set[str] = set()
         self._lock = asyncio.Lock()
         self._reaper_task: asyncio.Task[None] | None = None
+        # BrowserGym 0.14.x owns one process-global Playwright Sync API
+        # instance. Playwright's greenlet is bound to the thread that created
+        # it, so every reset/step/evaluate/close call must use that same
+        # thread. A regular asyncio.to_thread() pool can move consecutive
+        # calls between workers and fails under concurrent session creation
+        # with ``greenlet.error: cannot switch to a different thread``.
+        self._browser_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="browsergym-playwright",
+        )
+        self._browser_executor_shutdown = False
         self._started_at = time.time()
 
     async def start(self) -> None:
@@ -108,6 +126,9 @@ class BrowserGymSessionManager:
             *(self.close_session(session_id) for session_id in session_ids),
             return_exceptions=True,
         )
+        if not self._browser_executor_shutdown:
+            self._browser_executor.shutdown(wait=True, cancel_futures=True)
+            self._browser_executor_shutdown = True
 
     async def seed_session(self, session_id: str, body: WebSeedSessionRequest) -> WebSeedSessionResponse:
         self._validate_task(body.task)
@@ -130,7 +151,7 @@ class BrowserGymSessionManager:
         try:
             lease = await self._site_pool.acquire(session_id, body.task)
             backend = self._backend_factory(self.config, session_id, self._artifacts)
-            observation, seed_info = await asyncio.to_thread(backend.reset, body.task)
+            observation, seed_info = await self._run_backend(backend.reset, body.task)
             now = time.time()
             state = WebSessionState(
                 session_id=session_id,
@@ -157,7 +178,7 @@ class BrowserGymSessionManager:
         except Exception:
             if backend is not None:
                 try:
-                    await asyncio.to_thread(backend.close)
+                    await self._run_backend(backend.close)
                 except Exception:  # noqa: BLE001
                     LOG.exception("Cleanup failed after BrowserGym session creation error")
             if lease is not None:
@@ -173,7 +194,7 @@ class BrowserGymSessionManager:
         async with state.lock:
             state.status = "resetting"
             try:
-                observation, seed_info = await asyncio.to_thread(state.backend.reset, body.task)
+                observation, seed_info = await self._run_backend(state.backend.reset, body.task)
                 state.task = body.task
                 state.observation = observation
                 state.seed_info = seed_info
@@ -189,7 +210,7 @@ class BrowserGymSessionManager:
     async def observe(self, session_id: str) -> WebObservation:
         state = await self._get_session(session_id)
         async with state.lock:
-            observation = await asyncio.to_thread(state.backend.observe)
+            observation = await self._run_backend(state.backend.observe)
             state.observation = observation
             state.last_access_at = time.time()
             return observation
@@ -206,7 +227,7 @@ class BrowserGymSessionManager:
                 raise SessionConflictError(f"session {session_id!r} has already been evaluated")
             state.status = "stepping"
             try:
-                result = await asyncio.to_thread(state.backend.step, body.action)
+                result = await self._run_backend(state.backend.step, body.action)
                 response = WebStepResponse(operation_id=body.operation_id, **result.model_dump())
                 state.observation = result.observation
                 state.operations[body.operation_id] = response
@@ -227,7 +248,7 @@ class BrowserGymSessionManager:
                 return WebEvaluateResponse(result=state.verifier_result)
             state.status = "evaluating"
             try:
-                result = await asyncio.to_thread(state.backend.evaluate, final_answer)
+                result = await self._run_backend(state.backend.evaluate, final_answer)
                 state.verifier_result = result
                 state.status = "evaluated"
                 state.last_access_at = time.time()
@@ -247,7 +268,7 @@ class BrowserGymSessionManager:
         state.status = "closing"
         try:
             async with state.lock:
-                await asyncio.to_thread(state.backend.close)
+                await self._run_backend(state.backend.close)
         except Exception:  # noqa: BLE001
             healthy = False
             LOG.exception("BrowserGym backend close failed for session=%s", session_id)
@@ -287,6 +308,20 @@ class BrowserGymSessionManager:
                 raise SessionNotFoundError(session_id)
             state.last_access_at = time.time()
             return state
+
+    async def _run_backend(self, operation: Callable[..., Any], *args: Any) -> Any:
+        """Run a BrowserGym operation on its thread-affine Playwright worker."""
+
+        if self._browser_executor_shutdown:
+            raise RuntimeError("BrowserGym session manager has already stopped")
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._browser_executor, partial(operation, *args))
+
+    @staticmethod
+    def _make_site_pool(config: BrowserGymWebResourcesServerConfig) -> SitePool:
+        if config.site_pool_mode == "local_locks":
+            return LocalSiteLockPool()
+        return UnmanagedSitePool()
 
     def _validate_task(self, task: WebTask) -> None:
         if task.benchmark not in self.config.allowed_benchmarks:

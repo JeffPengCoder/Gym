@@ -23,6 +23,7 @@ from nemo_gym.web.models import (
 from resources_servers.browsergym_web.artifacts import WebArtifactStore
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
 from resources_servers.browsergym_web.profiles import BrowserGymLaunchSpec, resolve_browsergym_profile
+from resources_servers.browsergym_web.visualwebarena_compat import configure_evaluator_model
 
 
 def _json_safe(value: Any) -> Any:
@@ -94,6 +95,11 @@ class BrowserGymBackend:
         except Exception:
             env.close()
             raise
+        if spec.module == "browsergym.visualwebarena":
+            # BrowserGym defers construction of the upstream task until
+            # env.reset(). Only then has VisualWebArena installed its legacy
+            # DATASET/site mapping and imported the evaluator modules.
+            configure_evaluator_model(self.config.visualwebarena_evaluator_model)
 
         self.env = env
         self.task = task
@@ -112,9 +118,11 @@ class BrowserGymBackend:
                 "env_id": spec.env_id,
                 "runtime_profile": task.runtime_profile.value,
                 "observation_profile": spec.observation_profile.value,
-                "verifier_version": spec.verifier_version,
+                "verifier_version": self._verifier_version(),
             }
         )
+        if task.benchmark.value == "visualwebarena" and self.config.visualwebarena_evaluator_model:
+            info["evaluator_model"] = self.config.visualwebarena_evaluator_model
         return self._observation, info
 
     def observe(self) -> WebObservation:
@@ -176,7 +184,7 @@ class BrowserGymBackend:
             task_success=score >= 1.0,
             valid_sample=True,
             evidence=list(self._evidence),
-            verifier_version=self.spec.verifier_version,
+            verifier_version=self._verifier_version(),
             metadata={
                 "benchmark": self.task.benchmark.value,
                 "terminated": self._terminated,
@@ -201,7 +209,6 @@ class BrowserGymBackend:
             raise RuntimeError(
                 "BrowserGym runtime dependencies are missing; install this resource server's optional dependencies"
             ) from exc
-
         action_set = action_module.HighLevelActionSet(
             subsets=list(spec.action_subsets),
             multiaction=True,
@@ -221,6 +228,14 @@ class BrowserGymBackend:
         if spec.task_kwargs:
             env_kwargs["task_kwargs"] = spec.task_kwargs
         return gymnasium.make(spec.env_id, **env_kwargs)
+
+    def _verifier_version(self) -> str:
+        if self.spec is None:
+            raise RuntimeError("cannot identify verifier without an active task")
+        model = self.config.visualwebarena_evaluator_model
+        if self.spec.module == "browsergym.visualwebarena" and model:
+            return f"{self.spec.verifier_version}:judge={model}"
+        return self.spec.verifier_version
 
     def _convert_observation(self, raw: dict[str, Any]) -> WebObservation:
         if self.task is None or self.spec is None:
@@ -268,8 +283,10 @@ class BrowserGymBackend:
             )
             for index, url in enumerate(urls)
         ]
-        goal = raw.get("goal_object") or []
-        if not isinstance(goal, list):
+        raw_goal = raw.get("goal_object") or []
+        if isinstance(raw_goal, (list, tuple)):
+            goal = list(raw_goal)
+        else:
             goal = [{"type": "text", "text": str(raw.get("goal") or self.task.intent)}]
         metadata = {
             "benchmark": self.task.benchmark.value,

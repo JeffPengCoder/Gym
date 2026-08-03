@@ -17,5 +17,6 @@ web_agent:
       max_image_history: 3
       judge_max_screenshots: 3
       visual_observation_text: full_axtree
+      action_prompt_profile: standard
       redact_old_visual_observations: false
       datasets: []

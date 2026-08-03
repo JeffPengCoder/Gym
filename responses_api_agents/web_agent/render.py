@@ -11,7 +11,15 @@ from nemo_gym.openai_utils import NeMoGymEasyInputMessage
 from nemo_gym.web.models import WebActionProfile, WebObservation, WebObservationProfile, WebTask
 
 
-BROWSERGYM_ACTION_GUIDANCE = """Return one Action using BrowserGym high-level calls only.
+BROWSERGYM_CODE_BLOCK_FORMAT = """## Action:
+concise description of the next action
+## Code:
+```python
+click('bid')
+```"""
+
+
+BROWSERGYM_STANDARD_ACTION_GUIDANCE = """Return one Action using BrowserGym high-level calls only.
 Common calls:
 - click('bid'), fill('bid', 'text'), select_option('bid', 'value'), hover('bid')
 - scroll(0, 500), keyboard_press('Enter'), go_back(), go_forward(), goto('https://...')
@@ -22,6 +30,21 @@ You may return at most two calls on separate lines. Arguments must be literals; 
 Use this exact shape:
 Thought: concise reasoning
 Action: click('bid')"""
+
+
+BROWSERGYM_CODE_BLOCK_ACTION_GUIDANCE = f"""Return one action using BrowserGym high-level calls only.
+Common calls:
+- click('bid'), fill('bid', 'text'), select_option('bid', 'value'), hover('bid')
+- scroll(0, 500), keyboard_press('Enter'), go_back(), go_forward(), goto('https://...')
+- new_tab(), tab_focus(0), tab_close()
+- send_msg_to_user('final answer') when the task is complete
+- report_infeasible('reason') only when the task cannot be completed
+You may return at most two calls on separate lines. Arguments must be literals; do not emit arbitrary Python.
+For element actions, use the exact id shown in square brackets in the accessibility tree or screenshot.
+For example, `[297] link 'pics'` must be called as `click('297')`; never pass visible text such as `click('pics')`.
+The Code block must contain the executable call, not a natural-language instruction.
+Use exactly this response shape:
+{BROWSERGYM_CODE_BLOCK_FORMAT}"""
 
 
 WEBVOYAGER_ACTION_GUIDANCE = """Return exactly one WebVoyager-style Action:
@@ -58,10 +81,14 @@ def _goal_images(goal: list[dict[str, Any]]) -> list[str]:
     return images
 
 
-def action_guidance(task: WebTask) -> str:
+def action_guidance(task: WebTask, action_prompt_profile: str = "standard") -> str:
     if task.action_profile == WebActionProfile.WEBVOYAGER_LEGACY:
         return WEBVOYAGER_ACTION_GUIDANCE
-    return BROWSERGYM_ACTION_GUIDANCE
+    if action_prompt_profile == "standard":
+        return BROWSERGYM_STANDARD_ACTION_GUIDANCE
+    if action_prompt_profile == "code_block":
+        return BROWSERGYM_CODE_BLOCK_ACTION_GUIDANCE
+    raise ValueError(f"unsupported action prompt profile: {action_prompt_profile}")
 
 
 def compact_som_text(axtree_text: str, *, max_chars: int = 12_000) -> str:
@@ -96,6 +123,7 @@ def render_observation(
     *,
     step_index: int,
     visual_observation_text: str = "full_axtree",
+    action_prompt_profile: str = "standard",
 ) -> NeMoGymEasyInputMessage:
     """Build one model turn without leaking raw BrowserGym Python objects."""
 
@@ -129,7 +157,7 @@ def render_observation(
         compact_text = compact_som_text(observation.axtree_text)
         if compact_text:
             text_parts.append(f"Labelled interactive elements (ids match the screenshot):\n{compact_text}")
-    text_parts.append(action_guidance(task))
+    text_parts.append(action_guidance(task, action_prompt_profile))
 
     content: list[dict[str, Any]] = [{"type": "input_text", "text": "\n\n".join(text_parts)}]
     if step_index == 0:
@@ -148,11 +176,24 @@ def render_observation(
     return NeMoGymEasyInputMessage(role="user", content=content)
 
 
-def parse_error_message(error: Exception) -> NeMoGymEasyInputMessage:
-    return NeMoGymEasyInputMessage(
-        role="user",
-        content=(
+def parse_error_message(
+    error: Exception,
+    action_prompt_profile: str = "standard",
+) -> NeMoGymEasyInputMessage:
+    if action_prompt_profile == "standard":
+        content = (
             f"Action parse error: {error}. Return a corrected Thought and Action only, "
             "using the required action grammar."
-        ),
+        )
+    elif action_prompt_profile == "code_block":
+        content = (
+            f"Action parse error: {error}. Return a corrected response using exactly this format; "
+            "put an executable BrowserGym call in the Python Code block, not a description:\n"
+            f"{BROWSERGYM_CODE_BLOCK_FORMAT}"
+        )
+    else:
+        raise ValueError(f"unsupported action prompt profile: {action_prompt_profile}")
+    return NeMoGymEasyInputMessage(
+        role="user",
+        content=content,
     )
