@@ -53,6 +53,14 @@ class _EvaluatorScoreZero(BaseException):
     """Control signal for declarative evaluator setup that proves a zero score."""
 
 
+class _AgentScoreZero(BaseException):
+    """Control signal for a policy failure that must not step OSWorld FAIL."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass
 class StepRecord:
     step: int
@@ -114,6 +122,29 @@ def _b64(screenshot_bytes: Optional[bytes]) -> str:
     if not screenshot_bytes:
         return ""
     return base64.b64encode(screenshot_bytes).decode("ascii")
+
+
+def _capture_cursor_free_observation(env: Any, obs: Mapping[str, Any]) -> Dict[str, Any]:
+    """Capture the desktop exactly as Yi's in-VM Sagent loop does.
+
+    OSWorld's Linux ``/screenshot`` endpoint composites the current cursor
+    into the PNG.  Yi calls ``pyautogui.screenshot()`` inside the guest, so
+    its policy image has no cursor.  Capture through the same guest API and
+    preserve every non-image observation field supplied by DesktopEnv.
+    """
+
+    screenshot_path = "/tmp/nemo_gym_sagent_observation.png"
+    command = (
+        "import pyautogui\n"
+        f"pyautogui.screenshot().save({screenshot_path!r}, format='PNG')"
+    )
+    result = env.controller.execute_python_command(command)
+    if not isinstance(result, Mapping) or result.get("returncode") != 0:
+        raise RuntimeError(f"cursor-free screenshot command failed: {result!r}")
+    screenshot = env.controller.get_file(screenshot_path)
+    if not isinstance(screenshot, (bytes, bytearray)) or not bytes(screenshot).startswith(b"\x89PNG\r\n\x1a\n"):
+        raise RuntimeError("cursor-free screenshot download did not return a valid PNG")
+    return {**dict(obs), "screenshot": bytes(screenshot)}
 
 
 def _is_terminal_action(action: Any) -> bool:
@@ -399,6 +430,33 @@ def _patch_setup_execute_contract() -> None:
 
     execute_setup._nemo_gym_returncode_contract = True  # type: ignore[attr-defined]
     controller_class._execute_setup = execute_setup
+
+
+def _normalize_docker_guest_sudo(env: Any) -> bool:
+    """Match the official AMI's sudo and ``/home`` setup assumptions.
+
+    The public docker qcow2 runs its server as ``user`` with password-gated
+    sudo and a root-owned ``/home``. A small set of official task setup steps
+    assumes passwordless sudo or needs to create another home directory. Yi's
+    71.06% recipe applies this idempotent normalization before task setup.
+    """
+
+    enabled = os.environ.get("OSWORLD_GUEST_SUDO_NORMALIZE", "").strip().lower()
+    if enabled not in {"1", "true", "yes"}:
+        return False
+    setup_controller = getattr(env, "setup_controller", None)
+    execute_setup = getattr(setup_controller, "_execute_setup", None)
+    if execute_setup is None:
+        raise RuntimeError("OSWORLD_GUEST_SUDO_NORMALIZE requires env.setup_controller._execute_setup")
+    execute_setup(
+        [
+            "echo '{CLIENT_PASSWORD}' | sudo -S bash -c "
+            '"printf \'user ALL=(ALL) NOPASSWD:ALL\\n\' > /etc/sudoers.d/zz-osworld-nopasswd && '
+            'chmod 440 /etc/sudoers.d/zz-osworld-nopasswd && chmod o+w /home" || true'
+        ],
+        shell=True,
+    )
+    return True
 
 
 def _configure_docker_port_lock_timeout(timeout: float) -> None:
@@ -1647,6 +1705,8 @@ def run_osworld_task(
     final_score = 0.0
     timed_out = False
     setup_score_zero = False
+    agent_score_zero = False
+    agent_max_steps_exhausted = False
     agent_terminal_action: Optional[str] = None
     evaluation_error: Optional[str] = None
     proxy_setup_error = False
@@ -1682,6 +1742,8 @@ def run_osworld_task(
             "proxy_config_file": proxy_info.path if proxy_info is not None else None,
             "proxy_config_sha256": proxy_info.sha256 if proxy_info is not None else None,
             "proxy_config_entry_count": proxy_info.entry_count if proxy_info is not None else 0,
+            "guest_sudo_normalize": os.environ.get("OSWORLD_GUEST_SUDO_NORMALIZE", "").strip().lower()
+            in {"1", "true", "yes"},
         },
     )
     task_logger = task_artifacts.task_logger if task_artifacts is not None else LOG
@@ -1731,6 +1793,8 @@ def run_osworld_task(
         env = env_cls(
             **env_kwargs,
         )
+        if provider_name == "docker" and _normalize_docker_guest_sudo(env):
+            task_logger.info("Applied docker guest sudo and /home normalization")
         linked_cache_files = _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
         if linked_cache_files:
             LOG.info(
@@ -2038,6 +2102,16 @@ def run_osworld_task(
                 len(obs.get("screenshot") or b""),
             )
 
+        initial_observation_delay_s = float(getattr(native_agent, "initial_observation_delay_s", 0.0))
+        if initial_observation_delay_s < 0:
+            raise ValueError("initial_observation_delay_s must be non-negative")
+        if initial_observation_delay_s:
+            task_logger.info("Waiting %.1fs before the first policy observation", initial_observation_delay_s)
+            time.sleep(initial_observation_delay_s)
+        cursor_free_observations = bool(getattr(native_agent, "cursor_free_observations", False))
+        if cursor_free_observations:
+            obs = _capture_cursor_free_observation(env, obs)
+
         initial_screenshot = _save_task_screenshot(task_artifacts, 0, obs)
         _append_task_trajectory(
             task_artifacts,
@@ -2115,16 +2189,52 @@ def run_osworld_task(
 
             task_logger.info("Step %d model response:\n%s", step_idx + 1, model_text)
             task_logger.info("Step %d parsed actions: %r", step_idx + 1, actions)
-            if not actions:
-                # No parseable action — log the step and continue. The model
-                # gets another chance next iteration with a fresh screenshot.
+            if agent_step_info.get("_osworld_force_score_zero"):
+                # Parse failures and other non-infeasible vendor failures are
+                # valid zero-score outcomes. Sending OSWorld's FAIL sentinel
+                # here could incorrectly award an infeasible task, so retain
+                # the policy turn and terminate before env.step/evaluation.
+                reason = str(agent_step_info.get("_osworld_failure_reason") or "agent_failure")
                 steps.append(
                     StepRecord(
                         step=step_idx,
                         model_text=model_text,
                         actions=[],
                         reward=0.0,
-                        done=False,
+                        done=True,
+                        info={"agent": agent_step_info},
+                    )
+                )
+                obs_history.append(obs_entry)
+                screenshot_file = _save_task_screenshot(task_artifacts, step_idx + 1, obs)
+                _append_task_trajectory(
+                    task_artifacts,
+                    {
+                        "event": "step",
+                        "step_num": step_idx + 1,
+                        "response": model_text,
+                        "actions": [],
+                        "reward": 0.0,
+                        "done": True,
+                        "info": {"agent": agent_step_info},
+                        "screenshot_file": screenshot_file,
+                        **_observation_identity(obs),
+                    },
+                )
+                raise _AgentScoreZero(reason)
+            if not actions:
+                # No parseable action normally gives the model another chance.
+                # Yi's Sagent explicitly marks its final policy turn when its
+                # own step budget is exhausted; that final desktop must still
+                # be evaluated and counted, without sending OSWorld FAIL.
+                max_steps_exhausted = agent_step_info.get("_osworld_outcome") == "max_steps_exhausted"
+                steps.append(
+                    StepRecord(
+                        step=step_idx,
+                        model_text=model_text,
+                        actions=[],
+                        reward=0.0,
+                        done=max_steps_exhausted,
                         info={"agent": agent_step_info} if agent_step_info else {},
                     )
                 )
@@ -2138,12 +2248,16 @@ def run_osworld_task(
                         "response": model_text,
                         "actions": [],
                         "reward": 0.0,
-                        "done": False,
+                        "done": max_steps_exhausted,
                         "info": {"agent": agent_step_info} if agent_step_info else {},
                         "screenshot_file": screenshot_file,
                         **_observation_identity(obs),
                     },
                 )
+                if max_steps_exhausted:
+                    agent_max_steps_exhausted = True
+                    finished = True
+                    break
                 if native_agent is not None and hasattr(native_agent, "record_action_result"):
                     native_agent.record_action_result(
                         actions=[],
@@ -2151,18 +2265,27 @@ def run_osworld_task(
                         info={},
                         error="The adapter produced no executable action.",
                     )
+                if bool(getattr(native_agent, "refresh_observation_after_noop", False)):
+                    obs = env._get_obs()  # noqa: SLF001 - match Yi's fresh screenshot at every policy turn.
+                    if cursor_free_observations:
+                        obs = _capture_cursor_free_observation(env, obs)
                 continue
 
             step_done = False
             step_reward = 0.0
             step_info: Dict[str, Any] = {}
+            step_sleep_after_execution = sleep_after_execution
+            if "_osworld_sleep_after_execution" in agent_step_info:
+                step_sleep_after_execution = float(agent_step_info["_osworld_sleep_after_execution"])
+                if step_sleep_after_execution < 0:
+                    raise ValueError("_osworld_sleep_after_execution must be non-negative")
             for action in actions:
                 terminal_action = _terminal_action_name(action)
                 if terminal_action is not None:
                     agent_terminal_action = terminal_action
                 task_logger.info("Step %d executing action: %r", step_idx + 1, action)
                 try:
-                    obs, reward, done, info = env.step(action, sleep_after_execution)
+                    obs, reward, done, info = env.step(action, step_sleep_after_execution)
                 except Exception as exc:  # noqa: BLE001 - record bad model/controller actions.
                     error = f"env.step() failed at step {step_idx}: {exc}"
                     task_logger.exception("Environment step failed at step %d for action %r", step_idx, action)
@@ -2178,6 +2301,9 @@ def run_osworld_task(
                 if _is_terminal_action(action):
                     step_done = True
                     break
+
+            if cursor_free_observations and error is None:
+                obs = _capture_cursor_free_observation(env, obs)
 
             if native_agent is not None and hasattr(native_agent, "record_action_result"):
                 try:
@@ -2233,8 +2359,12 @@ def run_osworld_task(
             if error:
                 break
 
-        # Let the VM settle before scoring, mirroring lib_run_single.py.
-        time.sleep(2)
+        # Yi's Sagent reproduction waits ten seconds; other runners retain
+        # Gym's historical two-second settle unless they opt in explicitly.
+        evaluation_settle_s = float(getattr(native_agent, "evaluation_settle_s", 2.0))
+        if evaluation_settle_s < 0:
+            raise ValueError("evaluation_settle_s must be non-negative")
+        time.sleep(evaluation_settle_s)
         rollout_error_before_evaluation = error
         try:
             eval_logger = pointer_logger if pointer_agent is not None else task_logger
@@ -2282,6 +2412,22 @@ def run_osworld_task(
             task_artifacts,
             {"event": "evaluation", "score": 0.0, "status": "completed", "reason": "setup_score_zero"},
         )
+    except _AgentScoreZero as exc:
+        agent_score_zero = True
+        finished = True
+        final_score = 0.0
+        error = None
+        task_logger.info("OSWorld agent established score zero without a terminal FAIL action: %s", exc.reason)
+        _append_task_trajectory(
+            task_artifacts,
+            {
+                "event": "evaluation",
+                "score": 0.0,
+                "status": "completed",
+                "reason": "agent_failure",
+                "failure_reason": exc.reason,
+            },
+        )
     except Exception as exc:  # noqa: BLE001 — top-level guard so caller sees error not crash.
         proxy_setup_error = bool(requires_proxy and enable_proxy and rollout_phase == "environment_reset")
         error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
@@ -2325,6 +2471,10 @@ def run_osworld_task(
         termination_reason = "timeout"
     elif setup_score_zero:
         termination_reason = "setup_score_zero"
+    elif agent_score_zero:
+        termination_reason = "agent_failure"
+    elif agent_max_steps_exhausted:
+        termination_reason = "max_steps"
     elif evaluation_error:
         termination_reason = "evaluator_error"
     elif proxy_setup_error:

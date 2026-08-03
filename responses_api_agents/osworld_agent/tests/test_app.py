@@ -228,6 +228,48 @@ def test_messages_model_fn_forwards_native_agent_vllm_extensions_through_metadat
     assert "extra_body" not in sent
 
 
+@patch("openai.OpenAI")
+def test_messages_model_fn_preserves_sagent_response_format_and_completion_limit(mock_openai) -> None:
+    message = SimpleNamespace(content='{"ok":true}', tool_calls=[], model_extra={})
+    response = SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")])
+    client = mock_openai.return_value
+    client.chat.completions.create.return_value = response
+    call = _build_messages_model_fn(
+        base_url="http://policy/v1",
+        model_name="Hcompany/Holotron-3-Nano",
+        api_key="test-key",  # pragma: allowlist secret
+    )
+    messages = [{"role": "user", "content": "inspect"}]
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "NoteStructuredOutput",
+            "schema": {"type": "object", "properties": {"thought": {"type": "string"}}},
+        },
+    }
+
+    call(
+        messages,
+        {
+            "model": "Hcompany/Holotron-3-Nano",
+            "messages": messages,
+            "temperature": 0.8,
+            "top_p": 0.95,
+            "max_completion_tokens": 4096,
+            "response_format": response_format,
+            "_nemo_gym_return_message": True,
+            "_nemo_gym_require_stop": True,
+        },
+    )
+
+    sent = client.chat.completions.create.call_args.kwargs
+    assert sent["max_completion_tokens"] == 4096
+    assert "max_tokens" not in sent
+    assert sent["response_format"] == response_format
+    assert sent["temperature"] == 0.8
+    assert sent["top_p"] == 0.95
+
+
 def test_omni_runtime_model_overrides_stale_global_provenance(monkeypatch, caplog) -> None:
     monkeypatch.setenv("NANO_OMNI_VLLM_MODEL", "nvidia/nemotron-3-nano-omni")
     monkeypatch.delenv("OSWORLD_POLICY_MODEL_NAME", raising=False)

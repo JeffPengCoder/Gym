@@ -402,11 +402,23 @@ def _build_messages_model_fn(
         create_kwargs: Dict[str, Any] = {
             "model": payload.get("model") or model_name,
             "messages": messages,
-            "max_tokens": payload.get("max_tokens"),
             "temperature": payload.get("temperature"),
         }
+        # Modern OpenAI-compatible servers accept ``max_completion_tokens``;
+        # preserve a native agent's choice instead of silently converting it
+        # to the older ``max_tokens`` field. Avoid sending either field as
+        # null because some vLLM/OpenAI-compatible schemas reject that.
+        if payload.get("max_completion_tokens") is not None:
+            create_kwargs["max_completion_tokens"] = payload["max_completion_tokens"]
+        elif payload.get("max_tokens") is not None:
+            create_kwargs["max_tokens"] = payload["max_tokens"]
         if payload.get("top_p") is not None:
             create_kwargs["top_p"] = payload["top_p"]
+        if payload.get("response_format") is not None:
+            response_format = payload["response_format"]
+            if not isinstance(response_format, dict):
+                raise TypeError(f"response_format must be a mapping, got {type(response_format).__name__}")
+            create_kwargs["response_format"] = response_format
         # Model-specific native agents may need vLLM request extensions while
         # still routing through Gym's model server.  Encode those extensions
         # in the model server's established metadata side channel; the vLLM

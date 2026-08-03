@@ -1,0 +1,22 @@
+# External vLLM 0.23 transport for Yi's Sagent/Holotron-3-Nano recipe.
+# Launch the endpoint with benchmarks/osworld/tools/serve_holotron3_vllm_023.sh
+# (or the equivalent scheduler profile) before starting Gym.
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:SAGENT_HOLO3_VLLM_BASE_URL,http://127.0.0.1:8000/v1}
+      api_key: ${oc.env:SAGENT_HOLO3_VLLM_API_KEY,local-vllm}  # pragma: allowlist secret
+      model: ${oc.env:SAGENT_HOLO3_SERVED_MODEL,vllm_local}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      preserve_reasoning_in_assistant_content: false
+      replace_developer_role_with_system: false
+      sequential_reasoning_allowed: true
+      is_responses_native: false
+      # Canonical Yi mode leaves the vendor chat-template behavior unchanged.
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}

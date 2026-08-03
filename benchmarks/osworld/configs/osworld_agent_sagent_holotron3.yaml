@@ -1,0 +1,46 @@
+# Yi holotron3_eval base overlay plus an explicit post-A/B source-fidelity
+# repair for Hcompany/Holotron-3-Nano. Set preserve_source_fidelity=false for
+# the byte-aligned Yi instruction contract used by the original comparison.
+#
+# Gym owns model transport and orchestration; the byte-frozen H Company
+# Sagent policy owns its prompt, schema, history, parser, and tool projection.
+# OSWorld continues to own DesktopEnv setup and official evaluation.
+
+osworld_simple_agent:
+  responses_api_agents:
+    osworld_agent:
+      runner_name: sagent_holo3_agent
+      provider_name: docker
+      # Yi Run 7 kept proxy-tagged tasks but ran them on the direct path.
+      enable_proxy: false
+      allow_proxy_tasks_without_proxy: true
+      # Yi's headline 71.06% run used 200. Set 100 for H's literal budget.
+      max_steps: 200
+      max_trajectory_length: 2
+      max_tokens: 4096
+      temperature: 0.8
+      top_p: 0.95
+      # The adapter applies 3.0s + 0.2s only to desktop-effect tools, zero to
+      # terminal/plan tools, and lets wait_desktop sleep inside its action.
+      sleep_after_execution: 0.0
+      task_timeout: 3600
+      reward_mode: raw
+      agent_kwargs:
+        max_image_history_length: 2
+        max_time_s: 3300
+        wait_after_s: 3.0
+        action_pause_s: 0.2
+        cursor_free_observations: true
+        initial_observation_delay_s: 10.0
+        evaluation_settle_s: 10.0
+        refresh_observation_after_noop: true
+        llm_timeout_s: 1200
+        transport_retries: 20
+        transport_retry_sleep_s: 5.0
+        # null is the vendor default and the canonical Yi run setting.
+        enable_thinking: null
+        drop_response_format: false
+        # Keep Yi's vendor prompt/source byte-frozen while adding a narrow,
+        # auditable repair for source-editing tasks: respect existing caret
+        # indentation, validate early, and avoid lossy whole-file recovery.
+        preserve_source_fidelity: true

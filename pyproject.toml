@@ -116,6 +116,12 @@ dependencies = [
     # License: MIT https://github.com/fastapi/fastapi/blob/25a3697cedc6e7dfb84e93c8ff965801486f00f4/LICENSE
     "fastapi",
 
+    # Jinja2: Renders the byte-frozen Sagent OSWorld prompt in the Gym
+    # adapter and its repository-level tests.
+    # Updated Sun Jul 19, 2026 with jinja2==3.1.6
+    # License: BSD-3-Clause https://github.com/pallets/jinja/blob/3.1.6/LICENSE.txt
+    "jinja2==3.1.6",
+
     # MCP Python SDK: Used by Gym-owned Streamable HTTP MCP resources servers.
     # Updated Tue Jun 23, 2026 with mcp>=1.27,<2
     # License: MIT https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE

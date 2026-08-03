@@ -41,6 +41,7 @@ class FakeEnv:
         self.controller = FakeController()
         self.vm_ip = "127.0.0.1"
         self.actions: List[Any] = []
+        self.pauses: List[float] = []
         FakeEnv.instances.append(self)
 
     def reset(self, task_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -52,6 +53,7 @@ class FakeEnv:
 
     def step(self, action: Any, _pause: float):
         self.actions.append(action)
+        self.pauses.append(_pause)
         done = action == "DONE" or (isinstance(action, dict) and action.get("action_type") == "DONE")
         return self._get_obs(), 1.0 if done else 0.0, done, {"done": done}
 
@@ -932,6 +934,241 @@ def test_holo3_runner_uses_gym_transport_and_receives_vm_result(monkeypatch) -> 
     ]
 
 
+def test_native_agent_can_override_each_osworld_action_pause(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    class PauseAgent:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.step = 0
+
+        def reset(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def predict(self, _instruction: str, _obs: Dict[str, Any]):
+            self.step += 1
+            if self.step == 1:
+                return "click", ["pyautogui.click(1, 2)"], {"_osworld_sleep_after_execution": 3.2}
+            return "done", ["DONE"], {"_osworld_sleep_after_execution": 0.0}
+
+    original_load_attr = osworld_client.load_attr
+    monkeypatch.setattr(
+        osworld_client,
+        "load_attr",
+        lambda path: PauseAgent if path == "fake.PauseAgent" else original_load_attr(path),
+    )
+    result = osworld_client.run_osworld_task(
+        {"id": "task-pause", "instruction": "Click and finish."},
+        model_fn=lambda *_args: "unused",
+        runner_name="holo3_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.PauseAgent",
+        messages_model_fn=lambda *_args: "unused",
+        max_steps=2,
+        sleep_after_execution=9.0,
+        task_timeout=10,
+    )
+
+    assert result.finished is True
+    assert FakeEnv.instances[0].pauses == [3.2, 0.0]
+
+
+def test_sagent_yi_parity_refreshes_cursor_free_observations_and_timing(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    sleep_calls: List[float] = []
+    policy_screenshots: List[bytes] = []
+    monkeypatch.setattr(osworld_client.time, "sleep", lambda seconds: sleep_calls.append(float(seconds)))
+
+    class CursorFreeController(FakeController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.capture_count = 0
+
+        def execute_python_command(self, command: str) -> Dict[str, Any]:
+            assert "pyautogui.screenshot()" in command
+            self.capture_count += 1
+            return {"status": "success", "output": "", "error": "", "returncode": 0}
+
+        def get_file(self, path: str) -> bytes:
+            assert path == "/tmp/nemo_gym_sagent_observation.png"
+            return b"\x89PNG\r\n\x1a\n" + f"cursor-free-{self.capture_count}".encode()
+
+    class CursorEnv(FakeEnv):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.controller = CursorFreeController()
+            self.observation_count = 0
+
+        def _get_obs(self) -> Dict[str, Any]:
+            self.observation_count += 1
+            return {
+                "screenshot": f"cursor-overlay-{self.observation_count}".encode(),
+                "accessibility_tree": "<tree />",
+            }
+
+    class YiParityAgent:
+        cursor_free_observations = True
+        initial_observation_delay_s = 10.0
+        evaluation_settle_s = 10.0
+        refresh_observation_after_noop = True
+
+        def __init__(self, **_kwargs: Any) -> None:
+            return None
+
+        def reset(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def predict(self, _instruction: str, obs: Dict[str, Any]):
+            policy_screenshots.append(obs["screenshot"])
+            if len(policy_screenshots) == 1:
+                return "plan", [], {"tool_name": "update_plan"}
+            return "done", ["DONE"], {"tool_name": "answer", "_osworld_sleep_after_execution": 0.0}
+
+    original_load_attr = osworld_client.load_attr
+
+    def load_attr(path: str):
+        if path == "fake.CursorEnv":
+            return CursorEnv
+        if path == "fake.YiParityAgent":
+            return YiParityAgent
+        return original_load_attr(path)
+
+    monkeypatch.setattr(osworld_client, "load_attr", load_attr)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-yi-parity", "instruction": "Plan, then finish."},
+        model_fn=lambda *_args: "unused",
+        runner_name="holo3_agent",
+        env_class_path="fake.CursorEnv",
+        agent_class_path="fake.YiParityAgent",
+        messages_model_fn=lambda *_args: "unused",
+        max_steps=2,
+        sleep_after_execution=0,
+        task_timeout=60,
+    )
+
+    env = CursorEnv.instances[0]
+    assert result.finished is True
+    assert env.controller.capture_count == 3
+    assert env.actions == ["DONE"]
+    assert sleep_calls == [10.0, 10.0]
+    assert policy_screenshots == [
+        b"\x89PNG\r\n\x1a\ncursor-free-1",
+        b"\x89PNG\r\n\x1a\ncursor-free-2",
+    ]
+    assert result.steps[0].actions == []
+    assert result.steps[1].actions == ["DONE"]
+
+
+def test_native_agent_failure_is_valid_zero_without_osworld_fail(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    class ScoreZeroEnv(FakeEnv):
+        def evaluate(self) -> float:
+            raise AssertionError("agent failure must skip OSWorld evaluation")
+
+    class ScoreZeroAgent:
+        def __init__(self, **_kwargs: Any) -> None:
+            return None
+
+        def reset(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def predict(self, _instruction: str, _obs: Dict[str, Any]):
+            return (
+                {"error": "invalid structured output"},
+                [],
+                {
+                    "tool_name": "parse_error",
+                    "_osworld_force_score_zero": True,
+                    "_osworld_failure_reason": "parse_error",
+                },
+            )
+
+    original_load_attr = osworld_client.load_attr
+
+    def load_attr(path: str):
+        if path == "fake.ScoreZeroEnv":
+            return ScoreZeroEnv
+        if path == "fake.ScoreZeroAgent":
+            return ScoreZeroAgent
+        return original_load_attr(path)
+
+    monkeypatch.setattr(osworld_client, "load_attr", load_attr)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-agent-failure", "instruction": "Fail to parse."},
+        model_fn=lambda *_args: "unused",
+        runner_name="holo3_agent",
+        env_class_path="fake.ScoreZeroEnv",
+        agent_class_path="fake.ScoreZeroAgent",
+        messages_model_fn=lambda *_args: "unused",
+        max_steps=2,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.score == 0.0
+    assert result.reward == 0.0
+    assert result.finished is True
+    assert result.mask_sample is False
+    assert result.error is None
+    assert result.termination_reason == "agent_failure"
+    assert result.steps[0].done is True
+    assert FakeEnv.instances[0].actions == []
+
+
+def test_sagent_declared_max_steps_evaluates_and_counts_final_desktop(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    class FinalStateEnv(FakeEnv):
+        def evaluate(self) -> float:
+            return 0.75
+
+    class MaxStepAgent:
+        def __init__(self, **_kwargs: Any) -> None:
+            return None
+
+        def reset(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def predict(self, _instruction: str, _obs: Dict[str, Any]):
+            return (
+                {"content": "final turn"},
+                [],
+                {"_osworld_outcome": "max_steps_exhausted", "tool_name": "click_desktop"},
+            )
+
+    original_load_attr = osworld_client.load_attr
+
+    def load_attr(path: str):
+        if path == "fake.FinalStateEnv":
+            return FinalStateEnv
+        if path == "fake.MaxStepAgent":
+            return MaxStepAgent
+        return original_load_attr(path)
+
+    monkeypatch.setattr(osworld_client, "load_attr", load_attr)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-sagent-max-step", "instruction": "Use the final state."},
+        model_fn=lambda *_args: "unused",
+        runner_name="holo3_agent",
+        env_class_path="fake.FinalStateEnv",
+        agent_class_path="fake.MaxStepAgent",
+        messages_model_fn=lambda *_args: "unused",
+        max_steps=1,
+        sleep_after_execution=0,
+        task_timeout=10,
+        reward_mode="raw",
+    )
+
+    assert result.score == pytest.approx(0.75)
+    assert result.reward == pytest.approx(0.75)
+    assert result.finished is True
+    assert result.mask_sample is False
+    assert result.error is None
+    assert result.termination_reason == "max_steps"
+    assert result.steps[0].done is True
+    assert FinalStateEnv.instances[0].actions == []
+
+
 def test_qwen3_omni_runner_retries_and_merges_adjacent_pyautogui_actions(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
     responses = [
@@ -1195,6 +1432,27 @@ def test_setup_on_nonzero_score_zero_is_a_valid_evaluator_outcome(monkeypatch, t
         osworld_client.logging.getLogger("test-evaluator"),
         disable_gpu=False,
     ) == pytest.approx(0.0)
+
+
+def test_guest_sudo_normalization_is_explicit_and_idempotent(monkeypatch) -> None:
+    calls: List[Dict[str, Any]] = []
+
+    class SetupController:
+        def _execute_setup(self, command: List[str], **kwargs: Any) -> None:
+            calls.append({"command": command, **kwargs})
+
+    env = SimpleNamespace(setup_controller=SetupController())
+    monkeypatch.delenv("OSWORLD_GUEST_SUDO_NORMALIZE", raising=False)
+    assert osworld_client._normalize_docker_guest_sudo(env) is False
+    assert calls == []
+
+    monkeypatch.setenv("OSWORLD_GUEST_SUDO_NORMALIZE", "1")
+    assert osworld_client._normalize_docker_guest_sudo(env) is True
+    assert calls[0]["shell"] is True
+    command = calls[0]["command"][0]
+    assert "{CLIENT_PASSWORD}" in command
+    assert "/etc/sudoers.d/zz-osworld-nopasswd" in command
+    assert "chmod o+w /home" in command
 
 
 def test_docker_port_lock_timeout_is_configurable(monkeypatch) -> None:

@@ -53,6 +53,8 @@ dependencies = [
     "matplotlib~=3.7.4",
     "flask~=3.0.0",
     "func-timeout",
+    # Yi's byte-frozen Sagent prompt is rendered locally by the Gym adapter.
+    "jinja2==3.1.6",
 ]
 
 [build-system]
@@ -62,6 +64,9 @@ requires = ["setuptools>=61"]
 [tool.setuptools.packages.find]
 where = ["../.."]
 include = ["responses_api_agents.osworld_agent*"]
+
+[tool.setuptools.package-data]
+"responses_api_agents.osworld_agent" = ["assets/sagent/*.j2", "assets/sagent/*.json"]
 
 [tool.uv.sources]
 nemo-gym = { path = "../..", editable = true }

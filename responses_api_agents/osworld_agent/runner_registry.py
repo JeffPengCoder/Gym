@@ -46,6 +46,7 @@ _PROMPT_AGENT = "mm_agents.agent.PromptAgent"
 _POINTER_AGENT = "mm_agents.pointer.PointerAgent"
 _M3_AGENT = "mm_agents.m3.M3Agent"
 _HOLO3_AGENT = "responses_api_agents.osworld_agent.holo3_agent.Holo3Agent"
+_SAGENT_HOLO3_AGENT = "responses_api_agents.osworld_agent.sagent_holo3_agent.SagentHolo3Agent"
 _NEMOTRON_V3_NANO_OMNI_AGENT = "responses_api_agents.osworld_agent.adapter_agents.NemotronV3NanoOmniAgent"
 _QWEN3_OMNI_AGENT = "mm_agents.qwen3vl_agent.Qwen3VLAgent"
 
@@ -143,6 +144,22 @@ RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
         agent_kwargs={
             "max_image_history_length": 3,
             "parse_retries": 3,
+        },
+    ),
+    # Yi's holotron3_eval reproduction uses the byte-frozen H Company
+    # Sagent/Surfer scaffold rather than the shorter adapter-owned Holo3
+    # prompt above. It shares the generic Holo3 transport kind but keeps its
+    # schema, history, retry, and termination contracts in a separate class.
+    "sagent_holo3_agent": RunnerSpec(
+        name="sagent_holo3_agent",
+        kind="holo3_agent",
+        action_space="pyautogui",
+        observation_type="screenshot",
+        agent_class_path=_SAGENT_HOLO3_AGENT,
+        agent_kwargs={
+            "max_image_history_length": 2,
+            "wait_after_s": 3.0,
+            "action_pause_s": 0.2,
         },
     ),
     # Nemotron's prompt, history, parser, and coordinate projection live in
