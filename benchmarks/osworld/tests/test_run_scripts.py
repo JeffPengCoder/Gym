@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 VM_PREPARE_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/prepare_osworld_vm.sh"
 CHECK_ENVIRONMENT_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/check_environment.sh"
 MODEL_PROBE_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/probe_model_endpoint.py"
+HOLO3_PROBE_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/probe_holo3_vllm.py"
+SAGENT_PROBE_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/probe_sagent_holotron3_vllm.py"
 START_CONTROL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/start_control.sh"
 RUN_EVAL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_eval.sh"
 CLEANUP_RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_run.sh"
@@ -68,6 +71,48 @@ def test_role_checks_cover_environment_and_model_contracts() -> None:
     assert "/models" in model_text
     assert "/chat/completions" in model_text
     compile(model_text, str(MODEL_PROBE_SCRIPT), "exec")
+
+
+def test_holo3_probe_builds_exact_structured_three_image_payload() -> None:
+    sys.path.insert(0, str(HOLO3_PROBE_SCRIPT.parent))
+    from probe_holo3_vllm import build_probe_payload
+
+    payload, agent = build_probe_payload(model="Hcompany/Holo3-35B-A3B")
+
+    image_count = sum(
+        1
+        for message in payload["messages"]
+        for part in (message.get("content") if isinstance(message.get("content"), list) else [])
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    )
+    assert image_count == 3
+    assert payload["structured_outputs"] == {"json": agent.schema}
+    assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+    assert payload["reasoning_effort"] == "medium"
+
+
+def test_sagent_probe_builds_exact_yi_structured_two_image_payload() -> None:
+    sys.path.insert(0, str(SAGENT_PROBE_SCRIPT.parent))
+    from probe_sagent_holotron3_vllm import build_probe_payload
+
+    payload, agent = build_probe_payload(model="vllm_local")
+
+    image_count = sum(
+        1
+        for message in payload["messages"]
+        for part in (message.get("content") if isinstance(message.get("content"), list) else [])
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    )
+    assert image_count == 2
+    assert payload["model"] == "vllm_local"
+    assert payload["temperature"] == 0.8
+    assert payload["top_p"] == 0.95
+    assert payload["max_completion_tokens"] == 4096
+    assert "max_tokens" not in payload
+    assert payload["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "NoteStructuredOutput", "schema": agent.schema},
+    }
 
 
 def test_cleanup_is_scoped_to_the_run_id() -> None:

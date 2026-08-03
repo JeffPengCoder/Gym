@@ -197,6 +197,58 @@ not repeated. This prompt contract is implemented directly by the standard
 `NemotronV3NanoOmniAgent`, so deployments must not stage a Python subclass or
 extend `PYTHONPATH` with a reproduction overlay.
 
+### Holo3 with vLLM
+
+The `holo3` profile uses Gym's structured Holo3 adapter with three-image
+history, schema-constrained tool calls, and the checkpoint's reasoning
+contract. Probe the exact request shape before preparation:
+
+```bash
+python3 benchmarks/osworld/tools/probe_holo3_vllm.py \
+  --base-url http://MODEL_HOST:8000/v1 \
+  --api-key local-vllm \
+  --model Hcompany/Holo3-35B-A3B
+
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile holo3 \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --policy-base-url http://MODEL_HOST:8000/v1 \
+  --policy-model-name Hcompany/Holo3-35B-A3B
+```
+
+Then use the standard `tools/start_control.sh` and `tools/run_eval.sh`
+lifecycle. The profile defaults to 100 steps, 4096 output tokens, temperature
+0.6, and three retained screenshots.
+
+### Sagent / Holotron-3-Nano with vLLM
+
+The `sagent_holotron3` profile preserves Yi's byte-frozen Sagent prompt,
+structured-note schema, two-image history, timing policy, and raw-score mode.
+Its endpoint must pass the dedicated two-image structured-output probe:
+
+```bash
+python3 benchmarks/osworld/tools/probe_sagent_holotron3_vllm.py \
+  --base-url http://MODEL_HOST:8000/v1 \
+  --api-key local-vllm \
+  --model vllm_local
+
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile sagent_holotron3 \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --policy-base-url http://MODEL_HOST:8000/v1 \
+  --policy-model-name vllm_local
+```
+
+The checked-in profile uses the 200-step Yi run budget and enables the
+versioned source-fidelity repair. Set
+`agent_kwargs.preserve_source_fidelity: false` in an explicit overlay when
+byte-aligning the original pre-repair comparison. Proxy-tagged tasks follow
+the current Gym rule: they run directly when proxy support is disabled.
+
 ## Multi-environment runs
 
 Set concurrency and data selection during preparation, then use the same two

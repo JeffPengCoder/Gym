@@ -11,9 +11,9 @@ osworld_simple_agent:
     osworld_agent:
       runner_name: sagent_holo3_agent
       provider_name: docker
-      # Yi Run 7 kept proxy-tagged tasks but ran them on the direct path.
+      # Current Gym preserves Yi Run 7 parity by running proxy-tagged tasks on
+      # the direct path whenever proxy support is disabled.
       enable_proxy: false
-      allow_proxy_tasks_without_proxy: true
       # Yi's headline 71.06% run used 200. Set 100 for H's literal budget.
       max_steps: 200
       max_trajectory_length: 2

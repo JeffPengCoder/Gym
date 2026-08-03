@@ -12,8 +12,12 @@ from benchmarks.osworld import assets
 from benchmarks.osworld.assets import asset_specs_from_task, ensure_osworld_assets
 from benchmarks.osworld.prepare import (
     DEFAULT_INPUT,
+    HOLO3_AGENT_CONFIG,
+    HOLO3_MODEL_CONFIG,
     NANO_OMNI_AGENT_CONFIG,
     POINTER_AGENT_CONFIG,
+    SAGENT_HOLOTRON3_AGENT_CONFIG,
+    SAGENT_HOLOTRON3_MODEL_CONFIG,
     main,
     prepare,
     select_config_paths,
@@ -118,6 +122,25 @@ def test_nano_omni_profile_is_one_complete_benchmark_config() -> None:
     paths = select_config_paths(profile="nano_omni", execution_backend="gym_sandbox")
 
     assert paths == (NANO_OMNI_AGENT_CONFIG.resolve(),)
+
+
+@pytest.mark.parametrize(
+    ("profile", "agent_config", "model_config"),
+    [
+        ("holo3", HOLO3_AGENT_CONFIG, HOLO3_MODEL_CONFIG),
+        ("sagent_holotron3", SAGENT_HOLOTRON3_AGENT_CONFIG, SAGENT_HOLOTRON3_MODEL_CONFIG),
+    ],
+)
+def test_holo_profiles_compose_agent_and_model_transport(
+    profile: str,
+    agent_config: Path,
+    model_config: Path,
+) -> None:
+    paths = select_config_paths(profile=profile, execution_backend="gym_sandbox")
+
+    assert agent_config.resolve() in paths
+    assert model_config.resolve() in paths
+    assert len(paths) == 3
 
 
 def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path) -> None:

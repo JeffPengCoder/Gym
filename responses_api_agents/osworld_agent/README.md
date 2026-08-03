@@ -60,6 +60,8 @@ OSWorld checkout.
 | `prompt_agent` and `prompt_agent_*` | Upstream OSWorld `PromptAgent` observation/action variants |
 | `pointer_agent` | Upstream PointerAgent planner/executor/verifier loop |
 | `m3_agent` | Upstream MiniMax M3 scaffold and protocol |
+| `holo3_agent` | Gym-owned Holo3 structured prompt, schema, parser, and three-image history |
+| `sagent_holo3_agent` | Byte-frozen Yi/H Company Sagent policy with two-image history and Gym transport |
 | `nemotron_v3_nano_omni_agent` | Gym-owned Nemotron 3 Nano Omni scaffold and parser |
 | `qwen3_omni_agent` | Upstream Qwen3VL scaffold through Gym model transport |
 

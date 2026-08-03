@@ -67,6 +67,30 @@ def test_m3_agent_runner_uses_official_osworld_scaffold() -> None:
     assert spec.observation_type == "screenshot"
 
 
+def test_holo3_runner_is_owned_by_the_gym_adapter() -> None:
+    spec = resolve_runner_spec("holo3_agent")
+
+    assert spec.kind == "holo3_agent"
+    assert spec.agent_class_path == "responses_api_agents.osworld_agent.holo3_agent.Holo3Agent"
+    assert spec.action_space == "pyautogui"
+    assert spec.observation_type == "screenshot"
+    assert spec.agent_kwargs == {"max_image_history_length": 3, "parse_retries": 3}
+
+
+def test_sagent_holo3_runner_keeps_yi_policy_separate() -> None:
+    spec = resolve_runner_spec("sagent_holo3_agent")
+
+    assert spec.kind == "holo3_agent"
+    assert spec.agent_class_path == "responses_api_agents.osworld_agent.sagent_holo3_agent.SagentHolo3Agent"
+    assert spec.action_space == "pyautogui"
+    assert spec.observation_type == "screenshot"
+    assert spec.agent_kwargs == {
+        "max_image_history_length": 2,
+        "wait_after_s": 3.0,
+        "action_pause_s": 0.2,
+    }
+
+
 def test_nemotron_v3_nano_omni_runner_is_owned_by_the_gym_adapter() -> None:
     spec = resolve_runner_spec("nemotron_v3_nano_omni_agent")
 
@@ -121,6 +145,36 @@ def test_nano_omni_profile_includes_model_transport_and_sandbox() -> None:
     assert server_config["runner_name"] == "nemotron_v3_nano_omni_agent"
     assert server_config["sandbox_provider"] == "osworld_sandbox"
     assert server_config["max_trajectory_length"] == 3
+
+
+@pytest.mark.parametrize(
+    ("config_name", "runner_name", "max_steps", "max_tokens"),
+    [
+        ("osworld_agent_holo3.yaml", "holo3_agent", 100, 4096),
+        ("osworld_agent_sagent_holotron3.yaml", "sagent_holo3_agent", 200, 4096),
+    ],
+)
+def test_holo_runner_overlays(
+    config_name: str,
+    runner_name: str,
+    max_steps: int,
+    max_tokens: int,
+) -> None:
+    config = yaml.safe_load((BENCHMARK_CONFIG_DIR / config_name).read_text(encoding="utf-8"))
+    server_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
+
+    assert server_config["runner_name"] == runner_name
+    assert server_config["max_steps"] == max_steps
+    assert server_config["max_tokens"] == max_tokens
+
+
+def test_sagent_overlay_enables_auditable_source_fidelity_repair() -> None:
+    config = yaml.safe_load(
+        (BENCHMARK_CONFIG_DIR / "osworld_agent_sagent_holotron3.yaml").read_text(encoding="utf-8")
+    )
+    agent_kwargs = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]["agent_kwargs"]
+
+    assert agent_kwargs["preserve_source_fidelity"] is True
 
 
 @pytest.mark.parametrize(

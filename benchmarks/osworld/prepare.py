@@ -39,17 +39,29 @@ BASE_AGENT_CONFIG = REPO_ROOT / "responses_api_agents" / "osworld_agent" / "conf
 OPENAI_MODEL_CONFIG = REPO_ROOT / "responses_api_models" / "openai_model" / "configs" / "openai_model.yaml"
 POINTER_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_pointer.yaml"
 NANO_OMNI_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_nano_omni.yaml"
+HOLO3_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_holo3.yaml"
+HOLO3_MODEL_CONFIG = BENCHMARK_DIR / "configs" / "vllm_model_holo3.yaml"
+SAGENT_HOLOTRON3_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_sagent_holotron3.yaml"
+SAGENT_HOLOTRON3_MODEL_CONFIG = BENCHMARK_DIR / "configs" / "vllm_model_sagent_holotron3.yaml"
 OSWORLD_PROVIDER_CONFIG = BENCHMARK_DIR / "configs" / "osworld_docker_pinned.yaml"
 
 PROFILE_CONFIGS: dict[str, tuple[Path, ...]] = {
     "default": (DEFAULT_CONFIG,),
     "pointer": (BASE_AGENT_CONFIG, POINTER_AGENT_CONFIG, OPENAI_MODEL_CONFIG),
     "nano_omni": (NANO_OMNI_AGENT_CONFIG,),
+    "holo3": (BASE_AGENT_CONFIG, HOLO3_AGENT_CONFIG, HOLO3_MODEL_CONFIG),
+    "sagent_holotron3": (
+        BASE_AGENT_CONFIG,
+        SAGENT_HOLOTRON3_AGENT_CONFIG,
+        SAGENT_HOLOTRON3_MODEL_CONFIG,
+    ),
 }
 PROFILE_AGENT_NAMES = {
     "default": "osworld_simple_agent",
     "pointer": "osworld_simple_agent",
     "nano_omni": "osworld_nano_omni_agent",
+    "holo3": "osworld_simple_agent",
+    "sagent_holotron3": "osworld_simple_agent",
 }
 BACKEND_CONFIGS: dict[str, Path | None] = {
     # The reusable OSWorld agent config defines the Docker Sandbox provider;

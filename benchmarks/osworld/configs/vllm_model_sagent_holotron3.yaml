@@ -1,14 +1,13 @@
 # External vLLM 0.23 transport for Yi's Sagent/Holotron-3-Nano recipe.
-# Launch the endpoint with benchmarks/osworld/tools/serve_holotron3_vllm_023.sh
-# (or the equivalent scheduler profile) before starting Gym.
+# Launch the endpoint through the deployment layer before starting Gym.
 
 policy_model:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
-      base_url: ${oc.env:SAGENT_HOLO3_VLLM_BASE_URL,http://127.0.0.1:8000/v1}
-      api_key: ${oc.env:SAGENT_HOLO3_VLLM_API_KEY,local-vllm}  # pragma: allowlist secret
-      model: ${oc.env:SAGENT_HOLO3_SERVED_MODEL,vllm_local}
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}  # pragma: allowlist secret
+      model: ${policy_model_name}
       return_token_id_information: false
       uses_reasoning_parser: true
       uses_interleaved_reasoning: true
