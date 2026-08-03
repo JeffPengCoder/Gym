@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+web_agent:
+  responses_api_agents:
+    web_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: browsergym_web
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      webvoyager_judge_server: null
+      max_steps: 15
+      max_parse_retries: 2
+      max_image_history: 3
+      judge_max_screenshots: 3
+      visual_observation_text: full_axtree
+      redact_old_visual_observations: false
+      datasets: []
