@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -21,6 +22,10 @@ from packaging.version import Version
 
 
 ROOT = Path(__file__).resolve().parents[2]
+CI_WORKFLOWS = (
+    ROOT / ".github/workflows/unit-tests.yml",
+    ROOT / ".github/workflows/full-test-suite.yml",
+)
 
 
 def _uv_config() -> dict:
@@ -43,3 +48,19 @@ def test_uv_dependency_exclusions_are_scoped() -> None:
         "Global string exclusions silently remove direct server requirements; "
         "scope every exclusion to the package that declares the unwanted dependency edge."
     )
+
+
+def test_ci_uv_versions_satisfy_project_minimum() -> None:
+    required_version = SpecifierSet(_uv_config()["required-version"])
+
+    for workflow in CI_WORKFLOWS:
+        match = re.search(r"astral\.sh/uv/([^/]+)/install\.sh", workflow.read_text())
+        assert match, f"Missing pinned uv installer in {workflow}"
+        assert Version(match.group(1)) in required_version
+
+
+def test_mlflow_keeps_shared_cryptography_edge() -> None:
+    exclusions = _uv_config()["exclude-dependencies"]
+    mlflow = next(exclusion for exclusion in exclusions if exclusion["package"]["name"] == "mlflow")
+
+    assert "cryptography" not in mlflow["dependencies"]

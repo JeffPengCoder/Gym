@@ -13,13 +13,10 @@ resolution-markers = [
 ]
 
 [manifest]
-constraints = [
-    { name = "cryptography", specifier = "<49" },
-    { name = "grpcio", specifier = ">=1.81.0rc1" },
-]
+constraints = [{ name = "grpcio", specifier = ">=1.81.0rc1" }]
 excludes = [
     { package = { name = "albumentations" }, dependencies = ["opencv-python"] },
-    { package = { name = "mlflow" }, dependencies = ["alembic", "blinker", "cryptography", "flask", "flask-cors", "graphene", "graphql-core", "graphql-relay", "gunicorn", "huey", "prettytable", "skops", "sqlalchemy", "wcwidth", "werkzeug", "waitress"] },
+    { package = { name = "mlflow" }, dependencies = ["alembic", "blinker", "flask", "flask-cors", "graphene", "graphql-core", "graphql-relay", "gunicorn", "huey", "prettytable", "skops", "sqlalchemy", "wcwidth", "werkzeug", "waitress"] },
     { package = { name = "osworld" }, dependencies = ["agp-client", "opencv-python", "opencv-contrib-python"] },
     { package = { name = "paddleocr" }, dependencies = ["opencv-python", "opencv-contrib-python"] },
 ]
@@ -1596,6 +1593,7 @@ version = "3.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
+    { name = "cryptography" },
     { name = "docker" },
     { name = "matplotlib" },
     { name = "mlflow-skinny" },

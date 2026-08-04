@@ -139,9 +139,7 @@ def start_forwarder(
             length = int(self.headers.get("Content-Length", 0) or 0)
             body = self.rfile.read(length) if length else None
             headers = {
-                key: value
-                for key, value in self.headers.items()
-                if key.lower() not in _HOP_BY_HOP_REQUEST_HEADERS
+                key: value for key, value in self.headers.items() if key.lower() not in _HOP_BY_HOP_REQUEST_HEADERS
             }
             # Guest authentication headers (for example VLC Basic auth) win
             # over route headers with the same name.

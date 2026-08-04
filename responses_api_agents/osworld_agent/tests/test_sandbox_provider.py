@@ -229,10 +229,7 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
         def do_GET(self) -> None:
             seen["path"] = self.path
             seen["route"] = self.headers.get("X-Route", "")
-            content = (
-                b'{"webSocketDebuggerUrl":'
-                b'"ws://100.100.1.2:9222/devtools/browser/test"}'
-            )
+            content = b'{"webSocketDebuggerUrl":"ws://100.100.1.2:9222/devtools/browser/test"}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(content)))
@@ -259,9 +256,7 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
             "path": "/proxy/9222/json/version",
             "route": "cell2",
         }
-        assert response.json()["webSocketDebuggerUrl"] == (
-            f"ws://127.0.0.1:{port}/devtools/browser/test"
-        )
+        assert response.json()["webSocketDebuggerUrl"] == (f"ws://127.0.0.1:{port}/devtools/browser/test")
     finally:
         forwarder.shutdown()
         forwarder.server_close()
@@ -312,9 +307,7 @@ def test_start_failure_cleans_up_sandbox(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         osworld_sandbox,
         "start_forwarder",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("forwarder failed")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("forwarder failed")),
     )
 
     with pytest.raises(RuntimeError, match="forwarder failed"):

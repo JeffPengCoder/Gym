@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import subprocess
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -16,7 +15,7 @@ START_CONTROL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/start_control.sh"
 RUN_EVAL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_eval.sh"
 CLEANUP_RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_run.sh"
 OSWORLD_AGENT_CONFIG = REPO_ROOT / "responses_api_agents/osworld_agent/configs/osworld_agent.yaml"
-OSWORLD_AGENT_PYPROJECT = REPO_ROOT / "responses_api_agents/osworld_agent/pyproject.toml"
+OSWORLD_AGENT_REQUIREMENTS = REPO_ROOT / "responses_api_agents/osworld_agent/requirements.txt"
 
 
 @pytest.mark.parametrize(
@@ -50,9 +49,9 @@ def test_start_control_preflights_native_build_toolchain() -> None:
 
 
 def test_managed_osworld_agent_installs_opensandbox_sdk() -> None:
-    project = tomllib.loads(OSWORLD_AGENT_PYPROJECT.read_text(encoding="utf-8"))
+    requirements = OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8").splitlines()
 
-    assert "nemo-gym[dev,sandbox]" in project["project"]["dependencies"]
+    assert "-e nemo-gym[dev,sandbox] @ ../../" in requirements
 
 
 def test_remote_docker_requires_a_reachable_publish_host() -> None:

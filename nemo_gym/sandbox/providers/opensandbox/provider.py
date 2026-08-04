@@ -120,9 +120,7 @@ class _PooledRestSandbox:
             timeout_s=self.timeout_s,
         )
         if status == 404:
-            return _PooledLifecycleInfo(
-                status=_PooledLifecycleStatus(state="deleted")
-            )
+            return _PooledLifecycleInfo(status=_PooledLifecycleStatus(state="deleted"))
         if status != 200:
             raise RuntimeError(
                 "OpenSandbox pooled lifecycle lookup failed "
@@ -138,9 +136,7 @@ class _PooledRestSandbox:
             ) from error
         raw_status = payload.get("status") or {}
         state = raw_status.get("state") if isinstance(raw_status, Mapping) else None
-        return _PooledLifecycleInfo(
-            status=_PooledLifecycleStatus(state=str(state or "unknown"))
-        )
+        return _PooledLifecycleInfo(status=_PooledLifecycleStatus(state=str(state or "unknown")))
 
     async def kill(self) -> None:
         status, text = await _rest_request(
@@ -151,9 +147,7 @@ class _PooledRestSandbox:
         )
         if status not in {200, 202, 204, 404}:
             raise RuntimeError(
-                "OpenSandbox pooled delete failed "
-                f"(HTTP {status}); sandbox_id={self.sandbox_id!r}; "
-                f"body={text[:300]}"
+                f"OpenSandbox pooled delete failed (HTTP {status}); sandbox_id={self.sandbox_id!r}; body={text[:300]}"
             )
 
     async def close(self) -> None:
@@ -1056,8 +1050,7 @@ class OpenSandboxProvider:
                 remaining_s = remaining_timeout_s()
                 if remaining_s <= 0:
                     LOGGER.warning(
-                        "Timed out scanning OpenSandbox sandboxes for abandoned "
-                        "create marker %s after %s pages",
+                        "Timed out scanning OpenSandbox sandboxes for abandoned create marker %s after %s pages",
                         create_id,
                         page - 1,
                     )
@@ -1070,27 +1063,19 @@ class OpenSandboxProvider:
                 )
                 if status != 200:
                     LOGGER.warning(
-                        "Could not list OpenSandbox sandboxes to reap abandoned "
-                        "create marker %s: page=%s HTTP %s",
+                        "Could not list OpenSandbox sandboxes to reap abandoned create marker %s: page=%s HTTP %s",
                         create_id,
                         page,
                         status,
                     )
                     return
                 data = json.loads(text)
-                items = (
-                    data
-                    if isinstance(data, list)
-                    else data.get("items") or data.get("sandboxes") or []
-                )
+                items = data if isinstance(data, list) else data.get("items") or data.get("sandboxes") or []
                 for item in items:
                     if not isinstance(item, Mapping):
                         continue
                     metadata = item.get("metadata") or {}
-                    if (
-                        not isinstance(metadata, Mapping)
-                        or metadata.get(POOLED_CREATE_MARKER_KEY) != create_id
-                    ):
+                    if not isinstance(metadata, Mapping) or metadata.get(POOLED_CREATE_MARKER_KEY) != create_id:
                         continue
                     sandbox_id = str(item.get("id") or "")
                     if not sandbox_id:
@@ -1098,8 +1083,7 @@ class OpenSandboxProvider:
                     remaining_s = remaining_timeout_s()
                     if remaining_s <= 0:
                         LOGGER.warning(
-                            "Timed out before deleting abandoned OpenSandbox "
-                            "pooled create %s (marker %s)",
+                            "Timed out before deleting abandoned OpenSandbox pooled create %s (marker %s)",
                             sandbox_id,
                             create_id,
                         )
@@ -1111,8 +1095,7 @@ class OpenSandboxProvider:
                         timeout_s=remaining_s,
                     )
                     LOGGER.warning(
-                        "Reaped abandoned OpenSandbox pooled create %s "
-                        "(marker %s, DELETE HTTP %s)",
+                        "Reaped abandoned OpenSandbox pooled create %s (marker %s, DELETE HTTP %s)",
                         sandbox_id,
                         create_id,
                         delete_status,
@@ -1131,8 +1114,7 @@ class OpenSandboxProvider:
                     return
                 page += 1
             LOGGER.warning(
-                "Stopped scanning OpenSandbox sandboxes for abandoned create "
-                "marker %s after %s pages",
+                "Stopped scanning OpenSandbox sandboxes for abandoned create marker %s after %s pages",
                 create_id,
                 page - 1,
             )
@@ -1173,11 +1155,7 @@ class OpenSandboxProvider:
             base_url=self._rest_base_url(),
             headers=self._rest_headers(),
             protocol=self._connection.protocol or "http",
-            timeout_s=float(
-                self._connection.request_timeout_s
-                or self._create.request_timeout_s
-                or 300.0
-            ),
+            timeout_s=float(self._connection.request_timeout_s or self._create.request_timeout_s or 300.0),
             use_server_proxy=self._connection.use_server_proxy,
         )
         created_handle = SandboxHandle(

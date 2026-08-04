@@ -386,9 +386,7 @@ def test_opensandbox_pool_backend_discards_inherited_docker_image(monkeypatch) -
         "opensandbox": {"connection": {}},
     }
     assert "image" not in kwargs["sandbox_spec"]
-    assert kwargs["sandbox_spec"]["provider_options"]["extensions"]["poolRef"] == (
-        "osworld-kvm"
-    )
+    assert kwargs["sandbox_spec"]["provider_options"]["extensions"]["poolRef"] == ("osworld-kvm")
     assert kwargs["path_to_vm"] == "/opensandbox/Ubuntu.qcow2"
     assert kwargs["sandbox_require_kvm"] is False
 

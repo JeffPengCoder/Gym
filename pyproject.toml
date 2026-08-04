@@ -310,10 +310,6 @@ required-version = ">=0.11.25"
 # ensure uv selects a CVE-safe version across all resolver paths.
 # Updated Sun Jun 22, 2026 (CVE remediation)
 constraint-dependencies = [
-    # MLflow's cryptography edge is excluded below, but mcp[crypto] and some
-    # agents install cryptography independently into the same environment.
-    # Keep that independently requested version compatible with locked MLflow 3.14.
-    "cryptography<49",
     "grpcio>=1.81.0rc1",
 ]
 
@@ -325,7 +321,6 @@ package = { name = "mlflow" }
 dependencies = [
     "alembic",
     "blinker",
-    "cryptography",
     "flask",
     "flask-cors",
     "graphene",
