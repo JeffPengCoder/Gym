@@ -15,6 +15,7 @@ MODEL_PROBE_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/probe_model_endpoint.
 START_CONTROL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/start_control.sh"
 RUN_EVAL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_eval.sh"
 CLEANUP_RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_run.sh"
+OPENSANDBOX_CLEANUP_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_opensandbox_run.py"
 OSWORLD_AGENT_CONFIG = REPO_ROOT / "responses_api_agents/osworld_agent/configs/osworld_agent.yaml"
 OSWORLD_AGENT_REQUIREMENTS = REPO_ROOT / "responses_api_agents/osworld_agent/requirements.txt"
 
@@ -38,6 +39,7 @@ def test_runtime_wrappers_delegate_to_current_gym_commands() -> None:
     start_control = START_CONTROL_SCRIPT.read_text(encoding="utf-8")
     assert "env start \\" in start_control
     assert "model-io.jsonl" not in start_control
+    assert "NEMO_GYM_RUN_ID=${NEMO_GYM_RUN_ID:-${RUN_ID}}" in start_control
     assert "eval run --no-serve \\" in RUN_EVAL_SCRIPT.read_text(encoding="utf-8")
 
 
@@ -93,7 +95,9 @@ def test_runtime_wrappers_execute_from_run_specific_env_directory(tmp_path: Path
 def test_managed_osworld_agent_installs_opensandbox_sdk() -> None:
     requirements = OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8").splitlines()
 
-    assert "-e nemo-gym[dev,sandbox] @ ../../" in requirements
+    assert "-e nemo-gym[dev] @ ../../" in requirements
+    assert "opensandbox>=0.1.15" in requirements
+    assert "tenacity>=9.1.4" in requirements
 
 
 def test_remote_docker_requires_a_reachable_publish_host() -> None:
@@ -126,4 +130,10 @@ def test_cleanup_is_scoped_to_the_run_id() -> None:
     assert 'rm -f "${pid_file}"' in text
     assert "label=nemo-gym.run-id=${RUN_ID}" in text
     assert "nemo-gym.workload=osworld" in text
+    assert '"${OPENSANDBOX_CLEANUP}" --run-id "${RUN_ID}" --reap' in text
     assert "logs and results were preserved" in text
+
+    opensandbox_text = OPENSANDBOX_CLEANUP_SCRIPT.read_text(encoding="utf-8")
+    compile(opensandbox_text, str(OPENSANDBOX_CLEANUP_SCRIPT), "exec")
+    assert 'RUN_METADATA_KEYS = ("run-id", "nemo-gym.nvidia.com/run")' in opensandbox_text
+    assert "SandboxManagerSync" in opensandbox_text

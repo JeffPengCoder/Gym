@@ -1,10 +1,15 @@
--e nemo-gym[dev,sandbox] @ ../../
+-e nemo-gym[dev] @ ../../
+
+# OSWorld supports Gym's OpenSandbox backend without installing every optional
+# Sandbox provider SDK into this managed server environment.
+opensandbox>=0.1.15
+tenacity>=9.1.4
 
 # JeffPengCoder/OSWorld nv-gym at an immutable commit: upstream main
-# 83e85344 plus the nv-gym provider overlay and explicit proxy-runtime
-# repair. Use an archive because uv recursively initializes git
-# submodules, while optional SurferH submodules are not needed here.
-osworld @ https://github.com/JeffPengCoder/OSWorld/archive/31b76bf1c4d4e589238b314caa91470afc52651e.tar.gz
+# 83e85344 plus the nv-gym provider overlay, proxy-runtime repair, and VLC
+# gateway-auth fallback. Use an archive because uv recursively initializes
+# git submodules, while optional SurferH submodules are not needed here.
+osworld @ https://github.com/JeffPengCoder/OSWorld/archive/dc23424e9f6316b181bde149e0dc9bc3c5ff78c9.tar.gz
 
 numkong==7.7.0
 docker==7.1.0

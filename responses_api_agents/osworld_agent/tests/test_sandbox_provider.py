@@ -279,7 +279,7 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
         def do_GET(self) -> None:
             seen["path"] = self.path
             seen["route"] = self.headers.get("X-Route", "")
-            content = b'{"webSocketDebuggerUrl":"ws://100.100.1.2:9222/devtools/browser/test"}'
+            content = b'{"webSocketDebuggerUrl":"ws://10.0.0.22:9222/devtools/browser/test"}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(content)))
@@ -292,7 +292,7 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
     monkeypatch.setenv("NO_PROXY", "")
     forwarder, port = start_forwarder(
         f"http://127.0.0.1:{upstream.server_address[1]}/proxy/9222",
-        {"X-Route": "cell2"},
+        {"X-Route": "gateway"},
     )
     try:
         with requests.Session() as session:
@@ -304,7 +304,7 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
         assert response.status_code == 200
         assert seen == {
             "path": "/proxy/9222/json/version",
-            "route": "cell2",
+            "route": "gateway",
         }
         assert response.json()["webSocketDebuggerUrl"] == (f"ws://127.0.0.1:{port}/devtools/browser/test")
     finally:

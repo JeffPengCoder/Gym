@@ -241,7 +241,7 @@ async def test_direct_create_passes_image_auth_to_sdk_create(
     assert image.auth.password == TEST_REGISTRY_PASSWORD
 
 
-async def test_pool_create_uses_cell2_auth_without_execd_connect(
+async def test_pool_create_uses_api_key_auth_without_execd_connect(
     fake_opensandbox_sdk: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -270,7 +270,7 @@ async def test_pool_create_uses_cell2_auth_without_execd_connect(
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={
             "domain": "http://sandbox.example",
-            "api_key": "cell2-key",  # pragma: allowlist secret
+            "api_key": "pool-api-key",  # pragma: allowlist secret
             "request_timeout_s": 30,
         },
         create={"request_timeout_s": 120, "timeout_s": 30},
@@ -290,7 +290,7 @@ async def test_pool_create_uses_cell2_auth_without_execd_connect(
     assert calls[0]["method"] == "POST"
     assert calls[0]["url"] == "http://sandbox.example/v1/sandboxes"
     assert calls[0]["headers"] == {
-        "OPEN-SANDBOX-API-KEY": "cell2-key"  # pragma: allowlist secret
+        "OPEN-SANDBOX-API-KEY": "pool-api-key"  # pragma: allowlist secret
     }
     assert calls[0]["json_body"]["timeout"] == 1800
     assert calls[0]["json_body"]["extensions"] == {"poolRef": "osworld-kvm"}
@@ -424,12 +424,12 @@ async def test_pool_create_requires_pool_ref(
         await provider._create_once(SandboxSpec())
 
 
-async def test_endpoint_normalizes_cell2_scheme() -> None:
+async def test_endpoint_normalizes_missing_scheme() -> None:
     class FakeRaw:
         async def get_endpoint(self, port: int) -> Any:
             assert port == 5000
             return SimpleNamespace(
-                endpoint="100.100.232.228:5000",
+                endpoint="10.0.0.22:5000",
                 headers={"X-Route": "sandbox"},
             )
 
@@ -447,7 +447,7 @@ async def test_endpoint_normalizes_cell2_scheme() -> None:
         5000,
     )
 
-    assert resolved.endpoint == "http://100.100.232.228:5000"
+    assert resolved.endpoint == "http://10.0.0.22:5000"
     assert resolved.headers == {"X-Route": "sandbox"}
 
 
