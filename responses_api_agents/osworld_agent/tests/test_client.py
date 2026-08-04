@@ -17,6 +17,7 @@ from typing import Any, Dict, List
 import pytest
 
 from responses_api_agents.osworld_agent import client as osworld_client
+from responses_api_agents.osworld_agent import remote_environment as osworld_remote
 
 
 class FakeController:
@@ -412,6 +413,51 @@ def test_conflicting_vm_path_aliases_are_rejected(monkeypatch) -> None:
             vm_path="/assets/a.qcow2",
             sandbox_vm_path="/assets/b.qcow2",
         )
+
+
+def test_gym_sandbox_and_remote_resources_are_mutually_exclusive(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        osworld_client.run_osworld_task(
+            {"id": "task-invalid", "instruction": "Finish the task."},
+            model_fn=lambda *_args: "```DONE```",
+            resources_server_url="http://resources.example",
+            sandbox_provider_config={"docker": {}},
+        )
+
+
+def test_remote_resources_backend_receives_transport_configuration(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setattr(osworld_remote, "RemoteDesktopEnv", FakeEnv)
+    monkeypatch.setattr(
+        osworld_client,
+        "_stage_setup_cache",
+        lambda *_args, **_kwargs: pytest.fail("remote resources own their setup cache"),
+    )
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-remote", "instruction": "Finish the task."},
+        model_fn=lambda *_args: "```DONE```",
+        provider_name="remote_docker",
+        env_class_path="fake.FakeEnv",
+        resources_server_url="http://resources.example",
+        resources_server_auth_token="test-token",  # pragma: allowlist secret
+        resources_request_timeout=123,
+        resources_connect_timeout=4,
+        resources_request_retries=2,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.finished is True
+    kwargs = FakeEnv.instances[0].kwargs
+    assert kwargs["resources_server_url"] == "http://resources.example"
+    assert kwargs["auth_token"] == "test-token"  # pragma: allowlist secret
+    assert kwargs["request_timeout"] == 123
+    assert kwargs["connect_timeout"] == 4
+    assert kwargs["request_retries"] == 2
+    assert "path_to_vm" not in kwargs
 
 
 def test_proxy_required_task_runs_directly_when_proxy_is_disabled(monkeypatch) -> None:
