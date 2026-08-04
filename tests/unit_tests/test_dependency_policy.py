@@ -26,6 +26,8 @@ CI_WORKFLOWS = (
     ROOT / ".github/workflows/unit-tests.yml",
     ROOT / ".github/workflows/full-test-suite.yml",
 )
+OSWORLD_AGENT_REQUIREMENTS = ROOT / "responses_api_agents/osworld_agent/requirements.txt"
+OSWORLD_RESOURCES_PROJECT = ROOT / "resources_servers/osworld/pyproject.toml"
 
 
 def _uv_config() -> dict:
@@ -64,3 +66,13 @@ def test_mlflow_keeps_shared_cryptography_edge() -> None:
     mlflow = next(exclusion for exclusion in exclusions if exclusion["package"]["name"] == "mlflow")
 
     assert "cryptography" not in mlflow["dependencies"]
+
+
+def test_osworld_runtime_consumers_share_one_pinned_revision() -> None:
+    revision_pattern = re.compile(r"OSWorld/archive/([0-9a-f]{40})\.tar\.gz")
+    agent_match = revision_pattern.search(OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8"))
+    resources_match = revision_pattern.search(OSWORLD_RESOURCES_PROJECT.read_text(encoding="utf-8"))
+
+    assert agent_match, "The OSWorld agent must pin an immutable OSWorld archive revision"
+    assert resources_match, "The OSWorld Resources Server must pin an immutable OSWorld archive revision"
+    assert agent_match.group(1) == resources_match.group(1)
