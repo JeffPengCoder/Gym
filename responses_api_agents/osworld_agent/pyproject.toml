@@ -34,9 +34,6 @@ dependencies = [
     # OSWorld currently pins requests<2.32; prevent RequestsDependencyWarning
     # when transitive deps pull chardet 7.x.
     "chardet<6",
-    # Pin Ray to match the model server venv. Without this, ng_run can build
-    # the two server venvs at different times and pull different Ray versions.
-    "ray==2.56.1",
     # OSWorld imports these at runtime, but the repository-level Gym
     # pyproject excludes them globally to keep other server venvs lean. Keeping
     # this server on an agent-local pyproject lets uv install them here without
