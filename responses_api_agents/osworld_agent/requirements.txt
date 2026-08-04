@@ -1,0 +1,53 @@
+-e nemo-gym[dev,sandbox] @ ../../
+
+# JeffPengCoder/OSWorld nv-gym at an immutable commit: upstream main
+# 83e85344 plus the nv-gym provider overlay and explicit proxy-runtime
+# repair. Use an archive because uv recursively initializes git
+# submodules, while optional SurferH submodules are not needed here.
+osworld @ https://github.com/JeffPengCoder/OSWorld/archive/31b76bf1c4d4e589238b314caa91470afc52651e.tar.gz
+
+numkong==7.7.0
+docker==7.1.0
+
+# Needed by OSWorld's mm_agents.pointer implementation.
+anthropic
+boto3
+parallel-web
+requests-toolbelt~=1.0.0
+# Support deployment-scoped SOCKS routing to remote Docker-published OSWorld
+# service endpoints without proxying Ray or model traffic.
+PySocks~=1.7.1
+
+# OSWorld currently pins requests<2.32; prevent RequestsDependencyWarning
+# when transitive dependencies pull chardet 7.x.
+chardet<6
+
+# This process joins the parent Ray cluster, so Python (selected by
+# uv-python-version.txt) and Ray must match that cross-process boundary. Torch
+# remains CPU-only and is isolated from the trainer's CUDA environment.
+ray==2.55.1
+torch==2.11.0
+torchvision==0.26.0
+
+# OSWorld imports these packages at runtime but does not declare all of them.
+cryptography
+cffi
+scipy
+# The standalone OSWorld Python 3.12 pins do not provide a compatible Python
+# 3.13 numerical stack. These versions are also mirrored in uv-overrides.txt
+# so transitive OSWorld constraints cannot downgrade them.
+numpy==2.5.1
+pynput
+ag2
+
+# The root resolver policy removes OSWorld's GUI OpenCV dependency edges; this
+# server supplies the compatible headless wheel instead.
+opencv-python-headless==5.0.0.93
+easyocr==1.7.2
+Pillow~=11.0.0
+scikit-learn
+matplotlib==3.10.6
+# google-generativeai (pulled by OSWorld) currently requires protobuf<6.
+protobuf==5.29.6
+flask~=3.0.0
+func-timeout
