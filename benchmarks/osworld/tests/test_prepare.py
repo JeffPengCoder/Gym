@@ -125,7 +125,7 @@ def test_nano_omni_profile_is_one_complete_benchmark_config() -> None:
     assert paths == (NANO_OMNI_AGENT_CONFIG.resolve(),)
 
 
-def test_opensandbox_backend_adds_cell2_provider_config() -> None:
+def test_opensandbox_backend_adds_pool_provider_config() -> None:
     paths = select_config_paths(
         profile="nano_omni",
         execution_backend="gym_opensandbox",
