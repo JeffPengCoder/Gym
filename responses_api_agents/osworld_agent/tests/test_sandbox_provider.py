@@ -245,7 +245,7 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
     monkeypatch.setenv("NO_PROXY", "")
     forwarder, port = start_forwarder(
         f"http://127.0.0.1:{upstream.server_address[1]}/proxy/9222",
-        {"X-Route": "cell2"},
+        {"X-Route": "gateway"},
     )
     try:
         with requests.Session() as session:
@@ -257,7 +257,7 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
         assert response.status_code == 200
         assert seen == {
             "path": "/proxy/9222/json/version",
-            "route": "cell2",
+            "route": "gateway",
         }
         assert response.json()["webSocketDebuggerUrl"] == (
             f"ws://127.0.0.1:{port}/devtools/browser/test"
