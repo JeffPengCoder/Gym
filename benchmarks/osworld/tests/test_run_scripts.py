@@ -65,12 +65,19 @@ def test_runtime_wrappers_execute_from_run_specific_env_directory(tmp_path: Path
     fake_gym = tmp_path / "gym"
     fake_gym.write_text('#!/bin/bash\nprintf "%s\\n" "$PWD" > "$PWD_CAPTURE"\n', encoding="utf-8")
     fake_gym.chmod(0o755)
+    python_include = tmp_path / "include"
+    python_include.mkdir()
+    (python_include / "Python.h").write_text("/* test header */\n", encoding="utf-8")
+    fake_python = tmp_path / "python"
+    fake_python.write_text(f'#!/bin/bash\nprintf "%s\\n" "{python_include}"\n', encoding="utf-8")
+    fake_python.chmod(0o755)
 
     env = os.environ.copy()
     env.pop("DOCKER_HOST", None)
     env.update(
         {
             "GYM_BIN": str(fake_gym),
+            "GYM_PYTHON": str(fake_python),
             "NEMO_GYM_CONTROL_HOST": "127.0.0.1",
             "OSWORLD_ENV_FILE": str(env_dir / "env.yaml"),
             "OSWORLD_RUN_ID": "test-profile",
