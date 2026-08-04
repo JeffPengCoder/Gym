@@ -300,9 +300,7 @@ def write_env(
         "gym_opensandbox": "osworld_opensandbox",
     }.get(execution_backend)
     emitted_vm_path: str | Path | None = (
-        OPENSANDBOX_VM_SENTINEL
-        if execution_backend == "gym_opensandbox"
-        else resolved_vm_path
+        OPENSANDBOX_VM_SENTINEL if execution_backend == "gym_opensandbox" else resolved_vm_path
     )
     contents = "\n".join(
         [

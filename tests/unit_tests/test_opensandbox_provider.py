@@ -239,6 +239,8 @@ async def test_direct_create_passes_image_auth_to_sdk_create(
     assert image.image == "registry.example/repo:tag"
     assert image.auth.username == "user"
     assert image.auth.password == TEST_REGISTRY_PASSWORD
+
+
 async def test_pool_create_uses_cell2_auth_without_execd_connect(
     fake_opensandbox_sdk: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -361,11 +363,7 @@ async def test_pool_post_cancellation_reaps_exact_create_marker(
         nonlocal create_marker
         calls.append((method, url))
         if method == "POST":
-            create_marker = str(
-                json_body["metadata"][
-                    opensandbox_provider.POOLED_CREATE_MARKER_KEY
-                ]
-            )
+            create_marker = str(json_body["metadata"][opensandbox_provider.POOLED_CREATE_MARKER_KEY])
             raise asyncio.CancelledError
         if method == "GET":
             if "page=1&" in url:

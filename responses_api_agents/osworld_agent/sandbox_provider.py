@@ -225,10 +225,7 @@ class GymSandboxDesktopProvider:
         return SandboxSpec(**values)
 
     def _resolve_service_endpoints(self, sandbox: Sandbox) -> tuple[str, dict[int, int]]:
-        endpoints = {
-            container_port: sandbox.endpoint(container_port)
-            for container_port in OSWORLD_SERVICE_PORTS
-        }
+        endpoints = {container_port: sandbox.endpoint(container_port) for container_port in OSWORLD_SERVICE_PORTS}
 
         # Preserve the zero-hop path for local Docker or a routed Pod network.
         try:
@@ -242,8 +239,7 @@ class GymSandboxDesktopProvider:
             hosts = {host for host, _ in direct.values()}
             if len(hosts) == 1:
                 return hosts.pop(), {
-                    container_port: endpoint_port
-                    for container_port, (_, endpoint_port) in direct.items()
+                    container_port: endpoint_port for container_port, (_, endpoint_port) in direct.items()
                 }
 
         # OpenSandbox's externally reachable endpoint is a path-based gateway
