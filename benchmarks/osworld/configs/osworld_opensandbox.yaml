@@ -1,4 +1,4 @@
-# Cell-2 OpenSandbox lifecycle provider for the server-side OSWorld KVM Pool.
+# OpenSandbox lifecycle provider for a server-side OSWorld KVM Pool.
 # Credentials stay in environment variables; generated env.yaml files never
 # contain the API key.
 
@@ -12,9 +12,9 @@ osworld_opensandbox:
       api_key: ${oc.env:OPENSANDBOX_API_KEY}
       protocol: http
       request_timeout_s: 300
-      # External controllers cannot route Cell-2's 100.100/16 Pod CIDR.
-      # The OSWorld adapter supplies local host:port forwarders for these
-      # path-based gateway endpoints, including Chrome CDP WebSockets.
+      # External controllers may not route a Pool's private Pod network. The
+      # OSWorld adapter supplies local host:port forwarders for path-based
+      # gateway endpoints, including Chrome CDP WebSockets.
       use_server_proxy: true
     create:
       request_timeout_s: 1200
