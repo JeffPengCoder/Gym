@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from typing import Any, Literal, Optional
 
+from aiohttp import ClientResponseError
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field
 
@@ -18,6 +20,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.web.actions import ActionParseError, parse_model_action
 from nemo_gym.web.models import WebBenchmark, WebObservation, WebTask, WebVerifierResult
@@ -40,6 +43,14 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     visual_observation_text: Literal["full_axtree", "som_only", "none"] = "full_axtree"
     action_prompt_profile: Literal["standard", "code_block"] = "standard"
     redact_old_visual_observations: bool = False
+    resources_request_timeout_secs: float = Field(default=180.0, gt=0.0)
+    seed_request_timeout_secs: float = Field(default=1800.0, gt=0.0)
+    seed_retry_initial_delay_secs: float = Field(default=2.0, ge=0.0)
+    seed_retry_max_delay_secs: float = Field(default=30.0, ge=0.0)
+    model_request_timeout_secs: float = Field(default=600.0, gt=0.0)
+    judge_request_timeout_secs: float = Field(default=300.0, gt=0.0)
+    close_request_timeout_secs: float = Field(default=30.0, gt=0.0)
+    run_timeout_secs: float = Field(default=1800.0, gt=0.0)
 
 
 class WebAgentRunRequest(BaseRunRequest):
@@ -162,20 +173,34 @@ class WebAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        model_response = await self.server_client.post(
+        model_response, model_payload = await self._post_json(
             server_name=self.config.model_server.name,
             url_path=self.url_path_for_request("/v1/responses", request),
             json=body,
             cookies=request.cookies,
+            timeout_secs=self.config.model_request_timeout_secs,
         )
-        await raise_for_status(model_response)
-        result = NeMoGymResponse.model_validate(await get_response_json(model_response))
+        result = NeMoGymResponse.model_validate(model_payload)
         for key, value in model_response.cookies.items():
             response.set_cookie(key, value)
         return result
 
     async def run(self, request: Request, body: WebAgentRunRequest) -> WebAgentRunResponse:
         task = _resolve_task(body)
+        try:
+            return await asyncio.wait_for(
+                self._run_once(request, body, task),
+                timeout=self.config.run_timeout_secs,
+            )
+        except Exception as exc:  # noqa: BLE001 - one stalled browser must not abort the shard.
+            return self._failure_response(body, task, exc)
+
+    async def _run_once(
+        self,
+        request: Request,
+        body: WebAgentRunRequest,
+        task: WebTask,
+    ) -> WebAgentRunResponse:
         env_cookies = request.cookies
         model_cookies = None
         seeded = False
@@ -191,21 +216,17 @@ class WebAgent(SimpleResponsesAPIAgent):
         model_turns = 0
         execution_failures = 0
         verifier_result: WebVerifierResult | None = None
-        infrastructure_error: Exception | None = None
 
         base_body = body.responses_create_params.model_copy(deep=True)
         if isinstance(base_body.input, str):
             base_body.input = [NeMoGymEasyInputMessage(role="user", content=base_body.input)]
 
         try:
-            seed_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/seed_session",
-                json={"task": task.model_dump(mode="json")},
+            seed_response, seed_payload = await self._seed_session(
+                task=task,
                 cookies=env_cookies,
             )
-            await raise_for_status(seed_response)
-            seed_data = WebSeedSessionResponse.model_validate(await get_response_json(seed_response))
+            seed_data = WebSeedSessionResponse.model_validate(seed_payload)
             env_cookies = seed_response.cookies
             seeded = True
             observation = seed_data.observation
@@ -230,14 +251,14 @@ class WebAgent(SimpleResponsesAPIAgent):
                         redact_observation_text=self.config.redact_old_visual_observations,
                     )
                     model_body = base_body.model_copy(update={"input": model_input})
-                    raw_model_response = await self.server_client.post(
+                    raw_model_response, model_payload = await self._post_json(
                         server_name=self.config.model_server.name,
                         url_path=self.url_path_for_run("/v1/responses", body),
                         json=model_body,
                         cookies=model_cookies,
+                        timeout_secs=self.config.model_request_timeout_secs,
                     )
-                    await raise_for_status(raw_model_response)
-                    model_response = NeMoGymResponse.model_validate(await get_response_json(raw_model_response))
+                    model_response = NeMoGymResponse.model_validate(model_payload)
                     model_cookies = raw_model_response.cookies
                     last_model_response = model_response
                     model_turns += 1
@@ -266,7 +287,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                 if action is None:
                     break
 
-                step_response = await self.server_client.post(
+                step_response, step_payload = await self._post_json(
                     server_name=self.config.resources_server.name,
                     url_path="/step",
                     json={
@@ -274,9 +295,9 @@ class WebAgent(SimpleResponsesAPIAgent):
                         "action": action.model_dump(mode="json"),
                     },
                     cookies=env_cookies,
+                    timeout_secs=self.config.resources_request_timeout_secs,
                 )
-                await raise_for_status(step_response)
-                step_data = WebStepResponse.model_validate(await get_response_json(step_response))
+                step_data = WebStepResponse.model_validate(step_payload)
                 env_cookies = step_response.cookies
                 environment_steps += 1
                 if not step_data.execution_ok:
@@ -303,14 +324,14 @@ class WebAgent(SimpleResponsesAPIAgent):
             if not rollout_finished:
                 truncated = True
 
-            evaluate_response = await self.server_client.post(
+            evaluate_response, evaluate_payload = await self._post_json(
                 server_name=self.config.resources_server.name,
                 url_path="/evaluate",
                 json={"final_answer": final_answer},
                 cookies=env_cookies,
+                timeout_secs=self.config.resources_request_timeout_secs,
             )
-            await raise_for_status(evaluate_response)
-            evaluation = WebEvaluateResponse.model_validate(await get_response_json(evaluate_response))
+            evaluation = WebEvaluateResponse.model_validate(evaluate_payload)
             env_cookies = evaluate_response.cookies
             verifier_result = evaluation.result
 
@@ -322,30 +343,22 @@ class WebAgent(SimpleResponsesAPIAgent):
                     urls=list(url_history),
                     body=body,
                 )
-        except Exception as exc:  # noqa: BLE001 - return a masked rollout when a trajectory exists.
-            infrastructure_error = exc
-            if last_model_response is None:
-                raise
-            verifier_result = WebVerifierResult(
-                valid_sample=False,
-                failure_kind=f"infrastructure_error:{type(exc).__name__}",
-                metadata={"error": str(exc)},
-            )
         finally:
             if seeded:
                 try:
-                    await self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path="/close",
-                        json={},
-                        cookies=env_cookies,
+                    await asyncio.wait_for(
+                        self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path="/close",
+                            json={},
+                            cookies=env_cookies,
+                        ),
+                        timeout=self.config.close_request_timeout_secs,
                     )
                 except Exception:  # noqa: BLE001 - cleanup must not replace a completed result.
                     pass
 
         if last_model_response is None:
-            if infrastructure_error is not None:
-                raise infrastructure_error
             raise RuntimeError("web rollout ended before the policy returned a response")
         if verifier_result is None:
             verifier_result = WebVerifierResult(
@@ -388,7 +401,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                 failure_kind="webvoyager_judge_not_configured",
                 verifier_version="webvoyager-llm-judge-v1",
             )
-        judge_response = await self.server_client.post(
+        _judge_response, payload = await self._post_json(
             server_name=self.config.webvoyager_judge_server.name,
             url_path="/verify_webvoyager",
             json={
@@ -397,13 +410,134 @@ class WebAgent(SimpleResponsesAPIAgent):
                 "screenshots": screenshots,
                 "page_urls": urls,
             },
+            timeout_secs=self.config.judge_request_timeout_secs,
         )
-        await raise_for_status(judge_response)
-        payload = await get_response_json(judge_response)
         candidate = payload.get("result") if isinstance(payload, dict) else None
         if candidate is None:
             raise RuntimeError("WebVoyager judge response did not contain result")
         return WebVerifierResult.model_validate(candidate)
+
+    async def _post_json(
+        self,
+        *,
+        server_name: str,
+        url_path: str,
+        timeout_secs: float,
+        **kwargs: Any,
+    ) -> tuple[Any, Any]:
+        """Bound headers, status handling, and response-body parsing as one hop."""
+
+        async def invoke() -> tuple[Any, Any]:
+            server_response = await self.server_client.post(
+                server_name=server_name,
+                url_path=url_path,
+                **kwargs,
+            )
+            await raise_for_status(server_response)
+            return server_response, await get_response_json(server_response)
+
+        return await asyncio.wait_for(invoke(), timeout=timeout_secs)
+
+    async def _seed_session(
+        self,
+        *,
+        task: WebTask,
+        cookies: Any,
+    ) -> tuple[Any, Any]:
+        """Wait through transient resource-server failures without spending a rollout attempt."""
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.config.seed_request_timeout_secs
+        delay = self.config.seed_retry_initial_delay_secs
+        attempt = 0
+        while True:
+            attempt += 1
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError(f"seed_session exceeded {self.config.seed_request_timeout_secs:.1f}s retry budget")
+            try:
+                return await self._post_json(
+                    server_name=self.config.resources_server.name,
+                    url_path="/seed_session",
+                    json={"task": task.model_dump(mode="json")},
+                    cookies=cookies,
+                    timeout_secs=remaining,
+                )
+            except ClientResponseError as exc:
+                if not 500 <= exc.status < 600:
+                    raise
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                sleep_for = min(delay, remaining)
+                print(
+                    f"[web-agent-seed-retry] {task.benchmark.value}/{task.task_id}: "
+                    f"HTTP {exc.status} on attempt {attempt}; retrying in {sleep_for:.1f}s",
+                    flush=True,
+                )
+                await asyncio.sleep(sleep_for)
+                if delay > 0:
+                    delay = min(
+                        max(delay * 2, self.config.seed_retry_initial_delay_secs),
+                        self.config.seed_retry_max_delay_secs,
+                    )
+
+    @staticmethod
+    def _failure_response(
+        body: WebAgentRunRequest,
+        task: WebTask,
+        exc: Exception,
+    ) -> WebAgentRunResponse:
+        """Return a retryable sidecar row for a bounded infrastructure failure.
+
+        A real scheduler/process kill cannot return a response and therefore
+        naturally leaves only a checkpoint gap.  Once this method runs, the
+        agent has converted the failure into a bounded, attributable outcome;
+        persisting it in the failure sidecar is what lets resume enforce the
+        per-task retry budget instead of redispatching the row forever.
+        """
+
+        detail = f"{type(exc).__name__}: {exc}"
+        response_content = getattr(exc, "response_content", None)
+        if isinstance(response_content, bytes):
+            response_content = response_content.decode("utf-8", errors="replace")
+        if response_content:
+            detail = f"{detail}; response_body={str(response_content).strip()}"
+        detail = detail[:500]
+        failure_kind = f"infrastructure_error:{type(exc).__name__}"
+        print(
+            f"[web-agent-retryable_infrastructure] {task.benchmark.value}/{task.task_id}: {detail}",
+            flush=True,
+        )
+        verifier_result = WebVerifierResult(
+            valid_sample=False,
+            failure_kind=failure_kind,
+            metadata={"error": detail},
+        )
+        empty_response = NeMoGymResponse(
+            id=f"web-agent-failure-{task.benchmark.value}-{task.task_id}",
+            created_at=0.0,
+            model=body.responses_create_params.model or "web-policy",
+            object="response",
+            output=[],
+            tools=[],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+        )
+        return WebAgentRunResponse(
+            responses_create_params=body.responses_create_params,
+            response=empty_response,
+            reward=0.0,
+            benchmark=task.benchmark.value,
+            task_id=task.task_id,
+            mask_sample=True,
+            failure_kind=failure_kind,
+            verifier_result=verifier_result,
+            **{
+                NG_FAILURE_CLASS_KEY: "retryable_infrastructure",
+                "error": detail,
+            },
+        )
 
     @staticmethod
     def _remember_evidence(

@@ -175,7 +175,12 @@ class BrowserGymSessionManager:
                 lease.isolated,
             )
             return self._seed_response(state)
-        except Exception:
+        # Client-side seed timeouts cancel this coroutine.  CancelledError is a
+        # BaseException on supported Python versions, so catching only
+        # Exception leaks the session ID in _creating (and can leak an acquired
+        # site lease).  That permanently consumes admission capacity and turns
+        # every later rollout into a fast 503 until the server is restarted.
+        except BaseException:
             if backend is not None:
                 try:
                     await self._run_backend(backend.close)

@@ -88,6 +88,30 @@ def test_backend_keeps_execution_and_benchmark_scores_separate(tmp_path, monkeyp
     assert env.closed is True
 
 
+def test_invalid_high_level_action_is_returned_to_agent(tmp_path, monkeypatch):
+    class RejectingEnv(FakeEnv):
+        def step(self, action):
+            raise ValueError(f"invalid high-level action: {action}")
+
+    backend = BrowserGymBackend(
+        _config(tmp_path),
+        "session-invalid-action",
+        WebArtifactStore(tmp_path),
+    )
+    monkeypatch.setattr(backend, "_make_environment", lambda _spec: RejectingEnv())
+    backend.reset(WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0", seed=7))
+
+    result = backend.step(WebAction(name="click", script="click('missing')"))
+
+    assert result.execution_ok is False
+    assert result.terminated is False
+    assert result.truncated is False
+    assert result.observation.last_action == "click('missing')"
+    assert "invalid high-level action" in result.observation.last_action_error
+    assert result.info["action_error"] == result.observation.last_action_error
+    backend.close()
+
+
 def test_visualwebarena_evaluator_hook_runs_after_upstream_reset(tmp_path, monkeypatch):
     events = []
 
@@ -96,9 +120,7 @@ def test_visualwebarena_evaluator_hook_runs_after_upstream_reset(tmp_path, monke
             events.append("reset")
             return super().reset(seed)
 
-    config = _config(tmp_path).model_copy(
-        update={"visualwebarena_evaluator_model": "azure/anthropic/claude-opus-4-7"}
-    )
+    config = _config(tmp_path).model_copy(update={"visualwebarena_evaluator_model": "azure/anthropic/claude-opus-4-7"})
     backend = BrowserGymBackend(config, "session-vwa", WebArtifactStore(tmp_path))
     monkeypatch.setattr(backend, "_make_environment", lambda _spec: OrderedEnv())
     monkeypatch.setattr(

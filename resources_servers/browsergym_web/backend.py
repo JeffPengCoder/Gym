@@ -136,7 +136,32 @@ class BrowserGymBackend:
         if self._terminated or self._truncated:
             raise RuntimeError("BrowserGym episode has already finished")
 
-        raw_observation, reward, terminated, truncated, raw_info = self.env.step(action.script)
+        try:
+            raw_observation, reward, terminated, truncated, raw_info = self.env.step(action.script)
+        except ValueError as exc:
+            # BrowserGym's strict high-level action mapper raises ValueError for
+            # a syntactically valid but non-executable call (for example a bad
+            # argument shape or element reference).  This is an agent action
+            # failure, not a resource-server outage: return it in the next
+            # observation so the policy can correct itself instead of turning
+            # the whole rollout into an HTTP 400 infrastructure sidecar.
+            self._step_index += 1
+            error = f"{type(exc).__name__}: {exc}"
+            assert self._observation is not None
+            self._observation = self._observation.model_copy(
+                update={
+                    "last_action": action.script,
+                    "last_action_error": error,
+                }
+            )
+            return WebStepResult(
+                observation=self._observation,
+                execution_ok=False,
+                benchmark_reward=0.0,
+                terminated=False,
+                truncated=False,
+                info={"action_error": error},
+            )
         self._step_index += 1
         self._latest_score = max(self._latest_score, float(reward or 0.0))
         self._terminated = bool(terminated)

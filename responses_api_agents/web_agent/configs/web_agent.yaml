@@ -19,4 +19,12 @@ web_agent:
       visual_observation_text: full_axtree
       action_prompt_profile: standard
       redact_old_visual_observations: false
+      resources_request_timeout_secs: 180.0
+      seed_request_timeout_secs: 1800.0
+      seed_retry_initial_delay_secs: 2.0
+      seed_retry_max_delay_secs: 30.0
+      model_request_timeout_secs: 600.0
+      judge_request_timeout_secs: 300.0
+      close_request_timeout_secs: 30.0
+      run_timeout_secs: 1800.0
       datasets: []

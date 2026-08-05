@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage
@@ -75,8 +77,8 @@ class _FakeHttpResponse:
         return None
 
 
-def _agent(*, parse_retries=1, judge=False):
-    config = WebAgentConfig(
+def _agent(*, parse_retries=1, judge=False, **config_updates):
+    config_values = dict(
         name="web_agent",
         host="localhost",
         port=8001,
@@ -86,6 +88,8 @@ def _agent(*, parse_retries=1, judge=False):
         webvoyager_judge_server=(ResourcesServerRef(type="resources_servers", name="judge") if judge else None),
         max_parse_retries=parse_retries,
     )
+    config_values.update(config_updates)
+    config = WebAgentConfig(**config_values)
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"observability_enabled": False}
     return WebAgent(config=config, server_client=client)
@@ -293,3 +297,167 @@ async def test_webvoyager_routes_final_evidence_to_external_judge():
     assert judge_call[0] == "judge"
     assert judge_call[2]["final_answer"] == "42"
     assert len(judge_call[2]["screenshots"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_browser_request_timeout_is_retryable_and_cleanup_is_bounded():
+    agent = _agent(
+        resources_request_timeout_secs=0.01,
+        close_request_timeout_secs=0.1,
+        run_timeout_secs=1.0,
+    )
+    calls = []
+
+    async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+        del server_name, json, cookies, kwargs
+        calls.append(url_path)
+        if url_path == "/seed_session":
+            return _FakeHttpResponse(_seed())
+        if url_path == "/v1/responses":
+            return _FakeHttpResponse(_model_response("Thought: click\nAction: click('a1')"))
+        if url_path == "/step":
+            await asyncio.sleep(1.0)
+        if url_path == "/close":
+            return _FakeHttpResponse({"closed": True})
+        raise AssertionError(f"unexpected path: {url_path}")
+
+    agent.server_client.post = AsyncMock(side_effect=post)
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": "Solve"},
+        web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+    )
+
+    result = await agent.run(request, body)
+    dumped = result.model_dump()
+
+    assert result.reward == 0.0
+    assert result.mask_sample is True
+    assert result.failure_kind == "infrastructure_error:TimeoutError"
+    assert dumped["_ng_failure_class"] == "retryable_infrastructure"
+    assert "_ng_no_persist" not in dumped
+    assert "/close" in calls
+
+
+@pytest.mark.asyncio
+async def test_seed_session_uses_independent_long_poll_timeout():
+    agent = _agent(
+        resources_request_timeout_secs=0.01,
+        seed_request_timeout_secs=0.2,
+        run_timeout_secs=1.0,
+    )
+
+    async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+        del server_name, json, cookies, kwargs
+        if url_path == "/seed_session":
+            await asyncio.sleep(0.05)
+            return _FakeHttpResponse(_seed())
+        if url_path == "/v1/responses":
+            return _FakeHttpResponse(_model_response("Thought: done\nAction: send_msg_to_user('done')"))
+        if url_path == "/step":
+            return _FakeHttpResponse(
+                {
+                    "operation_id": "step-0",
+                    "observation": _observation(),
+                    "execution_ok": True,
+                    "terminated": True,
+                }
+            )
+        if url_path == "/evaluate":
+            return _FakeHttpResponse({"result": {"valid_sample": True}})
+        if url_path == "/close":
+            return _FakeHttpResponse({"closed": True})
+        raise AssertionError(f"unexpected path: {url_path}")
+
+    agent.server_client.post = AsyncMock(side_effect=post)
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": "Solve"},
+        web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+    )
+
+    result = await agent.run(request, body)
+
+    assert result.failure_kind is None
+    assert result.environment_steps == 1
+
+
+@pytest.mark.asyncio
+async def test_seed_session_retries_transient_server_failure():
+    agent = _agent(
+        seed_request_timeout_secs=1.0,
+        seed_retry_initial_delay_secs=0.0,
+        seed_retry_max_delay_secs=0.0,
+    )
+    attempts = 0
+
+    async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+        nonlocal attempts
+        del server_name, json, cookies, kwargs
+        if url_path == "/seed_session":
+            attempts += 1
+            if attempts == 1:
+                error = ClientResponseError(
+                    request_info=MagicMock(),
+                    history=(),
+                    status=503,
+                    message="site temporarily unavailable",
+                )
+                error.response_content = b"site temporarily unavailable"
+                raise error
+            return _FakeHttpResponse(_seed())
+        if url_path == "/v1/responses":
+            return _FakeHttpResponse(_model_response("Thought: done\nAction: send_msg_to_user('done')"))
+        if url_path == "/step":
+            return _FakeHttpResponse(
+                {
+                    "operation_id": "step-0",
+                    "observation": _observation(),
+                    "execution_ok": True,
+                    "terminated": True,
+                }
+            )
+        if url_path == "/evaluate":
+            return _FakeHttpResponse({"result": {"valid_sample": True}})
+        if url_path == "/close":
+            return _FakeHttpResponse({"closed": True})
+        raise AssertionError(f"unexpected path: {url_path}")
+
+    agent.server_client.post = AsyncMock(side_effect=post)
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": "Solve"},
+        web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+    )
+
+    result = await agent.run(request, body)
+
+    assert attempts == 2
+    assert result.failure_kind is None
+
+
+@pytest.mark.asyncio
+async def test_seed_session_does_not_retry_client_failure():
+    agent = _agent(
+        seed_request_timeout_secs=1.0,
+        seed_retry_initial_delay_secs=0.0,
+        seed_retry_max_delay_secs=0.0,
+    )
+    error = ClientResponseError(
+        request_info=MagicMock(),
+        history=(),
+        status=400,
+        message="bad task",
+    )
+    agent._post_json = AsyncMock(side_effect=error)
+
+    with pytest.raises(ClientResponseError, match="bad task"):
+        await agent._seed_session(
+            task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+            cookies={},
+        )
+
+    agent._post_json.assert_awaited_once()

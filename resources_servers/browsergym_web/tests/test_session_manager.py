@@ -181,3 +181,41 @@ async def test_concurrent_sessions_keep_browser_calls_on_one_thread(tmp_path):
 
     assert len(ThreadAffinityBackend.call_threads) == 1
     assert event_loop_thread not in ThreadAffinityBackend.call_threads
+
+
+@pytest.mark.asyncio
+async def test_cancelled_seed_releases_creating_capacity(tmp_path):
+    class BlockingSitePool:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release_gate = asyncio.Event()
+
+        async def acquire(self, session_id, task):
+            del session_id, task
+            self.started.set()
+            await self.release_gate.wait()
+            raise AssertionError("cancelled seed unexpectedly resumed")
+
+        async def release(self, lease, *, healthy):
+            del lease, healthy
+
+        async def health(self):
+            return {"mode": "test", "active_leases": 0}
+
+    site_pool = BlockingSitePool()
+    manager = BrowserGymSessionManager(
+        _config(tmp_path, max_sessions=1),
+        backend_factory=FakeBackend,
+        site_pool=site_pool,
+    )
+    seed_task = asyncio.create_task(manager.seed_session("session-a", WebSeedSessionRequest(task=_task("0"))))
+    await site_pool.started.wait()
+
+    seed_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await seed_task
+
+    health = await manager.health()
+    assert health["creating"] == 0
+    assert health["sessions"] == 0
+    await manager.stop()

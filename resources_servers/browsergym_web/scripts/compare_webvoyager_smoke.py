@@ -212,8 +212,7 @@ def _select_selenium_search_input(elements: list[Any]) -> tuple[int, list[dict[s
         if candidate["type"] not in {"", "email", "search", "tel", "text"}:
             continue
         searchable = " ".join(
-            str(candidate[key])
-            for key in ("type", "name", "placeholder", "aria_label", "title", "text")
+            str(candidate[key]) for key in ("type", "name", "placeholder", "aria_label", "title", "text")
         ).lower()
         score = int("query" in searchable) * 20 + int("search" in searchable) * 10
         ranked.append((score, candidate["index"]))
