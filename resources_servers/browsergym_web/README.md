@@ -21,6 +21,15 @@ uv sync --project resources_servers/browsergym_web
 uv run --project resources_servers/browsergym_web playwright install chromium
 ```
 
+BrowserGym 0.14.3 pins Playwright 1.44.0, which in turn declares a greenlet
+release that predates Python 3.13. This component overrides greenlet to 3.1.1,
+the first compatible line with CPython 3.13 wheels. The override is declared in
+both `pyproject.toml` (for `uv sync`) and `overrides.txt` (for Gym's isolated
+component installer); the BrowserGym and Playwright versions remain pinned.
+
+The `data/` files are five schema and data-validation fixtures, not benchmark
+scores. End-to-end results require the official site stack and evaluator.
+
 BrowserGym expects the official site-stack URLs in environment variables. For
 WebArena these are `WA_SHOPPING`, `WA_SHOPPING_ADMIN`, `WA_REDDIT`,
 `WA_GITLAB`, `WA_WIKIPEDIA`, `WA_MAP`, and `WA_HOMEPAGE`. VisualWebArena uses

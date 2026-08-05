@@ -12,3 +12,7 @@ are verifier failures and must be masked by the caller.
 The prompt semantics are adapted from WebVoyager's Apache-2.0
 `evaluation/auto_eval.py`; `NOT SUCCESS` is checked before `SUCCESS`, matching
 the upstream scorer.
+
+The five records under `data/` exercise Gym's resource-server data contract.
+Their stored rollouts use the deterministic empty-answer path and are fixtures,
+not WebVoyager benchmark scores.

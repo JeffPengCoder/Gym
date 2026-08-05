@@ -27,5 +27,11 @@ requires = ["setuptools>=61"]
 where = ["../.."]
 include = ["resources_servers.browsergym_web*"]
 
+[tool.uv]
+# BrowserGym 0.14.3 pins Playwright 1.44.0, whose greenlet 3.0.3 cannot build
+# on Python 3.13. Greenlet 3.1.1 keeps the Playwright API contract and ships
+# CPython 3.13 wheels. Gym's uv-pip setup path reads the matching overrides.txt.
+override-dependencies = ["greenlet==3.1.1"]
+
 [tool.uv.sources]
 nemo-gym = { path = "../..", editable = true }
