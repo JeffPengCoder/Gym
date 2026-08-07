@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import socket
 from unittest.mock import AsyncMock, MagicMock
 
@@ -49,6 +50,52 @@ _TEST_ADDR_INFO = (
 
 
 class TestServerUtils:
+    def test_global_aiohttp_client_exit_uses_owner_loop(self, monkeypatch: MonkeyPatch) -> None:
+        owner_loop = asyncio.new_event_loop()
+
+        class LoopBoundClient:
+            closed = False
+
+            async def close(self) -> None:
+                assert asyncio.get_running_loop() is owner_loop
+                self.closed = True
+
+        client = LoopBoundClient()
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", client)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_LOOP", owner_loop)
+
+        try:
+            nemo_gym.server_utils.global_aiohttp_client_exit()
+        finally:
+            owner_loop.close()
+
+        assert client.closed
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is None
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_LOOP is None
+
+    async def test_global_aiohttp_client_exit_from_owner_loop_is_non_blocking(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        owner_loop = asyncio.get_running_loop()
+
+        class LoopBoundClient:
+            closed = False
+
+            async def close(self) -> None:
+                assert asyncio.get_running_loop() is owner_loop
+                self.closed = True
+
+        client = LoopBoundClient()
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", client)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_LOOP", owner_loop)
+
+        nemo_gym.server_utils.global_aiohttp_client_exit()
+
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is None
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_LOOP is None
+        await asyncio.sleep(0)
+        assert client.closed
+
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
         assert not nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()

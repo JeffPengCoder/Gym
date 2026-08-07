@@ -76,6 +76,7 @@ from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_fr
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
+_GLOBAL_AIOHTTP_CLIENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 
 
@@ -160,8 +161,9 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         cookie_jar=DummyCookieJar(),
     )
 
-    global _GLOBAL_AIOHTTP_CLIENT
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_LOOP
     _GLOBAL_AIOHTTP_CLIENT = client_session
+    _GLOBAL_AIOHTTP_CLIENT_LOOP = asyncio.get_running_loop()
 
     global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
@@ -177,14 +179,48 @@ def is_global_aiohttp_client_request_debug_enabled() -> bool:
     return _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
 
 
+async def close_global_aiohttp_client() -> None:
+    """Close the process-wide client on its owning event loop."""
+
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_LOOP
+    client = _GLOBAL_AIOHTTP_CLIENT
+    _GLOBAL_AIOHTTP_CLIENT = None
+    _GLOBAL_AIOHTTP_CLIENT_LOOP = None
+
+    if client is not None and not client.closed:
+        await client.close()
+
+
 def global_aiohttp_client_exit():  # pragma: no cover
-    if not is_global_aiohttp_client_setup():
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_LOOP
+    client = _GLOBAL_AIOHTTP_CLIENT
+    owner_loop = _GLOBAL_AIOHTTP_CLIENT_LOOP
+    _GLOBAL_AIOHTTP_CLIENT = None
+    _GLOBAL_AIOHTTP_CLIENT_LOOP = None
+
+    if client is None or client.closed:
         return
 
-    global _GLOBAL_AIOHTTP_CLIENT
-    asyncio.run(_GLOBAL_AIOHTTP_CLIENT.close())
+    async def close_client() -> None:
+        await client.close()
 
-    _GLOBAL_AIOHTTP_CLIENT = None
+    if owner_loop is None or owner_loop.is_closed():
+        # aiohttp has no owner-loop work left once the loop is closed, but the
+        # coroutine must still run so the session transitions to closed.
+        asyncio.run(close_client())
+        return
+
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop is owner_loop:
+        owner_loop.create_task(close_client())
+    elif owner_loop.is_running():
+        asyncio.run_coroutine_threadsafe(close_client(), owner_loop).result(timeout=5)
+    else:
+        owner_loop.run_until_complete(close_client())
 
 
 atexit.register(global_aiohttp_client_exit)
