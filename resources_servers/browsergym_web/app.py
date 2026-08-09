@@ -191,8 +191,14 @@ class BrowserGymWebResourcesServer(SimpleResourcesServer):
         return await self._manager.evaluate(self._session_id(request), body.final_answer)
 
     async def close_session(self, request: Request) -> WebCloseResponse:
-        await self._manager.close_session(self._session_id(request))
-        return WebCloseResponse(closed=True)
+        session_id = self._session_id(request)
+        await self._manager.close_session(session_id)
+        recordings = await self._manager.recording_artifacts(session_id)
+        return WebCloseResponse(
+            closed=True,
+            session_id=session_id,
+            recording_artifacts=recordings,
+        )
 
     async def verify(
         self,

@@ -23,6 +23,12 @@ collection also writes `<output_stem>_population_status.json`; scores are only
 complete when every materialized rollout has a main result and terminal,
 exhausted, retryable, and missing counts are all zero.
 
+Every seeded rollout returns `artifact_session_id`, including bounded failures
+that happen after seeding. When browser recording is enabled, finalized video
+references are returned in `recording_artifacts`; consumers do not need to
+infer a failed rollout's artifact directory from evaluator evidence or step
+counts.
+
 Visual profiles configure their page text independently with
 `visual_observation_text`: `full_axtree`, `som_only`, or `none`. They may also
 replace both the image and page text of old visual turns with

@@ -78,3 +78,8 @@ The HTTP error envelope includes `error_kind` and `retryable`. Capacity,
 session-loss, and session-conflict failures remain retryable. Invalid tasks and
 deterministic BrowserGym reset preconditions return a non-retryable error so
 the agent does not spend its rollout retry budget on an unchanged deployment.
+
+When `record_video: true`, BrowserGym writes video files under the session
+artifact directory. The `close` response is emitted after browser shutdown has
+flushed those files and includes the `session_id` plus typed
+`recording_artifacts` references. Empty in-progress files are not reported.

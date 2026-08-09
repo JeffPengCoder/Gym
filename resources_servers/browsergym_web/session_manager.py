@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Callable
 
-from nemo_gym.web.models import WebObservation, WebTask, WebVerifierResult
+from nemo_gym.web.models import WebArtifactRef, WebObservation, WebTask, WebVerifierResult
 from nemo_gym.web.protocol import WebEnvironmentBackend
 from resources_servers.browsergym_web.artifacts import WebArtifactStore
 from resources_servers.browsergym_web.backend import BrowserGymBackend
@@ -285,6 +285,11 @@ class BrowserGymSessionManager:
             await self._site_pool.release(state.site_lease, healthy=healthy)
         LOG.info("Closed BrowserGym session=%s lease=%s", session_id, state.site_lease.lease_id)
         return True
+
+    async def recording_artifacts(self, session_id: str) -> list[WebArtifactRef]:
+        """Index recordings only after browser close has flushed them to disk."""
+
+        return await asyncio.to_thread(self._artifacts.recording_artifacts, session_id)
 
     async def session_status(self, session_id: str) -> WebSessionStatusResponse:
         state = await self._get_session(session_id)

@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Per-session screenshot persistence for web rollouts."""
+"""Per-session artifact persistence for web rollouts."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
 import io
+import mimetypes
 import re
 from pathlib import Path
 from typing import Any
@@ -65,3 +66,32 @@ class WebArtifactStore:
         if self.inline_screenshots:
             data_url = f"data:image/png;base64,{base64.b64encode(payload).decode('ascii')}"
         return WebImage(data_url=data_url, artifact=artifact)
+
+    def recording_artifacts(self, session_id: str) -> list[WebArtifactRef]:
+        """Return finalized, non-empty recordings for a closed browser session."""
+
+        video_dir = self.root / _safe_component(session_id) / "video"
+        if not video_dir.is_dir():
+            return []
+
+        artifacts: list[WebArtifactRef] = []
+        for path in sorted(video_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            size_bytes = path.stat().st_size
+            if size_bytes == 0:
+                continue
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            mime_type, _encoding = mimetypes.guess_type(path.name)
+            artifacts.append(
+                WebArtifactRef(
+                    uri=path.resolve().as_uri(),
+                    mime_type=mime_type or "application/octet-stream",
+                    size_bytes=size_bytes,
+                    sha256=digest.hexdigest(),
+                )
+            )
+        return artifacts

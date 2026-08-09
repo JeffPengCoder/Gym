@@ -14,7 +14,14 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.web.models import WebAction, WebObservation, WebStepResult, WebTask, WebVerifierResult
+from nemo_gym.web.models import (
+    WebAction,
+    WebArtifactRef,
+    WebObservation,
+    WebStepResult,
+    WebTask,
+    WebVerifierResult,
+)
 
 
 class WebSeedSessionRequest(BaseSeedSessionRequest):
@@ -53,6 +60,8 @@ class WebEvaluateResponse(BaseModel):
 
 class WebCloseResponse(BaseModel):
     closed: bool
+    session_id: Optional[str] = None
+    recording_artifacts: list[WebArtifactRef] = Field(default_factory=list)
 
 
 class WebSessionStatusResponse(BaseModel):

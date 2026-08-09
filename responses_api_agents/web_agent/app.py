@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
+from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 from aiohttp import ClientResponseError
@@ -24,8 +25,9 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.web.actions import ActionParseError, parse_model_action
-from nemo_gym.web.models import WebBenchmark, WebObservation, WebTask, WebVerifierResult
+from nemo_gym.web.models import WebArtifactRef, WebBenchmark, WebObservation, WebTask, WebVerifierResult
 from resources_servers.browsergym_web.models import (
+    WebCloseResponse,
     WebEvaluateResponse,
     WebSeedSessionResponse,
     WebStepResponse,
@@ -76,6 +78,16 @@ class WebAgentRunResponse(BaseVerifyResponse):
     model_turns: int = 0
     execution_failures: int = 0
     verifier_result: WebVerifierResult | None = None
+    artifact_session_id: str | None = None
+    recording_artifacts: list[WebArtifactRef] = Field(default_factory=list)
+
+
+@dataclass
+class _RunArtifacts:
+    """Mutable artifact context retained when a bounded rollout fails."""
+
+    session_id: str | None = None
+    recordings: list[WebArtifactRef] = field(default_factory=list)
 
 
 def _extract_output_text(response: NeMoGymResponse) -> str:
@@ -237,19 +249,21 @@ class WebAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: WebAgentRunRequest) -> WebAgentRunResponse:
         task = _resolve_task(body)
+        artifacts = _RunArtifacts()
         try:
             return await asyncio.wait_for(
-                self._run_once(request, body, task),
+                self._run_once(request, body, task, artifacts),
                 timeout=self.config.run_timeout_secs,
             )
         except Exception as exc:  # noqa: BLE001 - one stalled browser must not abort the shard.
-            return self._failure_response(body, task, exc)
+            return self._failure_response(body, task, exc, artifacts)
 
     async def _run_once(
         self,
         request: Request,
         body: WebAgentRunRequest,
         task: WebTask,
+        artifacts: _RunArtifacts,
     ) -> WebAgentRunResponse:
         env_cookies = request.cookies
         model_cookies = None
@@ -277,6 +291,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                 cookies=env_cookies,
             )
             seed_data = WebSeedSessionResponse.model_validate(seed_payload)
+            artifacts.session_id = seed_data.session_id
             env_cookies = seed_response.cookies
             seeded = True
             observation = seed_data.observation
@@ -396,15 +411,17 @@ class WebAgent(SimpleResponsesAPIAgent):
         finally:
             if seeded:
                 try:
-                    await asyncio.wait_for(
-                        self.server_client.post(
-                            server_name=self.config.resources_server.name,
-                            url_path="/close",
-                            json={},
-                            cookies=env_cookies,
-                        ),
-                        timeout=self.config.close_request_timeout_secs,
+                    _close_response, close_payload = await self._post_json(
+                        server_name=self.config.resources_server.name,
+                        url_path="/close",
+                        json={},
+                        cookies=env_cookies,
+                        timeout_secs=self.config.close_request_timeout_secs,
                     )
+                    close_data = WebCloseResponse.model_validate(close_payload)
+                    if close_data.session_id is not None:
+                        artifacts.session_id = close_data.session_id
+                    artifacts.recordings = close_data.recording_artifacts
                 except Exception:  # noqa: BLE001 - cleanup must not replace a completed result.
                     pass
 
@@ -434,6 +451,8 @@ class WebAgent(SimpleResponsesAPIAgent):
             model_turns=model_turns,
             execution_failures=execution_failures,
             verifier_result=verifier_result,
+            artifact_session_id=artifacts.session_id,
+            recording_artifacts=artifacts.recordings,
         )
 
     async def _judge_webvoyager(
@@ -537,6 +556,7 @@ class WebAgent(SimpleResponsesAPIAgent):
         body: WebAgentRunRequest,
         task: WebTask,
         exc: Exception,
+        artifacts: _RunArtifacts | None = None,
     ) -> WebAgentRunResponse:
         """Return a classified sidecar row for a bounded runtime failure.
 
@@ -582,6 +602,7 @@ class WebAgent(SimpleResponsesAPIAgent):
         }
         if terminal:
             routing[NG_TERMINAL_KEY] = True
+        artifacts = artifacts or _RunArtifacts()
         return WebAgentRunResponse(
             responses_create_params=body.responses_create_params,
             response=empty_response,
@@ -591,6 +612,8 @@ class WebAgent(SimpleResponsesAPIAgent):
             mask_sample=True,
             failure_kind=failure_kind,
             verifier_result=verifier_result,
+            artifact_session_id=artifacts.session_id,
+            recording_artifacts=artifacts.recordings,
             **routing,
         )
 

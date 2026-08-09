@@ -116,6 +116,15 @@ def _seed(task_id="0"):
     }
 
 
+def _recording():
+    return {
+        "uri": "file:///artifacts/session-a/video/task.webm",
+        "mime_type": "video/webm",
+        "size_bytes": 123,
+        "sha256": "a" * 64,
+    }
+
+
 def test_redact_old_visual_observation_removes_both_image_and_page_text():
     old = NeMoGymEasyInputMessage(
         role="user",
@@ -181,7 +190,13 @@ async def test_webarena_rollout_uses_colocated_evaluator_and_closes_session():
                     }
                 }
             ],
-            "/close": [{"closed": True}],
+            "/close": [
+                {
+                    "closed": True,
+                    "session_id": "session-a",
+                    "recording_artifacts": [_recording()],
+                }
+            ],
         },
     )
     request = MagicMock()
@@ -197,6 +212,8 @@ async def test_webarena_rollout_uses_colocated_evaluator_and_closes_session():
     assert result.task_success is True
     assert result.environment_steps == 1
     assert result.mask_sample is False
+    assert result.artifact_session_id == "session-a"
+    assert result.recording_artifacts[0].mime_type == "video/webm"
     step_body = next(body for _server, path, body in calls if path == "/step")
     assert step_body["action"]["script"] == "send_msg_to_user('answer')"
     assert calls[-1][1] == "/close"
@@ -318,7 +335,13 @@ async def test_browser_request_timeout_is_retryable_and_cleanup_is_bounded():
         if url_path == "/step":
             await asyncio.sleep(1.0)
         if url_path == "/close":
-            return _FakeHttpResponse({"closed": True})
+            return _FakeHttpResponse(
+                {
+                    "closed": True,
+                    "session_id": "session-a",
+                    "recording_artifacts": [_recording()],
+                }
+            )
         raise AssertionError(f"unexpected path: {url_path}")
 
     agent.server_client.post = AsyncMock(side_effect=post)
@@ -337,6 +360,8 @@ async def test_browser_request_timeout_is_retryable_and_cleanup_is_bounded():
     assert result.failure_kind == "infrastructure_error:TimeoutError"
     assert dumped["_ng_failure_class"] == "retryable_infrastructure"
     assert "_ng_no_persist" not in dumped
+    assert result.artifact_session_id == "session-a"
+    assert result.recording_artifacts[0].uri.endswith("/task.webm")
     assert "/close" in calls
 
 
@@ -497,4 +522,6 @@ async def test_run_classifies_seed_precondition_as_terminal_masked_failure():
     assert result.verifier_result.metadata["http_status"] == 422
     assert result.verifier_result.metadata["error_kind"] == "benchmark_precondition"
     assert "Could not download image" in dumped["error"]
+    assert result.artifact_session_id is None
+    assert result.recording_artifacts == []
     agent._post_json.assert_awaited_once()
