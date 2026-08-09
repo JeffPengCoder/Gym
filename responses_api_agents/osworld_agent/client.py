@@ -121,6 +121,8 @@ class StepRecord:
     reward: float
     done: bool
     info: Dict[str, Any] = field(default_factory=dict)
+    state: Dict[str, Any] = field(default_factory=dict)
+    next_state: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -2324,6 +2326,7 @@ def run_osworld_task(
                 )
                 break
             _current_step[0] = step_idx + 1
+            step_state = _observation_identity(obs)
             obs_entry = {
                 "screenshot_b64": _b64(obs.get("screenshot")),
                 "accessibility_tree": obs.get("accessibility_tree"),
@@ -2360,7 +2363,17 @@ def run_osworld_task(
                     timed_out = True
                 error = f"agent/model call failed at step {step_idx}: {exc}"
                 task_logger.exception("Agent/model call failed at step %d", step_idx)
-                steps.append(StepRecord(step=step_idx, model_text="", actions=[], reward=0.0, done=False))
+                steps.append(
+                    StepRecord(
+                        step=step_idx,
+                        model_text="",
+                        actions=[],
+                        reward=0.0,
+                        done=False,
+                        state=step_state,
+                        next_state=_observation_identity(obs),
+                    )
+                )
                 screenshot_file = _save_task_screenshot(task_artifacts, step_idx + 1, obs)
                 _append_task_trajectory(
                     task_artifacts,
@@ -2391,6 +2404,8 @@ def run_osworld_task(
                         reward=0.0,
                         done=False,
                         info={"agent": agent_step_info} if agent_step_info else {},
+                        state=step_state,
+                        next_state=_observation_identity(obs),
                     )
                 )
                 obs_history.append(obs_entry)
@@ -2445,6 +2460,8 @@ def run_osworld_task(
                     reward=step_reward,
                     done=step_done,
                     info=step_info,
+                    state=step_state,
+                    next_state=_observation_identity(obs),
                 )
             )
             obs_history.append(obs_entry)

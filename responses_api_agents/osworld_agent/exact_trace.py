@@ -9,18 +9,18 @@ rollout into prefix-contiguous physical traces while retaining one logical
 reward and advantage.
 
 The wire contract intentionally matches schema v2 from
-``aroshanghias/context-compaction-v2-clean``.  It is implemented locally so
-the OSWorld Gym adapter can also continue serving the legacy Rohit branch.
+``aroshanghias/context-compaction-v2-clean``. The semantic trajectory remains
+model-independent; this module is invoked only when exact evidence is present.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from responses_api_agents.osworld_agent.trajectory import canonical_digest, stable_id
 
 
 _POLICY_NAME = "osworld_exact_prompt_trace"
@@ -33,84 +33,16 @@ _ALLOWED_IDENTITY_GAPS = (
 )
 
 
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-
-
-def canonical_digest(value: Any) -> str:
-    """Return the digest convention used by the trace-aware NeMo-RL branch."""
-
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
-
-
-def stable_id(prefix: str, *parts: Any) -> str:
-    """Return a deterministic, bounded identifier."""
-
-    return f"{prefix}-{canonical_digest(parts)[:24]}"
-
-
-def _require_nonempty_string(value: Any, *, field: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"OSWorld exact_trace requires non-empty {field}")
-    return value
-
-
-def _require_nonnegative_int(value: Any, *, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"OSWorld exact_trace requires non-negative integer {field}")
-    return value
-
-
-def _rollout_identity(extra: Mapping[str, Any]) -> dict[str, Any]:
-    contract_version = extra.get("context_compaction_contract_version")
-    if contract_version != 2:
-        raise ValueError(
-            f"OSWorld exact_trace requires context_compaction_contract_version=2; received {contract_version!r}"
-        )
-    return {
-        "rollout_id": _require_nonempty_string(
-            extra.get("context_compaction_rollout_id"),
-            field="context_compaction_rollout_id",
-        ),
-        "group_id": _require_nonempty_string(
-            extra.get("context_compaction_group_id"),
-            field="context_compaction_group_id",
-        ),
-        "task_id": _require_nonempty_string(
-            extra.get("context_compaction_task_id"),
-            field="context_compaction_task_id",
-        ),
-        "rollout_index": _require_nonnegative_int(
-            extra.get("context_compaction_rollout_index"),
-            field="context_compaction_rollout_index",
-        ),
-        "attempt_index": _require_nonnegative_int(
-            extra.get("context_compaction_attempt_index"),
-            field="context_compaction_attempt_index",
-        ),
-    }
-
-
-def _training_record(step: Mapping[str, Any], *, turn_id: int) -> Mapping[str, Any]:
-    info = step.get("info")
-    agent_info = info.get("agent") if isinstance(info, Mapping) else None
-    training = agent_info.get("training") if isinstance(agent_info, Mapping) else None
-    if not isinstance(training, Mapping):
-        raise ValueError(f"OSWorld exact_trace turn {turn_id} has no training evidence")
-    return training
-
-
 def _token_list(value: Any, *, field: str, turn_id: int) -> list[int]:
     if not isinstance(value, (list, tuple)) or not value:
         raise ValueError(f"OSWorld exact_trace turn {turn_id} has invalid {field}")
-    if any(isinstance(item, bool) or not isinstance(item, int) for item in value):
-        raise ValueError(f"OSWorld exact_trace turn {turn_id} has non-integer {field}")
+    if any(
+        isinstance(item, bool) or not isinstance(item, int) or item < 0
+        for item in value
+    ):
+        raise ValueError(
+            f"OSWorld exact_trace turn {turn_id} has invalid token in {field}"
+        )
     return [int(item) for item in value]
 
 
@@ -146,8 +78,7 @@ def _register_media(
     *,
     media_assets: dict[str, dict[str, Any]],
 ) -> str:
-    canonical = _canonical_json(source_part)
-    content_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    content_digest = canonical_digest(source_part)
     media_id = f"media-{content_digest[:24]}"
     asset = {
         "media_id": media_id,
@@ -164,36 +95,25 @@ def _register_media(
 
 
 def _prompt_media_ids(
-    steps: Sequence[Mapping[str, Any]],
+    prompt_messages: Sequence[Mapping[str, Any]],
     *,
-    step_index: int,
     media_assets: dict[str, dict[str, Any]],
 ) -> list[str]:
-    turn_id = step_index + 1
-    training = _training_record(steps[step_index], turn_id=turn_id)
-    prompt_user_message_count = training.get("prompt_user_message_count", 1)
-    if (
-        isinstance(prompt_user_message_count, bool)
-        or not isinstance(prompt_user_message_count, int)
-        or prompt_user_message_count < 1
-        or prompt_user_message_count > turn_id
-    ):
-        raise ValueError(
-            f"OSWorld exact_trace turn {turn_id} has invalid prompt_user_message_count={prompt_user_message_count!r}"
-        )
+    """Resolve every media occurrence from one materialized model prompt."""
 
     media_ids: list[str] = []
-    first_step = step_index - prompt_user_message_count + 1
-    for prompt_step_index in range(first_step, step_index + 1):
-        prompt_training = _training_record(steps[prompt_step_index], turn_id=prompt_step_index + 1)
-        user_message = prompt_training.get("new_user_message")
-        if not isinstance(user_message, Mapping):
+    for message_index, message in enumerate(prompt_messages):
+        if not isinstance(message, Mapping):
             raise ValueError(
-                f"OSWorld exact_trace turn {turn_id} cannot reconstruct prompt media from step {prompt_step_index + 1}"
+                f"OSWorld exact trace prompt message {message_index} must be a mapping"
             )
-        content = user_message.get("content") or []
+        content = message.get("content") or []
+        if isinstance(content, str):
+            continue
         if not isinstance(content, (list, tuple)):
-            raise ValueError(f"OSWorld exact_trace step {prompt_step_index + 1} has invalid user content")
+            raise ValueError(
+                f"OSWorld exact trace prompt message {message_index} has invalid content"
+            )
         for part in content:
             if not isinstance(part, Mapping):
                 continue
@@ -312,18 +232,39 @@ def _policy_lineage(
 
 def build_exact_trace_envelope(
     *,
-    steps: Sequence[Mapping[str, Any]],
-    request_extra: Mapping[str, Any],
+    model_calls: Sequence[Mapping[str, Any]],
+    trajectory_contract: Mapping[str, Any],
     model_name: str,
     sampling_config: Mapping[str, Any],
     policy_config: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Build the exact-trace response fields consumed by Arash NeMo-RL."""
+    """Augment a semantic trajectory with exact, per-model-call evidence."""
 
-    if not steps:
-        raise ValueError("OSWorld exact_trace requires at least one model call")
-    identity = _rollout_identity(request_extra)
+    if not model_calls:
+        raise ValueError("OSWorld exact trace requires at least one model call")
+    capabilities = trajectory_contract.get("capabilities")
+    if (
+        not isinstance(capabilities, Mapping)
+        or capabilities.get("exact_model_call_evidence") is not True
+    ):
+        raise ValueError(
+            "OSWorld exact trace requires a trajectory contract with complete "
+            "model-call evidence"
+        )
+    identity = {
+        field: trajectory_contract.get(field)
+        for field in (
+            "rollout_id",
+            "group_id",
+            "task_id",
+            "rollout_index",
+            "attempt_index",
+            "identity_source",
+        )
+    }
     rollout_id = identity["rollout_id"]
+    if not isinstance(rollout_id, str) or not rollout_id:
+        raise ValueError("OSWorld exact trace has no rollout identity")
     generation_contract = _generation_contract(
         model_name=model_name,
         sampling_config=sampling_config,
@@ -336,7 +277,7 @@ def build_exact_trace_envelope(
     completion_evidence: list[dict[str, Any]] = []
     boundary_events: list[dict[str, Any]] = []
     lineage_deltas: list[dict[str, Any]] = []
-    transitions: list[dict[str, Any]] = []
+    model_call_output: list[dict[str, Any]] = []
 
     previous_context: list[int] = []
     previous_media_ids: list[str] = []
@@ -346,12 +287,17 @@ def build_exact_trace_envelope(
     segment_id = ""
     final_policy_decision: dict[str, Any] | None = None
 
-    for step_index, step in enumerate(steps):
-        turn_id = step_index + 1
-        training = _training_record(step, turn_id=turn_id)
-        model_response = training.get("response")
+    for call_index, model_call in enumerate(model_calls):
+        turn_id = call_index + 1
+        if model_call.get("turn_id") != turn_id:
+            raise ValueError(
+                f"OSWorld exact trace model call {call_index} has invalid turn_id"
+            )
+        model_response = model_call.get("response")
         if not isinstance(model_response, Mapping):
-            raise ValueError(f"OSWorld exact_trace turn {turn_id} has no model response evidence")
+            raise ValueError(
+                f"OSWorld exact trace turn {turn_id} has no model response evidence"
+            )
 
         prompt_token_ids = _token_list(
             model_response.get("prompt_token_ids"),
@@ -369,16 +315,22 @@ def build_exact_trace_envelope(
         )
         if len(sampled_token_ids) != len(sampled_logprobs):
             raise ValueError(
-                f"OSWorld exact_trace turn {turn_id} token/logprob mismatch: "
+                f"OSWorld exact trace turn {turn_id} token/logprob mismatch: "
                 f"tokens={len(sampled_token_ids)} logprobs={len(sampled_logprobs)}"
             )
-        eligible = training.get("eligible", True)
+        eligible = model_call.get("eligible")
         if not isinstance(eligible, bool):
-            raise ValueError(f"OSWorld exact_trace turn {turn_id} has non-boolean eligible")
+            raise ValueError(
+                f"OSWorld exact trace turn {turn_id} has non-boolean eligible"
+            )
 
+        prompt_messages = model_call.get("prompt_messages")
+        if not isinstance(prompt_messages, list) or not prompt_messages:
+            raise ValueError(
+                f"OSWorld exact trace turn {turn_id} has no materialized prompt"
+            )
         media_ids = _prompt_media_ids(
-            steps,
-            step_index=step_index,
+            prompt_messages,
             media_assets=media_assets,
         )
         token_append_compatible = previous_context == prompt_token_ids[: len(previous_context)]
@@ -460,7 +412,7 @@ def build_exact_trace_envelope(
             prompt_token_ids,
             sampled_token_ids,
         )
-        action_id = f"action-{turn_id:06d}"
+        action_id = f"policy-action-{turn_id:06d}"
         prepared_request_id = stable_id(
             "prepared-request",
             rollout_id,
@@ -474,7 +426,11 @@ def build_exact_trace_envelope(
             prompt_token_ids,
             media_ids,
         )
-        model_call_id = stable_id("model-call", request_id, completion_id)
+        model_call_id = model_call.get("model_call_id")
+        if not isinstance(model_call_id, str) or not model_call_id:
+            raise ValueError(
+                f"OSWorld exact trace turn {turn_id} has no model-call identity"
+            )
         occurrence_counts: Counter[str] = Counter()
         media_occurrences = []
         for media_id in media_ids:
@@ -509,7 +465,12 @@ def build_exact_trace_envelope(
                 "rollout_id": rollout_id,
                 "completion_id": completion_id,
                 "action_id": action_id,
+                "model_call_id": model_call_id,
                 "turn_id": turn_id,
+                "environment_step": model_call.get("environment_step"),
+                "parse_attempt": model_call.get("parse_attempt"),
+                "accepted": model_call.get("accepted") is True,
+                "parse_error": model_call.get("parse_error"),
                 "prepared_request_id": prepared_request_id,
                 "request_id": request_id,
                 "context_epoch": segment_index,
@@ -531,26 +492,25 @@ def build_exact_trace_envelope(
                 "evidence_source": "generation_response",
             }
         )
-        transitions.append(
-            {
-                "turn_id": turn_id,
-                "completion_id": completion_id,
-                "action_id": action_id,
-                "state": {
-                    "prompt_view_digest": view_digest,
-                    "media_ids": media_ids,
-                },
-                "action": {
-                    "sampled_token_ids": sampled_token_ids,
-                    "sampled_logprobs": sampled_logprobs,
-                    "raw_completion": str(model_response.get("raw_content") or ""),
-                    "parsed_actions": list(step.get("actions") or []),
-                },
-                "reward": float(step.get("reward") or 0.0),
-                "done": bool(step.get("done", False)),
-                "eligible": eligible,
-            }
-        )
+        assistant_item: dict[str, Any] = {
+            "id": completion_id,
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "annotations": [],
+                    "text": str(model_response.get("raw_content") or ""),
+                }
+            ],
+            "prompt_token_ids": prompt_token_ids,
+            "generation_token_ids": sampled_token_ids,
+            "generation_log_probs": sampled_logprobs,
+        }
+        if model_response.get("routed_experts") is not None:
+            assistant_item["routed_experts"] = model_response["routed_experts"]
+        model_call_output.append(assistant_item)
 
         previous_context = [*prompt_token_ids, *sampled_token_ids]
         previous_media_ids = media_ids
@@ -559,6 +519,7 @@ def build_exact_trace_envelope(
 
     assert final_policy_decision is not None
     return {
+        "model_call_output": model_call_output,
         "media_assets": media_assets,
         "completion_evidence": completion_evidence,
         "final_policy_decision": final_policy_decision,
@@ -566,11 +527,13 @@ def build_exact_trace_envelope(
         "chunk_records": [],
         "boundary_events": boundary_events,
         "guard_records": [],
-        "trajectory_transitions": transitions,
         "context_compaction_contract": {
             "schema_version": 2,
             "mode": "exact_trace_authority",
             **identity,
+            "trajectory_contract_id": trajectory_contract.get(
+                "trajectory_contract_id"
+            ),
             "generation_contract": generation_contract,
         },
     }

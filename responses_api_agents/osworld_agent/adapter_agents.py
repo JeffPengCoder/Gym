@@ -462,8 +462,6 @@ class NemotronV3NanoOmniAgent:
         pre_done_checklist: bool = False,
         repeated_action_warning_threshold: int = 0,
         repeated_action_window: int = 12,
-        training_mode: bool = False,
-        training_turn_strategy: str = "last",
         log_context: Mapping[str, Any] | None = None,
         **_kwargs: Any,
     ) -> None:
@@ -488,14 +486,16 @@ class NemotronV3NanoOmniAgent:
         self.client_password = client_password
         self.thinking = thinking
         self.parse_retries = max(1, parse_retries)
-        self.training_mode = bool(training_mode)
-        if self.training_mode and self.parse_retries != 1:
-            raise ValueError("Nemotron training_mode currently requires parse_retries=1")
-        if training_turn_strategy not in {"last", "all", "exact_trace"}:
+        removed_options = sorted(
+            option
+            for option in ("training_mode", "training_turn_strategy")
+            if option in _kwargs
+        )
+        if removed_options:
             raise ValueError(
-                "training_turn_strategy must be 'last', 'all', or 'exact_trace'"
+                "OSWorld no longer accepts training-specific agent switches: "
+                + ", ".join(removed_options)
             )
-        self.training_turn_strategy = training_turn_strategy
         self.parse_error_feedback = bool(parse_error_feedback)
         self.parse_retry_temperature = (
             None if parse_retry_temperature is None else max(0.0, float(parse_retry_temperature))
@@ -518,7 +518,6 @@ class NemotronV3NanoOmniAgent:
         self.observations: List[Dict[str, Any]] = []
         self.actions: List[str] = []
         self.cots: List[Dict[str, Any]] = []
-        self.training_messages: List[Dict[str, Any]] = []
 
     def call_llm(self, payload: Dict[str, Any], _model: str | None = None) -> Any:
         """Injected by ``client.run_osworld_task`` before the first prediction."""
@@ -593,38 +592,6 @@ class NemotronV3NanoOmniAgent:
         return "\n\n".join(guidance)
 
     def _messages(self, instruction: str, obs: Dict[str, Any]) -> List[Dict[str, Any]]:
-        # Training the last turn does not require every prior screenshot to
-        # remain in the prompt. Reuse the benchmark's bounded image window
-        # below, while retaining the sampled token/logprob payload separately.
-        # The all-turn legacy strategy still needs append-only raw messages so
-        # each trainable assistant turn remains token-contiguous with the next.
-        # exact_trace deliberately uses this bounded prompt path and reports
-        # every material rewrite to the trace-aware trainer.
-        if self.training_mode and self.training_turn_strategy == "all":
-            messages = (
-                list(self.training_messages)
-                if self.training_messages
-                else [{"role": "system", "content": self.system_prompt}]
-            )
-            current_text = INSTRUCTION_TEMPLATE.format(instruction=instruction)
-            current_text += f"You are currently on Step {len(self.actions) + 1}.\n"
-            guidance = self._step_guidance()
-            if guidance:
-                current_text += f"\n{guidance}\n"
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{_encode_image(obs['screenshot'])}"},
-                        },
-                        {"type": "text", "text": current_text},
-                    ],
-                }
-            )
-            return messages
-
         messages: List[Dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
         instruction_prompt = INSTRUCTION_TEMPLATE.format(instruction=instruction)
         image_history = min(len(self.actions), self.max_image_history_length - 1)
@@ -696,10 +663,12 @@ class NemotronV3NanoOmniAgent:
         request_messages = messages
         repeated_action_warning = bool(self._repeated_action_guidance())
         last_error = "No response"
-        parsed_info: Dict[str, Any] = {}
+        model_calls: List[Dict[str, Any]] = []
+        parsed_info: Dict[str, Any] = {"model_calls": model_calls}
 
         for attempt in range(self.parse_retries):
             response: Any = None
+            attempt_actions: List[str] = []
             step_number = len(self.actions) + 1
             parse_attempt = attempt + 1
             call_log_context = self._log_event_context(step=step_number, parse_attempt=parse_attempt)
@@ -724,34 +693,17 @@ class NemotronV3NanoOmniAgent:
             }
             if self.top_p is not None:
                 payload["top_p"] = self.top_p
+            model_call_record: Dict[str, Any] = {
+                "parse_attempt": parse_attempt,
+                "prompt_messages": _jsonable(request_messages),
+                "response": None,
+                "accepted": False,
+                "parse_error": None,
+                "parsed_actions": [],
+            }
             try:
                 response = self.call_llm(payload, self.model)
-                if self.training_mode:
-                    if not isinstance(response, Mapping):
-                        raise ValueError("training_mode requires a structured model response")
-                    required = (
-                        "raw_content",
-                        "prompt_token_ids",
-                        "generation_token_ids",
-                        "generation_log_probs",
-                    )
-                    missing = [field for field in required if response.get(field) is None]
-                    if missing:
-                        raise ValueError(
-                            "training_mode model response is missing required fields: "
-                            + ", ".join(missing)
-                        )
-                    # Preserve the sampled response before parsing its action.
-                    # An invalid action is still the policy sample that GRPO
-                    # must receive with its reward; attaching this only after
-                    # validation loses the terminal FAIL trajectory.
-                    parsed_info["training"] = {
-                        "new_user_message": request_messages[-1],
-                        "prompt_user_message_count": sum(
-                            message.get("role") == "user" for message in request_messages
-                        ),
-                        "response": dict(response),
-                    }
+                model_call_record["response"] = _jsonable(response)
                 content, _reasoning = _response_parts(response)
                 if not content:
                     raise ValueError("model response has no content")
@@ -761,10 +713,14 @@ class NemotronV3NanoOmniAgent:
                     coordinate_type=self.coordinate_type,
                     thinking=self.thinking,
                 )
+                attempt_actions = list(actions)
                 parsed_info.update(response_info)
                 if low_level.startswith("<Error>"):
                     raise ValueError(low_level)
                 _validate_python_actions(actions)
+                model_call_record["accepted"] = True
+                model_call_record["parsed_actions"] = attempt_actions
+                model_calls.append(model_call_record)
                 if os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip():
                     _append_agent_io(
                         {
@@ -785,6 +741,9 @@ class NemotronV3NanoOmniAgent:
                 break
             except Exception as exc:  # noqa: BLE001 - malformed model output is retryable.
                 last_error = str(exc)
+                model_call_record["parse_error"] = last_error
+                model_call_record["parsed_actions"] = attempt_actions
+                model_calls.append(model_call_record)
                 will_retry = attempt + 1 < self.parse_retries
                 feedback_next = self.parse_error_feedback and will_retry
                 if os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip():
@@ -818,18 +777,13 @@ class NemotronV3NanoOmniAgent:
             return last_error, ["FAIL"], parsed_info
 
         actions = [self._scale_windows_scroll(action) for action in actions]
-        if self.training_mode and self.training_turn_strategy == "all":
-            training = parsed_info["training"]
-            self.training_messages = [
-                *request_messages,
-                {
-                    "role": "assistant",
-                    "content": training["response"]["raw_content"],
-                },
-            ]
         self.observations.append(obs)
         self.actions.append(low_level)
-        self.cots.append(parsed_info)
+        # The returned evidence may contain several full prompts and images.
+        # Keep only parser semantics in the agent's rolling text history.
+        self.cots.append(
+            {key: value for key, value in parsed_info.items() if key != "model_calls"}
+        )
 
         if len(self.actions) >= self.max_steps and not any(action in {"DONE", "FAIL"} for action in actions):
             parsed_info["code"] = "FAIL"

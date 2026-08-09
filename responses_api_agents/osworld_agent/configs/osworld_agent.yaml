@@ -70,10 +70,6 @@ osworld_simple_agent:
       docker_port_lock_timeout: 300.0  # infrastructure-only wait for concurrent Docker VM port allocation
       evaluator_disable_gpu: true  # keep EasyOCR from reserving rollout GPU memory
       reward_mode: binary          # raw preserves OSWorld partial scores; binary keeps the historical Gym training convention
-      training_mode: false         # true preserves sampled token/logprob/image evidence for NeMo RL
-      # last: Rohit-compatible safe fallback; exact_trace: all turns for the
-      # Arash trace-aware branch; all: legacy append-only experiment only.
-      training_turn_strategy: last
 
 osworld_sandbox:
   default_metadata:

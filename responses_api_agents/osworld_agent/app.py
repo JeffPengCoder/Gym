@@ -32,7 +32,7 @@ from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 import ray
 from fastapi import Body
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -59,6 +59,7 @@ from responses_api_agents.osworld_agent.proxy import (
     task_requires_proxy,
 )
 from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NAME, load_attr, resolve_runner_spec
+from responses_api_agents.osworld_agent.trajectory import build_trajectory_envelope
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent")
@@ -293,14 +294,30 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     docker_port_lock_timeout: float = Field(default=300.0, gt=0)  # concurrent Docker VM port allocation
     evaluator_disable_gpu: bool = True
     reward_mode: Literal["binary", "raw"] = "binary"
-    training_mode: bool = False
-    training_turn_strategy: Literal["last", "all", "exact_trace"] = "last"
     runner_name: str = DEFAULT_RUNNER_NAME
     action_space: Optional[str] = None
     observation_type: Optional[str] = None
     env_class_path: Optional[str] = None
     agent_class_path: Optional[str] = None
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_training_switches(cls, value: Any) -> Any:
+        """Fail loudly instead of silently accepting obsolete export modes."""
+
+        if isinstance(value, Mapping):
+            removed = sorted(
+                field
+                for field in ("training_mode", "training_turn_strategy")
+                if field in value
+            )
+            if removed:
+                raise ValueError(
+                    "OSWorld trajectory evidence is now automatic; remove: "
+                    + ", ".join(removed)
+                )
+        return value
 
 
 class OSWorldRunRequest(BaseRunRequest):
@@ -310,7 +327,7 @@ class OSWorldRunRequest(BaseRunRequest):
 
 
 class OSWorldAgentResponse(NeMoGymResponse):
-    """OSWorld response plus optional exact-trace training evidence."""
+    """OSWorld response plus universal trajectory and optional exact evidence."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -321,7 +338,9 @@ class OSWorldAgentResponse(NeMoGymResponse):
     chunk_records: Optional[List[Dict[str, Any]]] = None
     boundary_events: Optional[List[Dict[str, Any]]] = None
     guard_records: Optional[List[Dict[str, Any]]] = None
+    trajectory_contract: Optional[Dict[str, Any]] = None
     trajectory_transitions: Optional[List[Dict[str, Any]]] = None
+    model_call_summaries: Optional[List[Dict[str, Any]]] = None
     context_compaction_contract: Optional[Dict[str, Any]] = None
 
 
@@ -789,6 +808,8 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
                 "reward": s.reward,
                 "done": s.done,
                 "info": s.info,
+                "state": s.state,
+                "next_state": s.next_state,
             }
             for s in result.steps
         ],
@@ -801,6 +822,19 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        removed_agent_kwargs = sorted(
+            field
+            for field in ("training_mode", "training_turn_strategy")
+            if field in self.config.agent_kwargs
+        )
+        if removed_agent_kwargs:
+            raise ValueError(
+                "OSWorld training-specific export switches were removed; "
+                "trajectory evidence is now automatic. Remove: "
+                + ", ".join(
+                    f"agent_kwargs.{field}" for field in removed_agent_kwargs
+                )
+            )
         if self.config.resources_server is not None and self.config.sandbox_provider is not None:
             raise ValueError("OSWorld resources_server and sandbox_provider cannot be enabled together")
         _validate_runner_runtime(self.config)
@@ -985,15 +1019,6 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             )
 
             effective_agent_kwargs = dict(self.config.agent_kwargs)
-            if self.config.training_mode:
-                if self.config.runner_name != "nemotron_v3_nano_omni_agent":
-                    raise ValueError(
-                        "OSWorld training_mode currently requires runner_name="
-                        "'nemotron_v3_nano_omni_agent'"
-                    )
-                effective_agent_kwargs["training_mode"] = True
-                effective_agent_kwargs["training_turn_strategy"] = self.config.training_turn_strategy
-                effective_agent_kwargs.setdefault("parse_retries", 1)
 
             runner_kwargs: Dict[str, Any] = {
                 "provider_name": self.config.provider_name,
@@ -1080,8 +1105,6 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 policy_model_name,
                 temperature,
                 top_p,
-                training_mode=self.config.training_mode,
-                training_turn_strategy=self.config.training_turn_strategy,
                 max_trajectory_length=self.config.max_trajectory_length,
                 max_output_tokens=self.config.max_tokens,
             )
@@ -1094,122 +1117,24 @@ def _build_response(
     temperature: float,
     top_p: Optional[float],
     *,
-    training_mode: bool = False,
-    training_turn_strategy: Literal["last", "all", "exact_trace"] = "last",
     max_trajectory_length: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
 ) -> OSWorldVerifyResponse:
-    """Pack the OSWorld rollout into the shape the verify pipeline expects."""
+    """Pack one run without changing its prompt policy for training consumers."""
 
-    output: List[Dict[str, Any]] = []
     steps = result.get("steps", [])
-    last_training_step_idx = (
-        len(steps) - 1
-        if training_mode and training_turn_strategy == "last"
-        else None
+    if not isinstance(steps, list):
+        raise TypeError("OSWorld rollout steps must be a list")
+    verifier_metadata = body.verifier_metadata or {}
+    trajectory_fields, model_calls = build_trajectory_envelope(
+        steps=steps,
+        request_extra=body.model_extra or {},
+        verifier_metadata=verifier_metadata,
+        model_name=policy_model_name,
+        sample_eligible=not bool(result.get("mask_sample", False)),
     )
-    last_prompt_step_start = 0
-    if last_training_step_idx is not None and steps:
-        last_agent_info = (steps[last_training_step_idx].get("info") or {}).get("agent") or {}
-        last_training = last_agent_info.get("training")
-        if isinstance(last_training, Mapping):
-            prompt_user_message_count = last_training.get("prompt_user_message_count")
-            if prompt_user_message_count is not None:
-                if (
-                    isinstance(prompt_user_message_count, bool)
-                    or not isinstance(prompt_user_message_count, int)
-                    or prompt_user_message_count < 1
-                ):
-                    raise ValueError(
-                        "OSWorld training trajectory prompt_user_message_count "
-                        "must be a positive integer"
-                    )
-                last_prompt_step_start = max(
-                    0,
-                    last_training_step_idx - prompt_user_message_count + 1,
-                )
-    seen_token_ids: List[int] = []
-    for step_idx, step in enumerate(steps):
-        if not training_mode:
-            output.append(
-                {
-                    "id": f"msg-step-{step['step']}",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "annotations": [],
-                            "text": step["model_text"],
-                        }
-                    ],
-                }
-            )
-            continue
-
-        agent_info = (step.get("info") or {}).get("agent") or {}
-        training = agent_info.get("training")
-        if not isinstance(training, Mapping):
-            raise ValueError(
-                f"OSWorld training_mode step {step.get('step')} has no training trajectory payload"
-            )
-        user_message = training.get("new_user_message")
-        model_response = training.get("response")
-        if not isinstance(user_message, Mapping) or not isinstance(model_response, Mapping):
-            raise ValueError("OSWorld training trajectory payload has invalid user/response fields")
-
-        # For last-turn training, only return the user images that were present
-        # in the final bounded prompt. NeMo RL uses these items to construct
-        # multimodal tensors for the authoritative final prompt_token_ids.
-        if last_training_step_idx is not None and step_idx < last_prompt_step_start:
-            continue
-
-        response_content: List[Dict[str, Any]] = []
-        for part in user_message.get("content") or []:
-            if not isinstance(part, Mapping):
-                continue
-            if part.get("type") == "text":
-                response_content.append({"type": "input_text", "text": str(part.get("text") or "")})
-            elif part.get("type") == "image_url":
-                image_url = part.get("image_url")
-                url = image_url.get("url") if isinstance(image_url, Mapping) else image_url
-                response_content.append(
-                    {"type": "input_image", "image_url": str(url or ""), "detail": "high"}
-                )
-        # Exact-trace transport owns images through its content-addressed media
-        # arena. Keeping another copy in response.output is unnecessary and can
-        # multiply Ray object-store pressure over long visual trajectories.
-        if training_turn_strategy != "exact_trace":
-            output.append({"type": "message", "role": "user", "content": response_content})
-
-        # The last-turn strategy keeps the final assistant response's complete
-        # prompt token IDs. Preserve every user image referenced by that prompt
-        # while omitting the earlier assistant responses from training. NeMo RL
-        # accumulates these user images until it reaches the one trainable
-        # assistant item.
-        if last_training_step_idx is not None and step_idx != last_training_step_idx:
-            continue
-
-        required = ("prompt_token_ids", "generation_token_ids", "generation_log_probs")
-        missing = [field for field in required if model_response.get(field) is None]
-        if missing:
-            raise ValueError(
-                "OSWorld training trajectory response is missing required fields: "
-                + ", ".join(missing)
-            )
-        prompt_token_ids = [int(token_id) for token_id in model_response["prompt_token_ids"]]
-        generation_token_ids = [
-            int(token_id) for token_id in model_response["generation_token_ids"]
-        ]
-        if (
-            training_turn_strategy == "all"
-            and prompt_token_ids[: len(seen_token_ids)] != seen_token_ids
-        ):
-            raise ValueError(
-                f"OSWorld training trajectory is not token-contiguous at step {step.get('step')}"
-            )
-        assistant_item: Dict[str, Any] = {
+    output: List[Dict[str, Any]] = [
+        {
             "id": f"msg-step-{step['step']}",
             "type": "message",
             "role": "assistant",
@@ -1218,17 +1143,36 @@ def _build_response(
                 {
                     "type": "output_text",
                     "annotations": [],
-                    "text": str(model_response.get("raw_content") or ""),
+                    "text": str(step.get("model_text") or ""),
                 }
             ],
-            "prompt_token_ids": prompt_token_ids,
-            "generation_token_ids": generation_token_ids,
-            "generation_log_probs": model_response["generation_log_probs"],
         }
-        if model_response.get("routed_experts") is not None:
-            assistant_item["routed_experts"] = model_response["routed_experts"]
-        output.append(assistant_item)
-        seen_token_ids = [*prompt_token_ids, *generation_token_ids]
+        for step in steps
+    ]
+
+    exact_fields: Dict[str, Any] = {}
+    capabilities = trajectory_fields["trajectory_contract"]["capabilities"]
+    if capabilities["exact_model_call_evidence"]:
+        exact_fields = build_exact_trace_envelope(
+            model_calls=model_calls,
+            trajectory_contract=trajectory_fields["trajectory_contract"],
+            model_name=policy_model_name,
+            sampling_config={
+                "temperature": temperature,
+                "top_p": top_p,
+                "max_output_tokens": max_output_tokens,
+            },
+            policy_config={
+                "adapter": "osworld_agent",
+                "prompt_materialization_contract": (
+                    "nemotron_v3_nano_omni_bounded_history_v1"
+                ),
+                "max_trajectory_length": max_trajectory_length,
+            },
+        )
+        # Exact model calls, including parser retries, are the trainable units.
+        # Semantic step messages remain available through trajectory_transitions.
+        output = exact_fields.pop("model_call_output")
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
@@ -1241,31 +1185,29 @@ def _build_response(
         "tools": [],
         "temperature": temperature,
         "top_p": top_p,
+        **trajectory_fields,
+        **exact_fields,
     }
-    if training_mode and training_turn_strategy == "exact_trace":
-        response_dict.update(
-            build_exact_trace_envelope(
-                steps=steps,
-                request_extra=body.model_extra or {},
-                model_name=policy_model_name,
-                sampling_config={
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "max_output_tokens": max_output_tokens,
-                },
-                policy_config={
-                    "adapter": "osworld_agent",
-                    "prompt_materialization_contract": "nemotron_v3_nano_omni_bounded_history_v1",
-                    "max_trajectory_length": max_trajectory_length,
-                    "training_turn_strategy": "exact_trace",
-                },
-            )
-        )
     metadata = dict(body.verifier_metadata or {})
+    metadata_steps: List[Dict[str, Any]] = []
+    for step in steps:
+        projected_step = dict(step)
+        info = step.get("info")
+        if isinstance(info, Mapping):
+            projected_info = dict(info)
+            agent_info = info.get("agent")
+            if isinstance(agent_info, Mapping):
+                projected_agent_info = dict(agent_info)
+                raw_calls = projected_agent_info.pop("model_calls", None)
+                if isinstance(raw_calls, list):
+                    projected_agent_info["model_call_count"] = len(raw_calls)
+                projected_info["agent"] = projected_agent_info
+            projected_step["info"] = projected_info
+        metadata_steps.append(projected_step)
     metadata["osworld_score"] = result.get("score", 0.0)
     metadata["osworld_finished"] = result.get("finished", False)
     metadata["osworld_error"] = result.get("error")
-    metadata["osworld_steps"] = result.get("steps", [])
+    metadata["osworld_steps"] = metadata_steps
     metadata["osworld_artifact_dir"] = result.get("artifact_dir")
     metadata["osworld_model_name"] = policy_model_name
     metadata["osworld_termination_reason"] = result.get("termination_reason")

@@ -25,20 +25,25 @@ A completed response includes:
   rollouts whose reward is not suitable for training;
 - `verifier_metadata.osworld_score`, `osworld_steps`, completion/error state,
   termination reason, model identity, artifact directory, and proxy provenance;
-- one assistant output item per executed model step.
+- a schema-v2 `trajectory_contract` and one semantic `(state, action, reward,
+  next_state, done)` transition per environment step.
 
-### RL training turn strategies
+### Semantic trajectory and exact model-call evidence
 
-`training_mode=true` supports three model-call export strategies:
+Trajectory collection is automatic; it is not a training mode. Every runner,
+including closed model APIs that do not expose tokens, returns the semantic
+contract. `trajectory_contract.capabilities` says which stronger evidence is
+available.
 
-| Strategy | Intended consumer | Behavior |
-| --- | --- | --- |
-| `last` | Rohit `gymv-mm-integration` and other legacy NeMo-RL consumers | Exports only the final sampled assistant turn; robust when prompts are re-rendered, but earlier actions receive no direct policy loss. |
-| `all` | Legacy append-only experiments | Exports every turn only if each next tokenized prompt extends the previous prompt plus completion. This is not reliable for Nano Omni prompt re-rendering. |
-| `exact_trace` | Arash `context-compaction-v2-clean` | Exports every exact model call plus schema-v2 trace authority, media identities, rewrite boundaries, lineage, and `(state, action, reward)` alignment. NeMo-RL may split one logical rollout into several physical traces. |
+For endpoints that return `prompt_token_ids`, `generation_token_ids`, and
+`generation_log_probs`, Gym additionally emits `context_compaction_contract`
+exact authority. Each materialized model call is independent, so successive
+prompts may rewrite any earlier token or media position. Parser retries are
+also separate model calls and are not collapsed into the environment step.
+NeMo-RL can therefore reconstruct prefix-contiguous physical traces while one
+logical rollout retains one reward and advantage.
 
-`exact_trace` requires caller-owned contract-v2 identity fields on every input
-row:
+Training manifests should supply caller-owned identities:
 
 ```json
 {
@@ -50,16 +55,13 @@ row:
 }
 ```
 
-The trace-aware NeMo-RL launcher stamps `context_compaction_rollout_id` and
-its runtime generation contract before dispatch. The agent fails closed when
-those values are absent or inconsistent. Images are stored once in a
-content-addressed per-rollout media arena; `response.output` retains the exact
-sampled token arrays but does not duplicate the image payloads.
-
-The same Gym source can serve both NeMo-RL lines by configuration, but one
-multi-turn payload cannot give the legacy Rohit consumer full-trajectory
-training semantics: that consumer has no physical-trace boundary contract.
-Use `last` with Rohit and `exact_trace` with the trace-aware Arash branch.
+The trace-aware NeMo-RL launcher stamps `context_compaction_rollout_id` and a
+runtime generation contract before dispatch. Standalone benchmarks derive a
+stable identity automatically. A trainer must still fail closed unless the
+identity is caller-owned, exact evidence is complete, and runtime admission
+proves the tokenizer/template/processor contract. Images are stored once in a
+content-addressed per-rollout media arena; `response.output` retains exact
+sampled arrays without duplicating image payloads.
 
 OSWorld continues to evaluate inside `env.evaluate()`. The environment backend
 is selectable between OSWorld's provider directly and Gym Sandbox. In the
@@ -75,6 +77,8 @@ service endpoints, status, and cleanup.
 | `client.py` | `DesktopEnv` lifecycle, cache staging, action execution, evaluation, logging, and artifacts |
 | `runner_registry.py` | Runner names, upstream class paths, and default observation/action contracts |
 | `adapter_agents.py` | Gym-owned model scaffolds, including `NemotronV3NanoOmniAgent` |
+| `trajectory.py` | Model-independent semantic trajectory identity, transitions, and evidence capabilities |
+| `exact_trace.py` | Optional exact model-call/token/media evidence for trace-aware trainers |
 | `action_parser.py` | Gym pyautogui/control-action parsing and validation |
 | `proxy.py` | Explicit proxy-task configuration validation and non-secret provenance |
 | `sandbox_desktop_env.py` | Scoped `DesktopEnv` compatibility wiring for the Gym Sandbox backend |

@@ -484,330 +484,19 @@ def make_run_request(
     )
 
 
-def test_build_training_response_interleaves_images_and_trainable_turns() -> None:
+def test_build_response_always_emits_semantic_trajectory() -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
-    result = {
-        **DEFAULT_RUN_RESULT,
-        "steps": [
-            {
-                "step": 0,
-                "model_text": "normalized action",
-                "info": {
-                    "agent": {
-                        "training": {
-                            "new_user_message": {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {"url": "data:image/png;base64,YWJj"},
-                                    },
-                                    {"type": "text", "text": "Step 1"},
-                                ],
-                            },
-                            "response": {
-                                "raw_content": "<think>inspect</think>action one",
-                                "prompt_token_ids": [10, 11],
-                                "generation_token_ids": [20, 21],
-                                "generation_log_probs": [-0.1, -0.2],
-                            },
-                        }
-                    }
-                },
-            },
-            {
-                "step": 1,
-                "model_text": "normalized done",
-                "info": {
-                    "agent": {
-                        "training": {
-                            "new_user_message": {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": "Step 2"},
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {"url": "data:image/png;base64,ZGVm"},
-                                    },
-                                ],
-                            },
-                            "response": {
-                                "raw_content": "<think>verify</think>done",
-                                "prompt_token_ids": [10, 11, 20, 21, 30],
-                                "generation_token_ids": [40],
-                                "generation_log_probs": [-0.3],
-                            },
-                        }
-                    }
-                },
-            },
-        ],
-    }
+    response = _build_response(request, DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9)
 
-    response = _build_response(
-        request,
-        result,
-        "test-policy",
-        1.0,
-        0.9,
-        training_mode=True,
-        training_turn_strategy="all",
-    )
-    output = [item.model_dump(exclude_none=True) for item in response.response.output]
-
-    assert [item["role"] for item in output] == ["user", "assistant", "user", "assistant"]
-    assert output[0]["content"][0]["type"] == "input_image"
-    assert output[0]["content"][0]["image_url"] == "data:image/png;base64,YWJj"
-    assert output[1]["content"][0]["text"] == "<think>inspect</think>action one"
-    assert output[1]["prompt_token_ids"] == [10, 11]
-    assert output[1]["generation_token_ids"] == [20, 21]
-    assert output[3]["prompt_token_ids"][:4] == [10, 11, 20, 21]
-
-
-def test_build_training_response_rejects_missing_token_metadata() -> None:
-    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
-    result = {
-        **DEFAULT_RUN_RESULT,
-        "steps": [
-            {
-                "step": 0,
-                "info": {
-                    "agent": {
-                        "training": {
-                            "new_user_message": {"role": "user", "content": []},
-                            "response": {"raw_content": "action"},
-                        }
-                    }
-                },
-            }
-        ],
-    }
-
-    with pytest.raises(ValueError, match="missing required fields"):
-        _build_response(request, result, "test-policy", 1.0, 0.9, training_mode=True)
-
-
-def test_build_training_response_accepts_terminal_malformed_sample() -> None:
-    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
-    result = {
-        **DEFAULT_RUN_RESULT,
-        "reward": 0.0,
-        "score": 0.0,
-        "termination_reason": "agent_fail",
-        "steps": [
-            {
-                "step": 0,
-                "model_text": "Invalid Python action: unexpected EOF",
-                "actions": ["FAIL"],
-                "info": {
-                    "agent": {
-                        "training": {
-                            "new_user_message": {
-                                "role": "user",
-                                "content": [{"type": "text", "text": "Step 1"}],
-                            },
-                            "response": {
-                                "raw_content": "pyautogui.write('truncated",
-                                "prompt_token_ids": [10, 11],
-                                "generation_token_ids": [20, 21],
-                                "generation_log_probs": [-0.1, -0.2],
-                            },
-                        }
-                    }
-                },
-            }
-        ],
-    }
-
-    response = _build_response(
-        request,
-        result,
-        "test-policy",
-        1.0,
-        0.9,
-        training_mode=True,
-        training_turn_strategy="last",
-    )
-    output = [item.model_dump(exclude_none=True) for item in response.response.output]
-
-    assert response.reward == 0.0
-    assert response.mask_sample is False
-    assert response.verifier_metadata["osworld_termination_reason"] == "agent_fail"
-    assert output[-1]["content"][0]["text"] == "pyautogui.write('truncated"
-    assert output[-1]["generation_token_ids"] == [20, 21]
-
-
-def test_build_training_response_defaults_to_last_turn_for_reasoning_models() -> None:
-    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
-    result = {
-        **DEFAULT_RUN_RESULT,
-        "steps": [
-            {
-                "step": 0,
-                "info": {
-                    "agent": {
-                        "training": {
-                            "new_user_message": {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {"url": "data:image/png;base64,Zmlyc3Q="},
-                                    }
-                                ],
-                            },
-                            "prompt_user_message_count": 1,
-                            "response": {
-                                "raw_content": "first",
-                                "prompt_token_ids": [1],
-                                "generation_token_ids": [2],
-                                "generation_log_probs": [-0.1],
-                            },
-                        }
-                    }
-                },
-            },
-            {
-                "step": 1,
-                "info": {
-                    "agent": {
-                        "training": {
-                            "new_user_message": {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {"url": "data:image/png;base64,bGFzdA=="},
-                                    }
-                                ],
-                            },
-                            "prompt_user_message_count": 1,
-                            "response": {
-                                "raw_content": "last",
-                                "prompt_token_ids": [9, 8],
-                                "generation_token_ids": [7],
-                                "generation_log_probs": [-0.2],
-                            },
-                        }
-                    }
-                },
-            },
-        ],
-    }
-
-    response = _build_response(request, result, "test-policy", 1.0, 0.9, training_mode=True)
-    output = [item.model_dump(exclude_none=True) for item in response.response.output]
-
-    assert [item["role"] for item in output] == ["user", "assistant"]
-    assert output[0]["content"][0]["image_url"] == "data:image/png;base64,bGFzdA=="
-    assert output[-1]["content"][0]["text"] == "last"
-    assert output[-1]["prompt_token_ids"] == [9, 8]
-
-
-def test_build_last_training_turn_returns_only_final_prompt_image_window() -> None:
-    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
-    steps = []
-    for index in range(4):
-        training = {
-            "new_user_message": {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,aW1hZ2U{index + 1}="
-                        },
-                    }
-                ],
-            },
-            "response": {
-                "raw_content": f"step {index + 1}",
-                "prompt_token_ids": [10, index],
-                "generation_token_ids": [20 + index],
-                "generation_log_probs": [-0.1],
-            },
-        }
-        if index == 3:
-            training["prompt_user_message_count"] = 3
-        steps.append(
-            {
-                "step": index,
-                "info": {"agent": {"training": training}},
-            }
-        )
-
-    result = {**DEFAULT_RUN_RESULT, "steps": steps}
-    response = _build_response(
-        request,
-        result,
-        "test-policy",
-        1.0,
-        0.9,
-        training_mode=True,
-        training_turn_strategy="last",
-    )
-    output = [item.model_dump(exclude_none=True) for item in response.response.output]
-
-    assert [item["role"] for item in output] == ["user", "user", "user", "assistant"]
-    assert [item["content"][0]["image_url"] for item in output[:-1]] == [
-        "data:image/png;base64,aW1hZ2U2=",
-        "data:image/png;base64,aW1hZ2U3=",
-        "data:image/png;base64,aW1hZ2U4=",
-    ]
-    assert output[-1]["content"][0]["text"] == "step 4"
-    assert output[-1]["generation_token_ids"] == [23]
-
-
-def test_build_all_training_turns_rejects_noncontiguous_tokens() -> None:
-    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
-    result = {
-        **DEFAULT_RUN_RESULT,
-        "steps": [
-            {
-                "step": 0,
-                "info": {
-                    "agent": {
-                        "training": {
-                            "new_user_message": {"role": "user", "content": []},
-                            "response": {
-                                "raw_content": "first",
-                                "prompt_token_ids": [1],
-                                "generation_token_ids": [2],
-                                "generation_log_probs": [-0.1],
-                            },
-                        }
-                    }
-                },
-            },
-            {
-                "step": 1,
-                "info": {
-                    "agent": {
-                        "training": {
-                            "new_user_message": {"role": "user", "content": []},
-                            "response": {
-                                "raw_content": "second",
-                                "prompt_token_ids": [1, 99],
-                                "generation_token_ids": [3],
-                                "generation_log_probs": [-0.2],
-                            },
-                        }
-                    }
-                },
-            },
-        ],
-    }
-
-    with pytest.raises(ValueError, match="not token-contiguous"):
-        _build_response(
-            request,
-            result,
-            "test-policy",
-            1.0,
-            0.9,
-            training_mode=True,
-            training_turn_strategy="all",
-        )
+    contract = response.response.trajectory_contract
+    assert contract is not None
+    assert contract["schema_version"] == 2
+    assert contract["mode"] == "osworld_semantic_trajectory"
+    assert contract["identity_source"] == "derived"
+    assert contract["capabilities"]["semantic_trajectory"] is True
+    assert contract["capabilities"]["exact_model_call_evidence"] is False
+    assert response.response.context_compaction_contract is None
+    assert len(response.response.trajectory_transitions or []) == 2
 
 
 def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
@@ -831,24 +520,34 @@ def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
                 "done": False,
                 "info": {
                     "agent": {
-                        "training": {
-                            "new_user_message": {
-                                "role": "user",
-                                "content": [
+                        "model_calls": [
+                            {
+                                "parse_attempt": 1,
+                                "prompt_messages": [
+                                    {"role": "system", "content": "system"},
                                     {
-                                        "type": "image_url",
-                                        "image_url": {"url": "data:image/png;base64,Zmlyc3Q="},
-                                    }
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "image_url",
+                                                "image_url": {
+                                                    "url": "data:image/png;base64,Zmlyc3Q="
+                                                },
+                                            }
+                                        ],
+                                    },
                                 ],
-                            },
-                            "prompt_user_message_count": 1,
-                            "response": {
-                                "raw_content": "first action",
-                                "prompt_token_ids": [10, 11],
-                                "generation_token_ids": [20, 21],
-                                "generation_log_probs": [-0.1, -0.2],
-                            },
-                        }
+                                "response": {
+                                    "raw_content": "first action",
+                                    "prompt_token_ids": [10, 11],
+                                    "generation_token_ids": [20, 21],
+                                    "generation_log_probs": [-0.1, -0.2],
+                                },
+                                "accepted": True,
+                                "parse_error": None,
+                                "parsed_actions": ["pyautogui.click(10, 20)"],
+                            }
+                        ]
                     }
                 },
             },
@@ -859,25 +558,35 @@ def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
                 "done": True,
                 "info": {
                     "agent": {
-                        "training": {
-                            "new_user_message": {
-                                "role": "user",
-                                "content": [
+                        "model_calls": [
+                            {
+                                "parse_attempt": 1,
+                                "prompt_messages": [
+                                    {"role": "system", "content": "rewritten system"},
                                     {
-                                        "type": "image_url",
-                                        "image_url": {"url": "data:image/png;base64,c2Vjb25k"},
-                                    }
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "image_url",
+                                                "image_url": {
+                                                    "url": "data:image/png;base64,c2Vjb25k"
+                                                },
+                                            }
+                                        ],
+                                    },
                                 ],
-                            },
-                            "prompt_user_message_count": 1,
-                            "response": {
-                                "raw_content": "finish",
-                                # Deliberately not prefixed by turn 1's prompt + completion.
-                                "prompt_token_ids": [99, 100],
-                                "generation_token_ids": [101],
-                                "generation_log_probs": [-0.3],
-                            },
-                        }
+                                "response": {
+                                    "raw_content": "finish",
+                                    # Deliberately not prefixed by turn 1's prompt + completion.
+                                    "prompt_token_ids": [99, 100],
+                                    "generation_token_ids": [101],
+                                    "generation_log_probs": [-0.3],
+                                },
+                                "accepted": True,
+                                "parse_error": None,
+                                "parsed_actions": ["DONE"],
+                            }
+                        ]
                     }
                 },
             },
@@ -890,8 +599,6 @@ def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
         "test-policy",
         1.0,
         0.9,
-        training_mode=True,
-        training_turn_strategy="exact_trace",
         max_trajectory_length=3,
         max_output_tokens=512,
     )
@@ -910,6 +617,7 @@ def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
     assert contract["task_id"] == "task-001"
     assert contract["rollout_index"] == 0
     assert contract["attempt_index"] == 0
+    assert contract["identity_source"] == "caller"
     evidence = trace_response.completion_evidence
     assert evidence is not None
     assert [item["segment_index"] for item in evidence] == [0, 1]
@@ -917,47 +625,121 @@ def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
     assert evidence[1]["compaction_event_id"] is not None
     assert len(trace_response.boundary_events or []) == 1
     assert len(trace_response.media_assets or {}) == 2
+    assert response.verifier_metadata["osworld_steps"][0]["info"]["agent"] == {
+        "model_call_count": 1
+    }
     assert [item["action"]["parsed_actions"] for item in trace_response.trajectory_transitions or []] == [
         ["pyautogui.click(10, 20)"],
         ["DONE"],
     ]
 
 
-def test_build_exact_trace_response_requires_caller_stamped_identity() -> None:
+def test_build_exact_trace_response_derives_identity_for_benchmarking() -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
     result = {
         **DEFAULT_RUN_RESULT,
         "steps": [
             {
                 "step": 0,
+                "model_text": "action",
+                "actions": ["DONE"],
+                "reward": 1.0,
+                "done": True,
                 "info": {
                     "agent": {
-                        "training": {
-                            "new_user_message": {"role": "user", "content": []},
-                            "prompt_user_message_count": 1,
-                            "response": {
-                                "raw_content": "action",
-                                "prompt_token_ids": [1],
-                                "generation_token_ids": [2],
-                                "generation_log_probs": [-0.1],
-                            },
-                        }
+                        "model_calls": [
+                            {
+                                "parse_attempt": 1,
+                                "prompt_messages": [
+                                    {"role": "user", "content": "inspect"}
+                                ],
+                                "response": {
+                                    "raw_content": "action",
+                                    "prompt_token_ids": [1],
+                                    "generation_token_ids": [2],
+                                    "generation_log_probs": [-0.1],
+                                },
+                                "accepted": True,
+                                "parse_error": None,
+                                "parsed_actions": ["DONE"],
+                            }
+                        ]
                     }
                 },
             }
         ],
     }
 
-    with pytest.raises(ValueError, match="context_compaction_contract_version=2"):
-        _build_response(
-            request,
-            result,
-            "test-policy",
-            1.0,
-            0.9,
-            training_mode=True,
-            training_turn_strategy="exact_trace",
+    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+
+    trajectory_contract = response.response.trajectory_contract
+    exact_contract = response.response.context_compaction_contract
+    assert trajectory_contract is not None
+    assert exact_contract is not None
+    assert trajectory_contract["identity_source"] == "derived"
+    assert trajectory_contract["training_eligibility"]["status"] == "ineligible"
+    assert exact_contract["identity_source"] == "derived"
+    assert exact_contract["rollout_id"] == trajectory_contract["rollout_id"]
+
+
+def test_build_response_rejects_partial_caller_identity() -> None:
+    request = OSWorldRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        verifier_metadata={"task_id": "task-001"},
+        context_compaction_contract_version=2,
+    )
+
+    with pytest.raises(ValueError, match="identity is incomplete"):
+        _build_response(request, DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9)
+
+
+def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    calls = []
+    for attempt, token_id, accepted in ((1, 20, False), (2, 21, True)):
+        calls.append(
+            {
+                "parse_attempt": attempt,
+                "prompt_messages": [
+                    {"role": "user", "content": f"attempt {attempt}"}
+                ],
+                "response": {
+                    "raw_content": f"sample {attempt}",
+                    "prompt_token_ids": [10, attempt],
+                    "generation_token_ids": [token_id],
+                    "generation_log_probs": [-0.1 * attempt],
+                },
+                "accepted": accepted,
+                "parse_error": None if accepted else "invalid Python",
+                "parsed_actions": ["DONE"] if accepted else [],
+            }
         )
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "steps": [
+            {
+                "step": 0,
+                "model_text": "sample 2",
+                "actions": ["DONE"],
+                "reward": 1.0,
+                "done": True,
+                "info": {"agent": {"model_calls": calls}},
+            }
+        ],
+    }
+
+    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+
+    assert len(response.response.output) == 2
+    assert [item["accepted"] for item in response.response.completion_evidence or []] == [
+        False,
+        True,
+    ]
+    [transition] = response.response.trajectory_transitions or []
+    assert len(transition["state"]["model_call_ids"]) == 2
+    assert transition["action"]["accepted_model_call_id"] == transition["state"][
+        "model_call_ids"
+    ][1]
 
 
 def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict):
@@ -973,6 +755,13 @@ def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_serve
 class TestApp:
     def test_sanity(self) -> None:
         OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+
+    def test_removed_training_switches_fail_loudly(self) -> None:
+        with pytest.raises(ValueError, match="trajectory evidence is now automatic"):
+            OSWorldAgent(
+                config=make_config(training_mode=True),
+                server_client=MagicMock(spec=ServerClient),
+            )
 
     @patch("responses_api_agents.osworld_agent.app.load_attr")
     def test_startup_validates_runner_in_agent_runtime(self, mock_load_attr) -> None:
