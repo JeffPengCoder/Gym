@@ -20,7 +20,11 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from responses_api_agents.osworld_agent.trajectory import canonical_digest, stable_id
+from responses_api_agents.osworld_agent.trajectory import (
+    canonical_digest,
+    project_prompt_messages,
+    stable_id,
+)
 
 
 _POLICY_NAME = "osworld_exact_prompt_trace"
@@ -36,13 +40,8 @@ _ALLOWED_IDENTITY_GAPS = (
 def _token_list(value: Any, *, field: str, turn_id: int) -> list[int]:
     if not isinstance(value, (list, tuple)) or not value:
         raise ValueError(f"OSWorld exact_trace turn {turn_id} has invalid {field}")
-    if any(
-        isinstance(item, bool) or not isinstance(item, int) or item < 0
-        for item in value
-    ):
-        raise ValueError(
-            f"OSWorld exact_trace turn {turn_id} has invalid token in {field}"
-        )
+    if any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in value):
+        raise ValueError(f"OSWorld exact_trace turn {turn_id} has invalid token in {field}")
     return [int(item) for item in value]
 
 
@@ -55,45 +54,6 @@ def _logprob_list(value: Any, *, turn_id: int) -> list[float]:
     return result
 
 
-def _image_source(part: Mapping[str, Any]) -> dict[str, Any] | None:
-    part_type = part.get("type")
-    if part_type not in {"image_url", "input_image", "image"}:
-        return None
-    raw_source = part.get("image_url") or part.get("image") or part.get("url")
-    detail = part.get("detail") or "high"
-    if isinstance(raw_source, Mapping):
-        detail = raw_source.get("detail") or detail
-        raw_source = raw_source.get("url")
-    if not isinstance(raw_source, str) or not raw_source:
-        raise ValueError("OSWorld exact_trace encountered an image without a source URL")
-    return {
-        "type": "input_image",
-        "image_url": raw_source,
-        "detail": str(detail),
-    }
-
-
-def _register_media(
-    source_part: Mapping[str, Any],
-    *,
-    media_assets: dict[str, dict[str, Any]],
-) -> str:
-    content_digest = canonical_digest(source_part)
-    media_id = f"media-{content_digest[:24]}"
-    asset = {
-        "media_id": media_id,
-        "content_digest": content_digest,
-        "source_part": dict(source_part),
-        "original_dimensions": None,
-        "color_mode": None,
-        "source_format": None,
-    }
-    previous = media_assets.setdefault(media_id, asset)
-    if previous.get("content_digest") != content_digest:
-        raise RuntimeError(f"OSWorld exact_trace media ID collision for {media_id}")
-    return media_id
-
-
 def _prompt_media_ids(
     prompt_messages: Sequence[Mapping[str, Any]],
     *,
@@ -101,25 +61,10 @@ def _prompt_media_ids(
 ) -> list[str]:
     """Resolve every media occurrence from one materialized model prompt."""
 
-    media_ids: list[str] = []
-    for message_index, message in enumerate(prompt_messages):
-        if not isinstance(message, Mapping):
-            raise ValueError(
-                f"OSWorld exact trace prompt message {message_index} must be a mapping"
-            )
-        content = message.get("content") or []
-        if isinstance(content, str):
-            continue
-        if not isinstance(content, (list, tuple)):
-            raise ValueError(
-                f"OSWorld exact trace prompt message {message_index} has invalid content"
-            )
-        for part in content:
-            if not isinstance(part, Mapping):
-                continue
-            source = _image_source(part)
-            if source is not None:
-                media_ids.append(_register_media(source, media_assets=media_assets))
+    _, media_ids = project_prompt_messages(
+        prompt_messages,
+        media_assets=media_assets,
+    )
     return media_ids
 
 
@@ -243,14 +188,8 @@ def build_exact_trace_envelope(
     if not model_calls:
         raise ValueError("OSWorld exact trace requires at least one model call")
     capabilities = trajectory_contract.get("capabilities")
-    if (
-        not isinstance(capabilities, Mapping)
-        or capabilities.get("exact_model_call_evidence") is not True
-    ):
-        raise ValueError(
-            "OSWorld exact trace requires a trajectory contract with complete "
-            "model-call evidence"
-        )
+    if not isinstance(capabilities, Mapping) or capabilities.get("exact_model_call_evidence") is not True:
+        raise ValueError("OSWorld exact trace requires a trajectory contract with complete model-call evidence")
     identity = {
         field: trajectory_contract.get(field)
         for field in (
@@ -290,14 +229,10 @@ def build_exact_trace_envelope(
     for call_index, model_call in enumerate(model_calls):
         turn_id = call_index + 1
         if model_call.get("turn_id") != turn_id:
-            raise ValueError(
-                f"OSWorld exact trace model call {call_index} has invalid turn_id"
-            )
+            raise ValueError(f"OSWorld exact trace model call {call_index} has invalid turn_id")
         model_response = model_call.get("response")
         if not isinstance(model_response, Mapping):
-            raise ValueError(
-                f"OSWorld exact trace turn {turn_id} has no model response evidence"
-            )
+            raise ValueError(f"OSWorld exact trace turn {turn_id} has no model response evidence")
 
         prompt_token_ids = _token_list(
             model_response.get("prompt_token_ids"),
@@ -320,15 +255,11 @@ def build_exact_trace_envelope(
             )
         eligible = model_call.get("eligible")
         if not isinstance(eligible, bool):
-            raise ValueError(
-                f"OSWorld exact trace turn {turn_id} has non-boolean eligible"
-            )
+            raise ValueError(f"OSWorld exact trace turn {turn_id} has non-boolean eligible")
 
         prompt_messages = model_call.get("prompt_messages")
         if not isinstance(prompt_messages, list) or not prompt_messages:
-            raise ValueError(
-                f"OSWorld exact trace turn {turn_id} has no materialized prompt"
-            )
+            raise ValueError(f"OSWorld exact trace turn {turn_id} has no materialized prompt")
         media_ids = _prompt_media_ids(
             prompt_messages,
             media_assets=media_assets,
@@ -428,9 +359,7 @@ def build_exact_trace_envelope(
         )
         model_call_id = model_call.get("model_call_id")
         if not isinstance(model_call_id, str) or not model_call_id:
-            raise ValueError(
-                f"OSWorld exact trace turn {turn_id} has no model-call identity"
-            )
+            raise ValueError(f"OSWorld exact trace turn {turn_id} has no model-call identity")
         occurrence_counts: Counter[str] = Counter()
         media_occurrences = []
         for media_id in media_ids:
@@ -531,9 +460,7 @@ def build_exact_trace_envelope(
             "schema_version": 2,
             "mode": "exact_trace_authority",
             **identity,
-            "trajectory_contract_id": trajectory_contract.get(
-                "trajectory_contract_id"
-            ),
+            "trajectory_contract_id": trajectory_contract.get("trajectory_contract_id"),
             "generation_contract": generation_contract,
         },
     }

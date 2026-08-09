@@ -530,9 +530,7 @@ def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
                                         "content": [
                                             {
                                                 "type": "image_url",
-                                                "image_url": {
-                                                    "url": "data:image/png;base64,Zmlyc3Q="
-                                                },
+                                                "image_url": {"url": "data:image/png;base64,Zmlyc3Q="},
                                             }
                                         ],
                                     },
@@ -568,9 +566,7 @@ def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
                                         "content": [
                                             {
                                                 "type": "image_url",
-                                                "image_url": {
-                                                    "url": "data:image/png;base64,c2Vjb25k"
-                                                },
+                                                "image_url": {"url": "data:image/png;base64,c2Vjb25k"},
                                             }
                                         ],
                                     },
@@ -625,9 +621,26 @@ def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
     assert evidence[1]["compaction_event_id"] is not None
     assert len(trace_response.boundary_events or []) == 1
     assert len(trace_response.media_assets or {}) == 2
-    assert response.verifier_metadata["osworld_steps"][0]["info"]["agent"] == {
-        "model_call_count": 1
+    model_calls = trace_response.trajectory_model_calls or []
+    assert len(model_calls) == 2
+    assert model_calls[0]["state"]["prompt_messages"][1]["content"][0] == {
+        "type": "input_image",
+        "media_id": model_calls[0]["state"]["media_ids"][0],
+        "detail": "high",
     }
+    assert model_calls[0]["action"] == {
+        "raw_completion": "first action",
+        "parsed_actions": ["pyautogui.click(10, 20)"],
+    }
+    assert model_calls[0]["generation_evidence"]["generation_log_probs"] == [
+        -0.1,
+        -0.2,
+    ]
+    first_media_id = model_calls[0]["state"]["media_ids"][0]
+    assert (trace_response.media_assets or {})[first_media_id]["source_part"][
+        "image_url"
+    ] == "data:image/png;base64,Zmlyc3Q="
+    assert response.verifier_metadata["osworld_steps"][0]["info"]["agent"] == {"model_call_count": 1}
     assert [item["action"]["parsed_actions"] for item in trace_response.trajectory_transitions or []] == [
         ["pyautogui.click(10, 20)"],
         ["DONE"],
@@ -650,9 +663,7 @@ def test_build_exact_trace_response_derives_identity_for_benchmarking() -> None:
                         "model_calls": [
                             {
                                 "parse_attempt": 1,
-                                "prompt_messages": [
-                                    {"role": "user", "content": "inspect"}
-                                ],
+                                "prompt_messages": [{"role": "user", "content": "inspect"}],
                                 "response": {
                                     "raw_content": "action",
                                     "prompt_token_ids": [1],
@@ -682,6 +693,29 @@ def test_build_exact_trace_response_derives_identity_for_benchmarking() -> None:
     assert exact_contract["rollout_id"] == trajectory_contract["rollout_id"]
 
 
+def test_build_response_accepts_generic_caller_trajectory_identity() -> None:
+    request = OSWorldRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        verifier_metadata={"task_id": "task-001", "domain": "chrome"},
+        trajectory_identity={
+            "schema_version": 1,
+            "rollout_id": "rollout-generic-001",
+            "group_id": "group-generic-001",
+            "task_id": "task-001",
+            "rollout_index": 2,
+            "attempt_index": 0,
+        },
+    )
+
+    response = _build_response(request, DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9)
+
+    contract = response.response.trajectory_contract
+    assert contract is not None
+    assert contract["identity_source"] == "caller"
+    assert contract["rollout_id"] == "rollout-generic-001"
+    assert contract["rollout_index"] == 2
+
+
 def test_build_response_rejects_partial_caller_identity() -> None:
     request = OSWorldRunRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
@@ -700,9 +734,7 @@ def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
         calls.append(
             {
                 "parse_attempt": attempt,
-                "prompt_messages": [
-                    {"role": "user", "content": f"attempt {attempt}"}
-                ],
+                "prompt_messages": [{"role": "user", "content": f"attempt {attempt}"}],
                 "response": {
                     "raw_content": f"sample {attempt}",
                     "prompt_token_ids": [10, attempt],
@@ -737,9 +769,7 @@ def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
     ]
     [transition] = response.response.trajectory_transitions or []
     assert len(transition["state"]["model_call_ids"]) == 2
-    assert transition["action"]["accepted_model_call_id"] == transition["state"][
-        "model_call_ids"
-    ][1]
+    assert transition["action"]["accepted_model_call_id"] == transition["state"]["model_call_ids"][1]
 
 
 def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict):

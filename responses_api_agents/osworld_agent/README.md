@@ -26,7 +26,11 @@ A completed response includes:
 - `verifier_metadata.osworld_score`, `osworld_steps`, completion/error state,
   termination reason, model identity, artifact directory, and proxy provenance;
 - a schema-v2 `trajectory_contract` and one semantic `(state, action, reward,
-  next_state, done)` transition per environment step.
+  next_state, done)` transition per environment step;
+- `trajectory_model_calls`, preserving each materialized prompt, sampled
+  action, reward/done linkage, parser outcome, and any available token/logprob
+  evidence. Screenshot bytes live once in `media_assets`; prompts reference
+  them by ordered `media_id`.
 
 ### Semantic trajectory and exact model-call evidence
 
@@ -43,25 +47,28 @@ also separate model calls and are not collapsed into the environment step.
 NeMo-RL can therefore reconstruct prefix-contiguous physical traces while one
 logical rollout retains one reward and advantage.
 
-Training manifests should supply caller-owned identities:
+Training manifests should supply a model-independent caller-owned identity:
 
 ```json
 {
-  "context_compaction_contract_version": 2,
-  "context_compaction_group_id": "chrome-task-001",
-  "context_compaction_task_id": "task-001",
-  "context_compaction_rollout_index": 0,
-  "context_compaction_attempt_index": 0
+  "trajectory_identity": {
+    "schema_version": 1,
+    "group_id": "chrome-task-001",
+    "task_id": "task-001",
+    "rollout_index": 0,
+    "attempt_index": 0
+  }
 }
 ```
 
-The trace-aware NeMo-RL launcher stamps `context_compaction_rollout_id` and a
-runtime generation contract before dispatch. Standalone benchmarks derive a
-stable identity automatically. A trainer must still fail closed unless the
-identity is caller-owned, exact evidence is complete, and runtime admission
-proves the tokenizer/template/processor contract. Images are stored once in a
-content-addressed per-rollout media arena; `response.output` retains exact
-sampled arrays without duplicating image payloads.
+The trace-aware NeMo-RL launcher derives and stamps `rollout_id` inside that
+object and binds a runtime generation contract before training dispatch.
+Standalone benchmarks derive a stable identity automatically and still emit
+the same semantic contract. A trainer must fail closed unless the identity is
+caller-owned, exact evidence is complete, and runtime admission proves the
+tokenizer/template/processor contract. The `context_compaction_contract` wire
+name is retained for compatibility with the existing NeMo-RL physical-trace
+reconstructor; it is evidence capability, not a Gym training switch.
 
 OSWorld continues to evaluate inside `env.evaluate()`. The environment backend
 is selectable between OSWorld's provider directly and Gym Sandbox. In the

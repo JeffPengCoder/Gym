@@ -25,6 +25,14 @@ _CALLER_IDENTITY_FIELDS = (
     "context_compaction_rollout_index",
     "context_compaction_attempt_index",
 )
+_TRAJECTORY_IDENTITY_FIELDS = (
+    "rollout_id",
+    "group_id",
+    "task_id",
+    "rollout_index",
+    "attempt_index",
+)
+_MEDIA_PART_TYPES = frozenset({"image_url", "input_image", "image"})
 
 
 def _canonical_json(value: Any) -> str:
@@ -63,25 +71,52 @@ def _trajectory_identity(
     verifier_metadata: Mapping[str, Any],
     model_name: str,
 ) -> dict[str, Any]:
-    caller_values = {
-        field: request_extra.get(field) for field in _CALLER_IDENTITY_FIELDS
-    }
-    caller_stamped = (
-        request_extra.get("context_compaction_contract_version") is not None
-        or any(value is not None for value in caller_values.values())
+    generic_identity = request_extra.get("trajectory_identity")
+    caller_values = {field: request_extra.get(field) for field in _CALLER_IDENTITY_FIELDS}
+    legacy_identity_present = request_extra.get("context_compaction_contract_version") is not None or any(
+        value is not None for value in caller_values.values()
     )
-    if caller_stamped:
+    if generic_identity is not None and legacy_identity_present:
+        raise ValueError(
+            "OSWorld request must use trajectory_identity or legacy context_compaction identity fields, not both"
+        )
+    if generic_identity is not None:
+        if not isinstance(generic_identity, Mapping):
+            raise TypeError("trajectory_identity must be a mapping")
+        if generic_identity.get("schema_version") != 1:
+            raise ValueError("Unsupported trajectory_identity schema_version")
+        missing = [field for field in _TRAJECTORY_IDENTITY_FIELDS if generic_identity.get(field) is None]
+        if missing:
+            raise ValueError("Caller-stamped trajectory_identity is incomplete: " + ", ".join(missing))
+        rollout_id = generic_identity["rollout_id"]
+        group_id = generic_identity["group_id"]
+        task_id = generic_identity["task_id"]
+        rollout_index = _nonnegative_int(
+            generic_identity["rollout_index"],
+            fallback=0,
+            field="trajectory_identity.rollout_index",
+        )
+        attempt_index = _nonnegative_int(
+            generic_identity["attempt_index"],
+            fallback=0,
+            field="trajectory_identity.attempt_index",
+        )
+        for field, value in (
+            ("trajectory_identity.rollout_id", rollout_id),
+            ("trajectory_identity.group_id", group_id),
+            ("trajectory_identity.task_id", task_id),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{field} must be a non-empty string")
+        identity_source = "caller"
+    elif legacy_identity_present:
         if request_extra.get("context_compaction_contract_version") != 2:
             raise ValueError(
-                "Caller-stamped OSWorld trajectory identity requires "
-                "context_compaction_contract_version=2"
+                "Caller-stamped OSWorld trajectory identity requires context_compaction_contract_version=2"
             )
         missing = [field for field, value in caller_values.items() if value is None]
         if missing:
-            raise ValueError(
-                "Caller-stamped OSWorld trajectory identity is incomplete: "
-                + ", ".join(missing)
-            )
+            raise ValueError("Caller-stamped OSWorld trajectory identity is incomplete: " + ", ".join(missing))
         rollout_id = caller_values["context_compaction_rollout_id"]
         group_id = caller_values["context_compaction_group_id"]
         task_id = caller_values["context_compaction_task_id"]
@@ -141,6 +176,90 @@ def _trajectory_identity(
     }
 
 
+def _image_source(part: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Normalize an OpenAI-style image part without changing its bytes."""
+
+    if part.get("type") not in _MEDIA_PART_TYPES:
+        return None
+    raw_source = part.get("image_url") or part.get("image") or part.get("url")
+    detail = part.get("detail") or "high"
+    if isinstance(raw_source, Mapping):
+        detail = raw_source.get("detail") or detail
+        raw_source = raw_source.get("url")
+    if not isinstance(raw_source, str) or not raw_source:
+        raise ValueError("OSWorld trajectory encountered an image without a source URL")
+    return {
+        "type": "input_image",
+        "image_url": raw_source,
+        "detail": str(detail),
+    }
+
+
+def register_media_asset(
+    source_part: Mapping[str, Any],
+    *,
+    media_assets: dict[str, dict[str, Any]],
+) -> str:
+    """Store one immutable media asset in the trajectory-level arena."""
+
+    content_digest = canonical_digest(source_part)
+    media_id = f"media-{content_digest[:24]}"
+    asset = {
+        "media_id": media_id,
+        "content_digest": content_digest,
+        "source_part": dict(source_part),
+        "original_dimensions": None,
+        "color_mode": None,
+        "source_format": None,
+    }
+    previous = media_assets.setdefault(media_id, asset)
+    if previous.get("content_digest") != content_digest:
+        raise RuntimeError(f"OSWorld trajectory media ID collision for {media_id}")
+    return media_id
+
+
+def project_prompt_messages(
+    prompt_messages: Sequence[Mapping[str, Any]],
+    *,
+    media_assets: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Factor raw media out of a materialized prompt into stable references."""
+
+    projected_messages: list[dict[str, Any]] = []
+    media_ids: list[str] = []
+    for message_index, message in enumerate(prompt_messages):
+        if not isinstance(message, Mapping):
+            raise ValueError(f"OSWorld prompt message {message_index} must be a mapping")
+        projected_message = dict(message)
+        content = message.get("content")
+        if isinstance(content, str) or content is None:
+            projected_messages.append(projected_message)
+            continue
+        if not isinstance(content, (list, tuple)):
+            raise ValueError(f"OSWorld prompt message {message_index} has invalid content")
+        projected_content: list[Any] = []
+        for part in content:
+            if not isinstance(part, Mapping):
+                projected_content.append(part)
+                continue
+            source = _image_source(part)
+            if source is None:
+                projected_content.append(dict(part))
+                continue
+            media_id = register_media_asset(source, media_assets=media_assets)
+            media_ids.append(media_id)
+            projected_content.append(
+                {
+                    "type": "input_image",
+                    "media_id": media_id,
+                    "detail": source["detail"],
+                }
+            )
+        projected_message["content"] = projected_content
+        projected_messages.append(projected_message)
+    return projected_messages, media_ids
+
+
 def _exact_generation_arrays(
     response: Mapping[str, Any],
 ) -> tuple[dict[str, list[Any]] | None, list[str]]:
@@ -150,24 +269,16 @@ def _exact_generation_arrays(
     generation_logprobs = response.get("generation_log_probs")
     if not isinstance(prompt_ids, (list, tuple)) or not prompt_ids:
         reasons.append("exact_prompt_token_ids_unavailable")
-    elif any(
-        isinstance(value, bool) or not isinstance(value, int) or value < 0
-        for value in prompt_ids
-    ):
+    elif any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in prompt_ids):
         reasons.append("exact_prompt_token_ids_invalid")
     if not isinstance(generation_ids, (list, tuple)) or not generation_ids:
         reasons.append("exact_sampled_token_ids_unavailable")
-    elif any(
-        isinstance(value, bool) or not isinstance(value, int) or value < 0
-        for value in generation_ids
-    ):
+    elif any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in generation_ids):
         reasons.append("exact_sampled_token_ids_invalid")
     if not isinstance(generation_logprobs, (list, tuple)):
         reasons.append("exact_sampled_logprobs_unavailable")
     elif any(
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
+        isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value))
         for value in generation_logprobs
     ):
         reasons.append("exact_sampled_logprobs_invalid")
@@ -187,6 +298,7 @@ def collect_model_calls(
     *,
     trajectory_id: str,
     sample_eligible: bool,
+    media_assets: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Collect model-call records without assuming one call per env step."""
 
@@ -204,11 +316,7 @@ def collect_model_calls(
                 incomplete_reasons.add("model_call_evidence_invalid")
                 continue
             parse_attempt = raw_call.get("parse_attempt")
-            if (
-                isinstance(parse_attempt, bool)
-                or not isinstance(parse_attempt, int)
-                or parse_attempt <= 0
-            ):
+            if isinstance(parse_attempt, bool) or not isinstance(parse_attempt, int) or parse_attempt <= 0:
                 parse_attempt = local_call_index + 1
                 incomplete_reasons.add("model_call_parse_attempt_invalid")
             model_call_id = stable_id(
@@ -222,12 +330,39 @@ def collect_model_calls(
             call_reasons: list[str] = []
             if not isinstance(prompt_messages, list) or not prompt_messages:
                 call_reasons.append("exact_prompt_messages_unavailable")
+                projected_prompt: list[dict[str, Any]] = []
+                media_ids: list[str] = []
+            else:
+                projected_prompt, media_ids = project_prompt_messages(
+                    prompt_messages,
+                    media_assets=media_assets,
+                )
             if not isinstance(response, Mapping):
                 call_reasons.append("structured_generation_response_unavailable")
                 arrays = None
             else:
                 arrays, array_reasons = _exact_generation_arrays(response)
                 call_reasons.extend(array_reasons)
+            partial_generation_evidence = {
+                "prompt_token_ids": (
+                    list(response["prompt_token_ids"])
+                    if isinstance(response, Mapping) and isinstance(response.get("prompt_token_ids"), (list, tuple))
+                    else None
+                ),
+                "generation_token_ids": (
+                    list(response["generation_token_ids"])
+                    if isinstance(response, Mapping)
+                    and isinstance(response.get("generation_token_ids"), (list, tuple))
+                    else None
+                ),
+                "generation_log_probs": (
+                    list(response["generation_log_probs"])
+                    if isinstance(response, Mapping)
+                    and isinstance(response.get("generation_log_probs"), (list, tuple))
+                    else None
+                ),
+                "finish_reason": (response.get("finish_reason") if isinstance(response, Mapping) else None),
+            }
             incomplete_reasons.update(call_reasons)
             reward = step.get("reward", 0.0)
             if isinstance(reward, bool) or not isinstance(reward, (int, float)):
@@ -246,8 +381,11 @@ def collect_model_calls(
                     "step_position": step_position,
                     "parse_attempt": parse_attempt,
                     "prompt_messages": prompt_messages,
+                    "projected_prompt_messages": projected_prompt,
+                    "media_ids": media_ids,
                     "response": dict(response) if isinstance(response, Mapping) else None,
                     "exact_generation_arrays": arrays,
+                    "partial_generation_evidence": partial_generation_evidence,
                     "exact_evidence": not call_reasons,
                     "accepted": raw_call.get("accepted") is True,
                     "parse_error": raw_call.get("parse_error"),
@@ -276,10 +414,12 @@ def build_trajectory_envelope(
         model_name=model_name,
     )
     trajectory_id = stable_id("trajectory", identity, model_name)
+    media_assets: dict[str, dict[str, Any]] = {}
     model_calls, evidence_reasons = collect_model_calls(
         steps,
         trajectory_id=trajectory_id,
         sample_eligible=sample_eligible,
+        media_assets=media_assets,
     )
     calls_by_step: dict[int, list[dict[str, Any]]] = {}
     for model_call in model_calls:
@@ -310,11 +450,7 @@ def build_trajectory_envelope(
                     "raw_completion": str(step.get("model_text") or ""),
                     "parsed_actions": list(actions),
                     "accepted_model_call_id": next(
-                        (
-                            call["model_call_id"]
-                            for call in reversed(step_calls)
-                            if call["accepted"]
-                        ),
+                        (call["model_call_id"] for call in reversed(step_calls) if call["accepted"]),
                         None,
                     ),
                 },
@@ -335,9 +471,7 @@ def build_trajectory_envelope(
         eligibility_reasons.append("caller_owned_rollout_identity_unavailable")
     status = (
         "requires_runtime_admission"
-        if exact_model_call_evidence
-        and sample_eligible
-        and identity["identity_source"] == "caller"
+        if exact_model_call_evidence and sample_eligible and identity["identity_source"] == "caller"
         else "ineligible"
     )
     contract_without_id = {
@@ -366,6 +500,35 @@ def build_trajectory_envelope(
             contract_without_id,
         ),
     }
+    trajectory_model_calls = [
+        {
+            "model_call_id": call["model_call_id"],
+            "turn_id": call["turn_id"],
+            "environment_step": call["environment_step"],
+            "parse_attempt": call["parse_attempt"],
+            "state": {
+                "prompt_messages": call["projected_prompt_messages"],
+                "media_ids": call["media_ids"],
+            },
+            "action": {
+                "raw_completion": str((call["response"] or {}).get("raw_content") or ""),
+                "parsed_actions": call["parsed_actions"],
+            },
+            "reward": call["reward"],
+            "done": call["done"],
+            "eligible": call["eligible"],
+            "accepted": call["accepted"],
+            "parse_error": call["parse_error"],
+            "generation_evidence": {
+                **call["partial_generation_evidence"],
+                "exact": call["exact_evidence"],
+            },
+        }
+        for call in model_calls
+    ]
+    # Kept as a compact compatibility view for older consumers. New consumers
+    # should use trajectory_model_calls, which contains the actual prompt,
+    # action, reward, and optional generation evidence for each policy call.
     model_call_summaries = [
         {
             "model_call_id": call["model_call_id"],
@@ -382,7 +545,9 @@ def build_trajectory_envelope(
         {
             "trajectory_contract": trajectory_contract,
             "trajectory_transitions": transitions,
+            "trajectory_model_calls": trajectory_model_calls,
             "model_call_summaries": model_call_summaries,
+            "media_assets": media_assets,
         },
         model_calls,
     )

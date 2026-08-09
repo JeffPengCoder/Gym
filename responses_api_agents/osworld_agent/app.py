@@ -307,16 +307,9 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
         """Fail loudly instead of silently accepting obsolete export modes."""
 
         if isinstance(value, Mapping):
-            removed = sorted(
-                field
-                for field in ("training_mode", "training_turn_strategy")
-                if field in value
-            )
+            removed = sorted(field for field in ("training_mode", "training_turn_strategy") if field in value)
             if removed:
-                raise ValueError(
-                    "OSWorld trajectory evidence is now automatic; remove: "
-                    + ", ".join(removed)
-                )
+                raise ValueError("OSWorld trajectory evidence is now automatic; remove: " + ", ".join(removed))
         return value
 
 
@@ -340,6 +333,7 @@ class OSWorldAgentResponse(NeMoGymResponse):
     guard_records: Optional[List[Dict[str, Any]]] = None
     trajectory_contract: Optional[Dict[str, Any]] = None
     trajectory_transitions: Optional[List[Dict[str, Any]]] = None
+    trajectory_model_calls: Optional[List[Dict[str, Any]]] = None
     model_call_summaries: Optional[List[Dict[str, Any]]] = None
     context_compaction_contract: Optional[Dict[str, Any]] = None
 
@@ -823,17 +817,13 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         removed_agent_kwargs = sorted(
-            field
-            for field in ("training_mode", "training_turn_strategy")
-            if field in self.config.agent_kwargs
+            field for field in ("training_mode", "training_turn_strategy") if field in self.config.agent_kwargs
         )
         if removed_agent_kwargs:
             raise ValueError(
                 "OSWorld training-specific export switches were removed; "
                 "trajectory evidence is now automatic. Remove: "
-                + ", ".join(
-                    f"agent_kwargs.{field}" for field in removed_agent_kwargs
-                )
+                + ", ".join(f"agent_kwargs.{field}" for field in removed_agent_kwargs)
             )
         if self.config.resources_server is not None and self.config.sandbox_provider is not None:
             raise ValueError("OSWorld resources_server and sandbox_provider cannot be enabled together")
@@ -997,9 +987,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     global_config_dict,
                     self.config.resources_server.name,
                 )
-                resources_server_url = (
-                    f"http://{resources_server_config['host']}:{resources_server_config['port']}"
-                )
+                resources_server_url = f"http://{resources_server_config['host']}:{resources_server_config['port']}"
 
             temperature = body.responses_create_params.temperature or self.config.temperature
             top_p = body.responses_create_params.top_p or self.config.top_p
@@ -1076,11 +1064,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 # Child Ray tasks do not reliably inherit the NemoGym actor's
                 # runtime environment. Forward diagnostic paths explicitly so
                 # parse failures retain their model I/O and task trajectory.
-                rollout_env = {
-                    name: os.environ[name]
-                    for name in _ROLLOUT_DIAGNOSTIC_ENV_VARS
-                    if os.environ.get(name)
-                }
+                rollout_env = {name: os.environ[name] for name in _ROLLOUT_DIAGNOSTIC_ENV_VARS if os.environ.get(name)}
                 runtime_env: Dict[str, Any] = {"py_executable": sys.executable}
                 if rollout_env:
                     runtime_env["env_vars"] = rollout_env
@@ -1164,12 +1148,13 @@ def _build_response(
             },
             policy_config={
                 "adapter": "osworld_agent",
-                "prompt_materialization_contract": (
-                    "nemotron_v3_nano_omni_bounded_history_v1"
-                ),
+                "prompt_materialization_contract": ("nemotron_v3_nano_omni_bounded_history_v1"),
                 "max_trajectory_length": max_trajectory_length,
             },
         )
+        if exact_fields.get("media_assets") != trajectory_fields.get("media_assets"):
+            raise ValueError("Semantic trajectory and exact evidence disagree about media assets")
+        exact_fields.pop("media_assets")
         # Exact model calls, including parser retries, are the trainable units.
         # Semantic step messages remain available through trajectory_transitions.
         output = exact_fields.pop("model_call_output")
