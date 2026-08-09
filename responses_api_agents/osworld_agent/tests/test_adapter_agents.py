@@ -445,6 +445,55 @@ def test_nemotron_all_turn_training_mode_keeps_append_only_raw_message_history()
     assert second_info["training"]["response"]["generation_token_ids"] == [40]
 
 
+def test_nemotron_exact_trace_mode_keeps_bounded_prompt_views() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=2,
+        max_image_history_length=1,
+        parse_retries=1,
+        training_mode=True,
+        training_turn_strategy="exact_trace",
+    )
+    payloads: List[Dict[str, Any]] = []
+    responses = [
+        {
+            "content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(0.5, 0.5)\n```",
+            "reasoning_content": "First thought",
+            "raw_content": "first raw completion",
+            "prompt_token_ids": [10, 11],
+            "generation_token_ids": [20],
+            "generation_log_probs": [-0.1],
+        },
+        {
+            "content": "## Action:\nFinish.\n## Code:\n```code\ncomputer.terminate(status='success')\n```",
+            "reasoning_content": "Second thought",
+            "raw_content": "second raw completion",
+            "prompt_token_ids": [99, 100],
+            "generation_token_ids": [101],
+            "generation_log_probs": [-0.2],
+        },
+    ]
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        payloads.append(payload)
+        return responses[len(payloads) - 1]
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    _, first_actions, first_info = agent.predict(
+        "Complete the task.", {"screenshot": b"first-png"}
+    )
+    _, second_actions, second_info = agent.predict(
+        "Complete the task.", {"screenshot": b"second-png"}
+    )
+
+    assert first_actions == ["pyautogui.click(960, 540)"]
+    assert second_actions == ["DONE"]
+    assert first_info["training"]["prompt_user_message_count"] == 1
+    assert second_info["training"]["prompt_user_message_count"] == 1
+    assert "Zmlyc3QtcG5n" not in str(payloads[1]["messages"])
+    assert "c2Vjb25kLXBuZw==" in str(payloads[1]["messages"])
+
+
 def test_nemotron_training_mode_rejects_missing_token_metadata() -> None:
     agent = NemotronV3NanoOmniAgent(
         model="policy-under-test",

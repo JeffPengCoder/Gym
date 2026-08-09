@@ -27,6 +27,40 @@ A completed response includes:
   termination reason, model identity, artifact directory, and proxy provenance;
 - one assistant output item per executed model step.
 
+### RL training turn strategies
+
+`training_mode=true` supports three model-call export strategies:
+
+| Strategy | Intended consumer | Behavior |
+| --- | --- | --- |
+| `last` | Rohit `gymv-mm-integration` and other legacy NeMo-RL consumers | Exports only the final sampled assistant turn; robust when prompts are re-rendered, but earlier actions receive no direct policy loss. |
+| `all` | Legacy append-only experiments | Exports every turn only if each next tokenized prompt extends the previous prompt plus completion. This is not reliable for Nano Omni prompt re-rendering. |
+| `exact_trace` | Arash `context-compaction-v2-clean` | Exports every exact model call plus schema-v2 trace authority, media identities, rewrite boundaries, lineage, and `(state, action, reward)` alignment. NeMo-RL may split one logical rollout into several physical traces. |
+
+`exact_trace` requires caller-owned contract-v2 identity fields on every input
+row:
+
+```json
+{
+  "context_compaction_contract_version": 2,
+  "context_compaction_group_id": "chrome-task-001",
+  "context_compaction_task_id": "task-001",
+  "context_compaction_rollout_index": 0,
+  "context_compaction_attempt_index": 0
+}
+```
+
+The trace-aware NeMo-RL launcher stamps `context_compaction_rollout_id` and
+its runtime generation contract before dispatch. The agent fails closed when
+those values are absent or inconsistent. Images are stored once in a
+content-addressed per-rollout media arena; `response.output` retains the exact
+sampled token arrays but does not duplicate the image payloads.
+
+The same Gym source can serve both NeMo-RL lines by configuration, but one
+multi-turn payload cannot give the legacy Rohit consumer full-trajectory
+training semantics: that consumer has no physical-trace boundary contract.
+Use `last` with Rohit and `exact_trace` with the trace-aware Arash branch.
+
 OSWorld continues to evaluate inside `env.evaluate()`. The environment backend
 is selectable between OSWorld's provider directly and Gym Sandbox. In the
 Sandbox path, OSWorld still owns `DesktopEnv`, setup, controllers, actions,

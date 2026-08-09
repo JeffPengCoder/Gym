@@ -810,6 +810,156 @@ def test_build_all_training_turns_rejects_noncontiguous_tokens() -> None:
         )
 
 
+def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
+    request = OSWorldRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        verifier_metadata={"task_id": "task-001", "domain": "chrome"},
+        context_compaction_contract_version=2,
+        context_compaction_rollout_id="rollout-test-001",
+        context_compaction_group_id="group-test-001",
+        context_compaction_task_id="task-001",
+        context_compaction_rollout_index=0,
+        context_compaction_attempt_index=0,
+    )
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "steps": [
+            {
+                "step": 0,
+                "actions": ["pyautogui.click(10, 20)"],
+                "reward": 0.0,
+                "done": False,
+                "info": {
+                    "agent": {
+                        "training": {
+                            "new_user_message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": "data:image/png;base64,Zmlyc3Q="},
+                                    }
+                                ],
+                            },
+                            "prompt_user_message_count": 1,
+                            "response": {
+                                "raw_content": "first action",
+                                "prompt_token_ids": [10, 11],
+                                "generation_token_ids": [20, 21],
+                                "generation_log_probs": [-0.1, -0.2],
+                            },
+                        }
+                    }
+                },
+            },
+            {
+                "step": 1,
+                "actions": ["DONE"],
+                "reward": 1.0,
+                "done": True,
+                "info": {
+                    "agent": {
+                        "training": {
+                            "new_user_message": {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": "data:image/png;base64,c2Vjb25k"},
+                                    }
+                                ],
+                            },
+                            "prompt_user_message_count": 1,
+                            "response": {
+                                "raw_content": "finish",
+                                # Deliberately not prefixed by turn 1's prompt + completion.
+                                "prompt_token_ids": [99, 100],
+                                "generation_token_ids": [101],
+                                "generation_log_probs": [-0.3],
+                            },
+                        }
+                    }
+                },
+            },
+        ],
+    }
+
+    response = _build_response(
+        request,
+        result,
+        "test-policy",
+        1.0,
+        0.9,
+        training_mode=True,
+        training_turn_strategy="exact_trace",
+        max_trajectory_length=3,
+        max_output_tokens=512,
+    )
+
+    trace_response = response.response
+    output = [item.model_dump(exclude_none=True) for item in trace_response.output]
+    assert [item["role"] for item in output] == ["assistant", "assistant"]
+    assert output[0]["generation_token_ids"] == [20, 21]
+    assert output[1]["prompt_token_ids"] == [99, 100]
+    contract = trace_response.context_compaction_contract
+    assert contract is not None
+    assert contract["schema_version"] == 2
+    assert contract["mode"] == "exact_trace_authority"
+    assert contract["rollout_id"] == "rollout-test-001"
+    assert contract["group_id"] == "group-test-001"
+    assert contract["task_id"] == "task-001"
+    assert contract["rollout_index"] == 0
+    assert contract["attempt_index"] == 0
+    evidence = trace_response.completion_evidence
+    assert evidence is not None
+    assert [item["segment_index"] for item in evidence] == [0, 1]
+    assert [item["expected_append_compatible"] for item in evidence] == [False, False]
+    assert evidence[1]["compaction_event_id"] is not None
+    assert len(trace_response.boundary_events or []) == 1
+    assert len(trace_response.media_assets or {}) == 2
+    assert [item["action"]["parsed_actions"] for item in trace_response.trajectory_transitions or []] == [
+        ["pyautogui.click(10, 20)"],
+        ["DONE"],
+    ]
+
+
+def test_build_exact_trace_response_requires_caller_stamped_identity() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "steps": [
+            {
+                "step": 0,
+                "info": {
+                    "agent": {
+                        "training": {
+                            "new_user_message": {"role": "user", "content": []},
+                            "prompt_user_message_count": 1,
+                            "response": {
+                                "raw_content": "action",
+                                "prompt_token_ids": [1],
+                                "generation_token_ids": [2],
+                                "generation_log_probs": [-0.1],
+                            },
+                        }
+                    }
+                },
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="context_compaction_contract_version=2"):
+        _build_response(
+            request,
+            result,
+            "test-policy",
+            1.0,
+            0.9,
+            training_mode=True,
+            training_turn_strategy="exact_trace",
+        )
+
+
 def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict):
     mock_client = MagicMock()
     mock_client.global_config_dict = {

@@ -52,6 +52,7 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
 )
+from responses_api_agents.osworld_agent.exact_trace import build_exact_trace_envelope
 from responses_api_agents.osworld_agent.proxy import (
     inspect_proxy_config_file,
     parse_env_bool,
@@ -293,7 +294,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     evaluator_disable_gpu: bool = True
     reward_mode: Literal["binary", "raw"] = "binary"
     training_mode: bool = False
-    training_turn_strategy: Literal["last", "all"] = "last"
+    training_turn_strategy: Literal["last", "all", "exact_trace"] = "last"
     runner_name: str = DEFAULT_RUNNER_NAME
     action_space: Optional[str] = None
     observation_type: Optional[str] = None
@@ -308,8 +309,25 @@ class OSWorldRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
 
+class OSWorldAgentResponse(NeMoGymResponse):
+    """OSWorld response plus optional exact-trace training evidence."""
+
+    model_config = ConfigDict(extra="allow")
+
+    media_assets: Optional[Dict[str, Dict[str, Any]]] = None
+    completion_evidence: Optional[List[Dict[str, Any]]] = None
+    final_policy_decision: Optional[Dict[str, Any]] = None
+    lineage_deltas: Optional[List[Dict[str, Any]]] = None
+    chunk_records: Optional[List[Dict[str, Any]]] = None
+    boundary_events: Optional[List[Dict[str, Any]]] = None
+    guard_records: Optional[List[Dict[str, Any]]] = None
+    trajectory_transitions: Optional[List[Dict[str, Any]]] = None
+    context_compaction_contract: Optional[Dict[str, Any]] = None
+
+
 class OSWorldVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+    response: OSWorldAgentResponse
     # NeMo-RL trainer drops the gradient when reward is unreliable. Set true on
     # timeout / max_steps exhaustion (no DONE/FAIL) / evaluator throw.
     mask_sample: bool = False
@@ -1064,6 +1082,8 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 top_p,
                 training_mode=self.config.training_mode,
                 training_turn_strategy=self.config.training_turn_strategy,
+                max_trajectory_length=self.config.max_trajectory_length,
+                max_output_tokens=self.config.max_tokens,
             )
 
 
@@ -1075,7 +1095,9 @@ def _build_response(
     top_p: Optional[float],
     *,
     training_mode: bool = False,
-    training_turn_strategy: Literal["last", "all"] = "last",
+    training_turn_strategy: Literal["last", "all", "exact_trace"] = "last",
+    max_trajectory_length: Optional[int] = None,
+    max_output_tokens: Optional[int] = None,
 ) -> OSWorldVerifyResponse:
     """Pack the OSWorld rollout into the shape the verify pipeline expects."""
 
@@ -1155,7 +1177,11 @@ def _build_response(
                 response_content.append(
                     {"type": "input_image", "image_url": str(url or ""), "detail": "high"}
                 )
-        output.append({"type": "message", "role": "user", "content": response_content})
+        # Exact-trace transport owns images through its content-addressed media
+        # arena. Keeping another copy in response.output is unnecessary and can
+        # multiply Ray object-store pressure over long visual trajectories.
+        if training_turn_strategy != "exact_trace":
+            output.append({"type": "message", "role": "user", "content": response_content})
 
         # The last-turn strategy keeps the final assistant response's complete
         # prompt token IDs. Preserve every user image referenced by that prompt
@@ -1176,7 +1202,10 @@ def _build_response(
         generation_token_ids = [
             int(token_id) for token_id in model_response["generation_token_ids"]
         ]
-        if prompt_token_ids[: len(seen_token_ids)] != seen_token_ids:
+        if (
+            training_turn_strategy == "all"
+            and prompt_token_ids[: len(seen_token_ids)] != seen_token_ids
+        ):
             raise ValueError(
                 f"OSWorld training trajectory is not token-contiguous at step {step.get('step')}"
             )
@@ -1213,6 +1242,25 @@ def _build_response(
         "temperature": temperature,
         "top_p": top_p,
     }
+    if training_mode and training_turn_strategy == "exact_trace":
+        response_dict.update(
+            build_exact_trace_envelope(
+                steps=steps,
+                request_extra=body.model_extra or {},
+                model_name=policy_model_name,
+                sampling_config={
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "max_output_tokens": max_output_tokens,
+                },
+                policy_config={
+                    "adapter": "osworld_agent",
+                    "prompt_materialization_contract": "nemotron_v3_nano_omni_bounded_history_v1",
+                    "max_trajectory_length": max_trajectory_length,
+                    "training_turn_strategy": "exact_trace",
+                },
+            )
+        )
     metadata = dict(body.verifier_metadata or {})
     metadata["osworld_score"] = result.get("score", 0.0)
     metadata["osworld_finished"] = result.get("finished", False)

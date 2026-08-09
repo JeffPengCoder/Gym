@@ -491,8 +491,10 @@ class NemotronV3NanoOmniAgent:
         self.training_mode = bool(training_mode)
         if self.training_mode and self.parse_retries != 1:
             raise ValueError("Nemotron training_mode currently requires parse_retries=1")
-        if training_turn_strategy not in {"last", "all"}:
-            raise ValueError("training_turn_strategy must be 'last' or 'all'")
+        if training_turn_strategy not in {"last", "all", "exact_trace"}:
+            raise ValueError(
+                "training_turn_strategy must be 'last', 'all', or 'exact_trace'"
+            )
         self.training_turn_strategy = training_turn_strategy
         self.parse_error_feedback = bool(parse_error_feedback)
         self.parse_retry_temperature = (
@@ -594,8 +596,10 @@ class NemotronV3NanoOmniAgent:
         # Training the last turn does not require every prior screenshot to
         # remain in the prompt. Reuse the benchmark's bounded image window
         # below, while retaining the sampled token/logprob payload separately.
-        # The all-turn strategy still needs append-only raw messages so each
-        # trainable assistant turn remains token-contiguous with the next.
+        # The all-turn legacy strategy still needs append-only raw messages so
+        # each trainable assistant turn remains token-contiguous with the next.
+        # exact_trace deliberately uses this bounded prompt path and reports
+        # every material rewrite to the trace-aware trainer.
         if self.training_mode and self.training_turn_strategy == "all":
             messages = (
                 list(self.training_messages)
