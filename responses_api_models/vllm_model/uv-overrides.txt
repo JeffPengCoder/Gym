@@ -1,0 +1,4 @@
+# This thin HTTP passthrough is launched beside a NeMo-RL Ray cluster. Keep its
+# transitive nemo-gym dependency on the exact cross-process Ray version used by
+# that cluster, even when a newer Gym checkout raises its global lower bound.
+ray==2.55.1

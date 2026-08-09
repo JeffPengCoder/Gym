@@ -2,8 +2,16 @@
 # benchmark. The NeMo-RL-integrated agent joins a Python 3.13 Ray cluster, so
 # use the official Python-3.13-compatible CPU pair. These overrides are local
 # to this server venv and do not affect trainer or model-server environments.
+ray==2.55.1
 torch==2.11.0
 torchvision==0.26.0
+
+# OSWorld's legacy google-generativeai path selects google-api-core[grpc].
+# grpcio-status 1.81+ requires protobuf 6+, while google-generativeai still
+# requires protobuf <6. Put the known-compatible pair in the override policy,
+# not only requirements.txt, so it also replaces transitive resolver edges.
+grpcio-status==1.71.2
+protobuf==5.29.6
 
 # OSWorld 0.1.0 still declares its standalone Python 3.12 numerical stack:
 # NumPy <2, Matplotlib <3.8, and headless OpenCV <4.8.2.  Those caps either

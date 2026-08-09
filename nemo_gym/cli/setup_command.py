@@ -128,8 +128,18 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
         python_venv_flags = "--managed-python "
 
+    # `uv pip --project` has no effect. A server-local uv.toml passed via
+    # --config-file is the supported way to keep an enclosing workspace (for
+    # example /opt/nemo-rl) from contributing unrelated resolver policy.
+    uv_config_path = dir_path / "uv.toml"
+    uv_config_flag = (
+        f"--config-file {shlex.quote(str(uv_config_path.resolve()))} "
+        if uv_config_path.exists()
+        else ""
+    )
     uv_venv_cmd = (
-        f"uv venv --seed --allow-existing {python_venv_flags}--python {python_request_arg} {venv_path}"
+        f"uv venv {uv_config_flag}--seed --allow-existing "
+        f"{python_venv_flags}--python {python_request_arg} {venv_path}"
     )
 
     venv_python_fpath = venv_path / "bin/python"
@@ -148,7 +158,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # A server is a separate process with its own venv. Allow it to select its
     # Python, dependency metadata, and Torch backend without leaking those
     # choices into sibling server venvs through process-wide UV_* variables.
-    server_uv_flags = ""
+    server_uv_flags = uv_config_flag
     overrides_path = dir_path / "uv-overrides.txt"
     if overrides_path.exists():
         server_uv_flags += f"--overrides {shlex.quote(str(overrides_path.resolve()))} "

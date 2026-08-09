@@ -52,7 +52,12 @@ easyocr==1.7.2
 Pillow~=11.0.0
 scikit-learn
 matplotlib==3.10.6
-# google-generativeai (pulled by OSWorld) currently requires protobuf<6.
+# The open Google gRPC dependency now selects grpcio-status 1.81.0, which
+# requires protobuf>=6.33.5, while OSWorld's google-generativeai dependency
+# still requires protobuf<6. Keep the known protobuf-5-compatible status
+# release; its grpcio>=1.71.2 lower bound remains compatible with Gym's
+# repository-wide grpcio security floor.
+grpcio-status==1.71.2
 protobuf==5.29.6
 flask~=3.0.0
 func-timeout
