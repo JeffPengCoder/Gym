@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -183,6 +183,40 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(
         "messages": messages,
         "max_tokens": 32,
         "temperature": 0.6,
+    }
+
+
+@patch("openai.DefaultHttpxClient")
+@patch("openai.OpenAI")
+def test_messages_model_fn_forwards_explicit_nemo_rl_rollout_purpose(
+    mock_openai, mock_http_client
+) -> None:
+    message = SimpleNamespace(content="done", tool_calls=[], model_extra={})
+    client = mock_openai.return_value
+    client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason="stop")]
+    )
+    call = _build_messages_model_fn(
+        base_url="http://policy/v1",
+        model_name="policy",
+        api_key="test-key",  # pragma: allowlist secret
+        rollout_purpose="evaluation",
+    )
+    messages = [{"role": "user", "content": "inspect"}]
+
+    call(
+        messages,
+        {
+            "model": "policy",
+            "messages": messages,
+            "max_tokens": 64,
+            "temperature": 0.6,
+        },
+    )
+
+    sent = client.chat.completions.create.call_args.kwargs
+    assert json.loads(sent["metadata"]["extra_body"]) == {
+        "nemo_rl_rollout_purpose": "evaluation"
     }
 
 
@@ -570,6 +604,8 @@ def make_run_request(
     extra_metadata: Optional[Dict[str, Any]] = None,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
+    max_output_tokens: Optional[int] = None,
+    rollout_purpose: Optional[Literal["training", "evaluation"]] = None,
 ) -> OSWorldRunRequest:
     metadata: Dict[str, Any] = {"task_id": "test-task-001", "domain": "chrome"}
     if osworld_task is not None:
@@ -578,9 +614,13 @@ def make_run_request(
         metadata.update(extra_metadata)
     return OSWorldRunRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-            input=[], temperature=temperature, top_p=top_p
+            input=[],
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_output_tokens,
         ),
         verifier_metadata=metadata,
+        rollout_purpose=rollout_purpose,
     )
 
 
@@ -1026,8 +1066,23 @@ class TestApp:
 
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {"observability_enabled": True}
-        agent = OSWorldAgent(config=make_config(), server_client=server_client)
-        request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK, temperature=0.7, top_p=0.95)
+        agent = OSWorldAgent(
+            config=make_config(
+                agent_kwargs={"parse_retries": 5},
+                agent_kwargs_by_rollout_purpose={
+                    "training": {"parse_retries": 1},
+                    "evaluation": {"parse_retries": 5},
+                },
+            ),
+            server_client=server_client,
+        )
+        request = make_run_request(
+            osworld_task=DEFAULT_OSWORLD_TASK,
+            temperature=0.7,
+            top_p=0.95,
+            max_output_tokens=4096,
+            rollout_purpose="evaluation",
+        )
         request = OSWorldRunRequest.model_validate(
             {
                 **request.model_dump(),
@@ -1053,6 +1108,7 @@ class TestApp:
         # Per-request overrides win over the agent default.
         assert response.response.temperature == 0.7
         assert response.response.top_p == 0.95
+        assert response.rollout_purpose == "evaluation"
         # Ray remote was dispatched exactly once with our task spec.
         mock_remote.options.assert_called_once()
         mock_remote.options.return_value.remote.assert_called_once()
@@ -1063,9 +1119,13 @@ class TestApp:
         assert positional_args[1]["docker_port_lock_timeout"] == 300.0
         assert positional_args[1]["enable_proxy"] is False
         assert positional_args[1]["proxy_config_file"] is None
+        assert positional_args[1]["max_tokens"] == 4096
+        assert positional_args[1]["rollout_purpose"] == "evaluation"
+        assert positional_args[1]["agent_kwargs"]["parse_retries"] == 5
         assert positional_args[1]["log_context"] == {
             "run_id": "run-001",
             "adapter": "gym",
+            "rollout_purpose": "evaluation",
             "task_id": "test-task-001",
             "domain": "chrome",
             "task_attempt": 1,

@@ -71,6 +71,7 @@ POINTER_ANTHROPIC_VALIDATION_SENTINEL = "__nemo_gym_anthropic_key_deferred__"
 _OSWORLD_LOG_CONTEXT_FIELDS = (
     "run_id",
     "adapter",
+    "rollout_purpose",
     "task_id",
     "domain",
     "task_attempt",
@@ -301,6 +302,14 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     env_class_path: Optional[str] = None
     agent_class_path: Optional[str] = None
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
+    # A NeMo-RL scheduler may stamp the request purpose. Keep the default
+    # agent kwargs as the standalone benchmark behavior and apply only the
+    # explicitly configured purpose-specific delta here. Gym never infers a
+    # purpose from trajectory/token evidence because all rollout modes emit
+    # the same semantic contract.
+    agent_kwargs_by_rollout_purpose: Dict[
+        Literal["training", "evaluation"], Dict[str, Any]
+    ] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
@@ -452,6 +461,7 @@ def _build_messages_model_fn(
     model_name: str,
     api_key: str,
     log_context: Optional[Mapping[str, Any]] = None,
+    rollout_purpose: Optional[Literal["training", "evaluation"]] = None,
 ):
     """Return a sync model caller for native OSWorld agents.
 
@@ -475,6 +485,16 @@ def _build_messages_model_fn(
         }
         if payload.get("top_p") is not None:
             create_kwargs["top_p"] = payload["top_p"]
+        if rollout_purpose is not None:
+            # The Gym vLLM proxy reads metadata.extra_body and forwards the
+            # decoded fields to NeMo-RL's internal vLLM endpoint. Standalone
+            # benchmark calls omit this side channel entirely.
+            create_kwargs["metadata"] = {
+                "extra_body": json.dumps(
+                    {"nemo_rl_rollout_purpose": rollout_purpose},
+                    separators=(",", ":"),
+                )
+            }
         model_io_enabled = bool(os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip())
         current_call = 0
         started_ns = 0
@@ -835,6 +855,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     max_tokens = runner_kwargs.pop("max_tokens")
     temperature = runner_kwargs.pop("temperature")
     top_p = runner_kwargs.pop("top_p")
+    rollout_purpose = runner_kwargs.pop("rollout_purpose", None)
     log_context = _normalize_log_context(runner_kwargs.pop("log_context", None))
     model_fn = _build_model_fn(
         base_url=base_url,
@@ -849,6 +870,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         model_name=model_name,
         api_key=api_key,
         log_context=log_context,
+        rollout_purpose=rollout_purpose,
     )
     result = run_osworld_task(
         task_config,
@@ -1066,8 +1088,21 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 )
                 resources_server_url = f"http://{resources_server_config['host']}:{resources_server_config['port']}"
 
-            temperature = body.responses_create_params.temperature or self.config.temperature
-            top_p = body.responses_create_params.top_p or self.config.top_p
+            temperature = (
+                body.responses_create_params.temperature
+                if body.responses_create_params.temperature is not None
+                else self.config.temperature
+            )
+            top_p = (
+                body.responses_create_params.top_p
+                if body.responses_create_params.top_p is not None
+                else self.config.top_p
+            )
+            max_tokens = (
+                body.responses_create_params.max_output_tokens
+                if body.responses_create_params.max_output_tokens is not None
+                else self.config.max_tokens
+            )
             extra = body.model_extra or {}
             try:
                 task_attempt = int(extra.get("_ng_rollout_index", 0)) + 1
@@ -1077,6 +1112,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 {
                     "run_id": os.environ.get("OSWORLD_RUN_ID") or os.environ.get("RUN_TAG"),
                     "adapter": "gym",
+                    "rollout_purpose": body.rollout_purpose,
                     "task_id": metadata.get("task_id") or task_config.get("id") or task_config.get("task_id"),
                     "domain": metadata.get("domain") or task_config.get("domain") or task_config.get("snapshot"),
                     "task_attempt": task_attempt,
@@ -1084,6 +1120,12 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             )
 
             effective_agent_kwargs = dict(self.config.agent_kwargs)
+            if body.rollout_purpose is not None:
+                effective_agent_kwargs.update(
+                    self.config.agent_kwargs_by_rollout_purpose.get(
+                        body.rollout_purpose, {}
+                    )
+                )
 
             runner_kwargs: Dict[str, Any] = {
                 "provider_name": self.config.provider_name,
@@ -1125,9 +1167,10 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "policy_base_url": policy_base_url,
                 "model_name": policy_model_name,
                 "api_key": policy_api_key,
-                "max_tokens": self.config.max_tokens,
+                "max_tokens": max_tokens,
                 "temperature": temperature,
                 "top_p": top_p,
+                "rollout_purpose": body.rollout_purpose,
                 "runner_name": self.config.runner_name,
                 "action_space": self.config.action_space,
                 "observation_type": self.config.observation_type,
@@ -1167,7 +1210,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 temperature,
                 top_p,
                 max_trajectory_length=self.config.max_trajectory_length,
-                max_output_tokens=self.config.max_tokens,
+                max_output_tokens=max_tokens,
             )
 
 
@@ -1279,6 +1322,7 @@ def _build_response(
 
     return OSWorldVerifyResponse(
         responses_create_params=body.responses_create_params,
+        rollout_purpose=body.rollout_purpose,
         reward=float(result.get("reward", 0.0)),
         response=response_dict,
         verifier_metadata=metadata,
@@ -1307,6 +1351,7 @@ def _empty_response(
     )
     return OSWorldVerifyResponse(
         responses_create_params=body.responses_create_params,
+        rollout_purpose=body.rollout_purpose,
         reward=0.0,
         response={
             "id": "osworld-error",
