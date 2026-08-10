@@ -1286,7 +1286,10 @@ def test_stage_setup_cache_supports_flat_spreadsheet_download_cache(monkeypatch,
     assert destination.read_bytes() == b"xlsx"
 
 
-def _install_fake_setup_module(monkeypatch, result: Dict[str, Any]):
+def _install_fake_setup_module(
+    monkeypatch,
+    result: Dict[str, Any] | List[Dict[str, Any]],
+):
     desktop_env = ModuleType("desktop_env")
     controllers = ModuleType("desktop_env.controllers")
     setup_module = ModuleType("desktop_env.controllers.setup")
@@ -1320,15 +1323,21 @@ def _install_fake_setup_module(monkeypatch, result: Dict[str, Any]):
             )
             return "upstream"
 
+    results = [dict(item) for item in result] if isinstance(result, list) else [dict(result)]
+
     class Response:
         status_code = 200
 
+        def __init__(self, value: Dict[str, Any]) -> None:
+            self.value = value
+
         def json(self):
-            return dict(result)
+            return dict(self.value)
 
     def post(url, **kwargs):
         post_calls.append({"url": url, **kwargs})
-        return Response()
+        value = results.pop(0) if len(results) > 1 else results[0]
+        return Response(value)
 
     setup_module.SetupController = SetupController
     setup_module.requests = SimpleNamespace(
@@ -1343,7 +1352,7 @@ def _install_fake_setup_module(monkeypatch, result: Dict[str, Any]):
     return SetupController, original_calls, post_calls
 
 
-def test_setup_returncode_contract_is_opt_in_and_accepts_declared_codes(monkeypatch, tmp_path: Path) -> None:
+def test_setup_returncode_contract_defaults_to_zero_and_accepts_declared_codes(monkeypatch, tmp_path: Path) -> None:
     controller_class, original_calls, post_calls = _install_fake_setup_module(
         monkeypatch,
         {"returncode": 2, "output": "expected", "error": ""},
@@ -1351,16 +1360,41 @@ def test_setup_returncode_contract_is_opt_in_and_accepts_declared_codes(monkeypa
     osworld_client._patch_setup_execute_contract()
     controller = controller_class(str(tmp_path))
 
-    assert controller._execute_setup(["legacy"]) == "upstream"
-    assert len(original_calls) == 1
+    with pytest.raises(RuntimeError, match="setup command returned 2"):
+        controller._execute_setup(["legacy"])
+    assert original_calls == []
     result = controller._execute_setup(
         ["tool", "{SCREEN_WIDTH_HALF}"],
         expected_returncodes=[0, 2],
     )
 
     assert result["returncode"] == 2
-    assert len(post_calls) == 1
-    assert '"960"' in post_calls[0]["data"]
+    assert len(post_calls) == 2
+    assert '"960"' in post_calls[1]["data"]
+
+
+def test_setup_retries_guest_package_manager_lock(monkeypatch, tmp_path: Path) -> None:
+    controller_class, original_calls, post_calls = _install_fake_setup_module(
+        monkeypatch,
+        [
+            {
+                "returncode": 100,
+                "output": "",
+                "error": ("E: Could not get lock /var/lib/apt/lists/lock. It is held by process 42 (packagekitd)"),
+            },
+            {"returncode": 0, "output": "installed jq", "error": ""},
+        ],
+    )
+    monkeypatch.setattr(osworld_client.time, "sleep", lambda _seconds: None)
+    osworld_client._patch_setup_execute_contract()
+    controller = controller_class(str(tmp_path))
+
+    result = controller._execute_setup(["apt", "install", "-y", "jq"])
+
+    assert result["returncode"] == 0
+    assert result["output"] == "installed jq"
+    assert original_calls == []
+    assert len(post_calls) == 2
 
 
 def test_setup_on_nonzero_score_zero_is_a_valid_evaluator_outcome(monkeypatch, tmp_path: Path) -> None:

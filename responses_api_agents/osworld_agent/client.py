@@ -368,11 +368,13 @@ def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str, setup_cache_
 
 
 def _patch_setup_execute_contract() -> None:
-    """Support optional return-code policies used by newer OSWorld tasks.
+    """Enforce setup return codes and retry transient guest package locks.
 
-    The pinned upstream method remains untouched for existing tasks. The
-    compatibility path runs only when a task explicitly supplies
-    ``expected_returncodes`` or ``on_nonzero``.
+    Older OSWorld setup code labels any HTTP-200 response as successful even
+    when the guest command returns non-zero.  That can silently continue after
+    ``apt install jq`` failed and later misclassify an environment failure as
+    an agent failure.  Default to return code zero, while retaining explicit
+    policies used by newer tasks.
     """
 
     try:
@@ -403,8 +405,6 @@ def _patch_setup_execute_contract() -> None:
         expected_returncodes: List[int] | int | None = None,
         on_nonzero: str | None = None,
     ) -> Any:
-        if expected_returncodes is None and on_nonzero is None:
-            return current(self, command, stdout=stdout, stderr=stderr, shell=shell, until=until)
         if not command:
             raise RuntimeError("Empty setup command")
         if expected_returncodes is None:
@@ -434,6 +434,14 @@ def _patch_setup_execute_contract() -> None:
         headers = {"Content-Type": "application/json"}
         until = until or {}
         failures = 0
+        package_lock_retries = 0
+        package_lock_markers = (
+            "Could not get lock /var/lib/apt/lists/lock",
+            "Could not get lock /var/lib/dpkg/lock",
+            "Could not get lock /var/lib/dpkg/lock-frontend",
+            "Unable to acquire the dpkg frontend lock",
+            "is another process using it?",
+        )
 
         while True:
             result = None
@@ -466,6 +474,16 @@ def _patch_setup_execute_contract() -> None:
             returncode = int(result["returncode"])
             command_text = " ".join(rendered_command) if isinstance(rendered_command, list) else rendered_command
             if returncode not in allowed:
+                command_output = f"{result.get('output', '')}\n{result.get('error', '')}"
+                if any(marker in command_output for marker in package_lock_markers) and package_lock_retries < 30:
+                    package_lock_retries += 1
+                    LOG.warning(
+                        "Guest package manager lock blocked setup command; retrying %d/30: %s",
+                        package_lock_retries,
+                        command_text,
+                    )
+                    time.sleep(2)
+                    continue
                 if on_nonzero == "score_zero" and returncode not in {126, 127}:
                     raise _EvaluatorScoreZero(
                         f"evaluator command established score zero with return code {returncode}: {command_text}"
