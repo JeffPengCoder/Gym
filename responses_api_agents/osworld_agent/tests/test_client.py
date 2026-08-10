@@ -1419,6 +1419,82 @@ def test_setup_on_nonzero_score_zero_is_a_valid_evaluator_outcome(monkeypatch, t
     ) == pytest.approx(0.0)
 
 
+def test_evaluator_postconfig_preserves_upstream_best_effort_commands(monkeypatch, tmp_path: Path) -> None:
+    controller_class, original_calls, post_calls = _install_fake_setup_module(
+        monkeypatch,
+        {"returncode": 2, "output": "", "error": "artifact missing"},
+    )
+    osworld_client._patch_setup_execute_contract()
+    controller = controller_class(str(tmp_path))
+
+    class Evaluator:
+        setup_controller = controller
+
+        def evaluate(self):
+            assert self.setup_controller._execute_setup(["build-artifact"]) == "upstream"
+            return 0.0
+
+    assert osworld_client._evaluate_osworld_env(
+        Evaluator(),
+        osworld_client.logging.getLogger("test-evaluator-postconfig"),
+        disable_gpu=False,
+    ) == pytest.approx(0.0)
+    assert len(original_calls) == 1
+    assert post_calls == []
+    assert not hasattr(controller, "_nemo_gym_evaluator_phase")
+
+
+def test_evaluator_postconfig_honors_explicit_returncode_policy(monkeypatch, tmp_path: Path) -> None:
+    controller_class, original_calls, post_calls = _install_fake_setup_module(
+        monkeypatch,
+        {"returncode": 2, "output": "", "error": "artifact missing"},
+    )
+    osworld_client._patch_setup_execute_contract()
+    controller = controller_class(str(tmp_path))
+
+    class Evaluator:
+        setup_controller = controller
+
+        def evaluate(self):
+            with pytest.raises(RuntimeError, match="setup command returned 2"):
+                self.setup_controller._execute_setup(["build-artifact"], expected_returncodes=[0])
+            return 0.0
+
+    assert osworld_client._evaluate_osworld_env(
+        Evaluator(),
+        osworld_client.logging.getLogger("test-evaluator-explicit-policy"),
+        disable_gpu=False,
+    ) == pytest.approx(0.0)
+    assert original_calls == []
+    assert len(post_calls) == 1
+    assert not hasattr(controller, "_nemo_gym_evaluator_phase")
+
+
+def test_evaluator_phase_marker_is_restored_after_unexpected_failure(monkeypatch, tmp_path: Path) -> None:
+    controller_class, _, _ = _install_fake_setup_module(
+        monkeypatch,
+        {"returncode": 0, "output": "", "error": ""},
+    )
+    osworld_client._patch_setup_execute_contract()
+    controller = controller_class(str(tmp_path))
+    controller._nemo_gym_evaluator_phase = "outer-phase"
+
+    class Evaluator:
+        setup_controller = controller
+
+        def evaluate(self):
+            assert self.setup_controller._nemo_gym_evaluator_phase is True
+            raise ValueError("unexpected evaluator failure")
+
+    with pytest.raises(ValueError, match="unexpected evaluator failure"):
+        osworld_client._evaluate_osworld_env(
+            Evaluator(),
+            osworld_client.logging.getLogger("test-evaluator-phase-restoration"),
+            disable_gpu=False,
+        )
+    assert controller._nemo_gym_evaluator_phase == "outer-phase"
+
+
 def _install_fake_chrome_setup_module(
     monkeypatch,
     *,

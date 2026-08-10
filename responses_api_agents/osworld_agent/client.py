@@ -407,6 +407,24 @@ def _patch_setup_execute_contract() -> None:
     ) -> Any:
         if not command:
             raise RuntimeError("Empty setup command")
+        explicit_returncode_policy = (
+            expected_returncodes is not None or on_nonzero is not None or bool(until and "returncode" in until)
+        )
+        if getattr(self, "_nemo_gym_evaluator_phase", False) and not explicit_returncode_policy:
+            # Upstream OSWorld evaluator postconfig frequently transforms
+            # agent-created artifacts before the result getter runs. A
+            # missing artifact is a task score of zero, not an environment
+            # failure. Preserve upstream best-effort command semantics here;
+            # task initialization remains strict, and newer tasks can opt in
+            # to an explicit evaluator return-code policy.
+            return current(
+                self,
+                command,
+                stdout=stdout,
+                stderr=stderr,
+                shell=shell,
+                until=until,
+            )
         if expected_returncodes is None:
             expected_returncodes = [int(until["returncode"])] if until and "returncode" in until else [0]
         elif isinstance(expected_returncodes, int):
@@ -1711,6 +1729,12 @@ def _evaluate_osworld_env(
     """
 
     evaluate = env.evaluate
+    setup_controller = getattr(env, "setup_controller", None)
+    evaluator_phase_attribute = "_nemo_gym_evaluator_phase"
+    had_evaluator_phase = bool(setup_controller is not None and hasattr(setup_controller, evaluator_phase_attribute))
+    original_evaluator_phase = getattr(setup_controller, evaluator_phase_attribute) if had_evaluator_phase else None
+    if setup_controller is not None:
+        setattr(setup_controller, evaluator_phase_attribute, True)
     original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     easyocr_module: Optional[Any] = None
     original_easyocr_reader: Optional[Any] = None
@@ -1741,6 +1765,15 @@ def _evaluate_osworld_env(
             eval_logger.info("OSWorld evaluator setup established score zero: %s", exc)
             return 0.0
     finally:
+        if setup_controller is not None:
+            if had_evaluator_phase:
+                setattr(
+                    setup_controller,
+                    evaluator_phase_attribute,
+                    original_evaluator_phase,
+                )
+            else:
+                delattr(setup_controller, evaluator_phase_attribute)
         if disable_gpu:
             if easyocr_module is not None and original_easyocr_reader is not None:
                 easyocr_module.Reader = original_easyocr_reader
