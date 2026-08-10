@@ -595,10 +595,20 @@ def _structured_action_code(part: Any) -> str | None:
     """
 
     part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
-    if part_type != "click":
+    if part_type == "action":
+        action = part.get("action") if isinstance(part, dict) else getattr(part, "action", None)
+        if action != "click":
+            return None
+        action_input = part.get("input") if isinstance(part, dict) else getattr(part, "input", None)
+        if not isinstance(action_input, Mapping):
+            raise ValueError(f"Structured click action has invalid input: {part!r}")
+        x = action_input.get("x")
+        y = action_input.get("y")
+    elif part_type == "click":
+        x = part.get("x") if isinstance(part, dict) else getattr(part, "x", None)
+        y = part.get("y") if isinstance(part, dict) else getattr(part, "y", None)
+    else:
         return None
-    x = part.get("x") if isinstance(part, dict) else getattr(part, "x", None)
-    y = part.get("y") if isinstance(part, dict) else getattr(part, "y", None)
     if (
         isinstance(x, bool)
         or not isinstance(x, (int, float))
@@ -747,7 +757,18 @@ def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
                 reasoning = think_match.group(1).strip()
                 content = content[think_match.end() :]
         if normalization_error is None:
-            content = _normalize_chat_content(content)
+            try:
+                # A vLLM proxy can wrap a serialized structured action after
+                # <think>.  The first normalization pass sees only a string;
+                # this second pass is where the structured payload is decoded.
+                # Keep it inside the exact-evidence preservation boundary too.
+                content = _normalize_chat_content(content)
+            except Exception as exc:  # noqa: BLE001 - preserve exact sampled evidence.
+                normalization_error = {
+                    "type": type(exc).__name__,
+                    "message": repr(exc),
+                }
+                content = content if isinstance(content, str) else repr(_jsonable(content))
         normalized = {
             "content": content,
             "reasoning_content": reasoning,

@@ -350,6 +350,38 @@ def test_normalize_chat_message_recovers_serialized_click_part() -> None:
     assert "normalization_error" not in normalized
 
 
+def test_normalize_chat_message_recovers_action_click_after_think_wrapper() -> None:
+    parts = [
+        {
+            "type": "action",
+            "action": "click",
+            "target": "close_tab",
+            "input": {"x": 0.17, "y": 0.042},
+        }
+    ]
+    raw_content = "<think>Close the unexpected tab.</think>\n" + repr(parts)
+    message = SimpleNamespace(
+        content=raw_content,
+        tool_calls=[],
+        model_extra={
+            "prompt_token_ids": [10, 11],
+            "generation_token_ids": [20, 21],
+            "generation_log_probs": [-0.1, -0.2],
+        },
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["reasoning_content"] == "Close the unexpected tab."
+    assert normalized["content"] == (
+        "## Action:\nExecute the generated click action.\n"
+        "## Code:\n```python\npyautogui.click(0.17, 0.042)\n```"
+    )
+    assert normalized["raw_content"] == raw_content
+    assert normalized["generation_token_ids"] == [20, 21]
+    assert "normalization_error" not in normalized
+
+
 def test_structured_normalization_failure_preserves_exact_generation_evidence() -> None:
     raw_content = [{"type": "unsupported-native-action", "value": 7}]
     message = SimpleNamespace(
@@ -366,6 +398,32 @@ def test_structured_normalization_failure_preserves_exact_generation_evidence() 
     normalized = _normalize_chat_message(message, structured=True)
 
     assert normalized["content"] == repr(raw_content)
+    assert normalized["raw_content"] == raw_content
+    assert normalized["normalization_error"]["type"] == "ValueError"
+    assert normalized["prompt_token_ids"] == [10, 11]
+    assert normalized["generation_token_ids"] == [20, 21]
+    assert normalized["generation_log_probs"] == [-0.1, -0.2]
+    assert normalized["routed_experts"] == "route-evidence"
+
+
+def test_post_think_normalization_failure_preserves_exact_generation_evidence() -> None:
+    parts = [{"type": "unsupported-native-action", "value": 7}]
+    raw_content = "<think>Inspect the screenshot.</think>\n" + repr(parts)
+    message = SimpleNamespace(
+        content=raw_content,
+        tool_calls=[],
+        model_extra={
+            "prompt_token_ids": [10, 11],
+            "generation_token_ids": [20, 21],
+            "generation_log_probs": [-0.1, -0.2],
+            "routed_experts": "route-evidence",
+        },
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["reasoning_content"] == "Inspect the screenshot."
+    assert normalized["content"] == repr(parts)
     assert normalized["raw_content"] == raw_content
     assert normalized["normalization_error"]["type"] == "ValueError"
     assert normalized["prompt_token_ids"] == [10, 11]
