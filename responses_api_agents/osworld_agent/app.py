@@ -23,6 +23,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -584,6 +585,32 @@ def _recover_first_fenced_action(content: str) -> str | None:
     return "## Action:\nExecute the first generated action.\n## Code:\n" + fence
 
 
+def _structured_action_code(part: Any) -> str | None:
+    """Translate one Nano Omni structured GUI action into adapter code.
+
+    Nano Omni occasionally serializes its native ``click`` part into the
+    chat ``content`` string alongside a textual Action description.  The
+    generation is still exact and trainable; only its semantic transport
+    shape differs from the Markdown scaffold expected by OSWorld.
+    """
+
+    part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
+    if part_type != "click":
+        return None
+    x = part.get("x") if isinstance(part, dict) else getattr(part, "x", None)
+    y = part.get("y") if isinstance(part, dict) else getattr(part, "y", None)
+    if (
+        isinstance(x, bool)
+        or not isinstance(x, (int, float))
+        or isinstance(y, bool)
+        or not isinstance(y, (int, float))
+        or not math.isfinite(float(x))
+        or not math.isfinite(float(y))
+    ):
+        raise ValueError(f"Structured click has invalid coordinates: {part!r}")
+    return f"pyautogui.click({float(x):.12g}, {float(y):.12g})"
+
+
 def _normalize_chat_content(content: Any, *, _depth: int = 0) -> str:
     """Recover one executable turn without serializing structured content.
 
@@ -620,12 +647,24 @@ def _normalize_chat_content(content: Any, *, _depth: int = 0) -> str:
         raise ValueError(f"Unsupported chat content type: {type(content).__name__}")
 
     text_parts: List[str] = []
+    action_codes: List[str] = []
     for part in content:
         part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
         text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
-        if part_type not in {"text", "output_text"} or not isinstance(text, str):
+        if part_type in {"text", "output_text"} and isinstance(text, str):
+            text_parts.append(_normalize_chat_content(text, _depth=_depth + 1))
+            continue
+        action_code = _structured_action_code(part)
+        if action_code is None:
             raise ValueError(f"Unsupported chat content part: {part!r}")
-        text_parts.append(_normalize_chat_content(text, _depth=_depth + 1))
+        action_codes.append(action_code)
+    if action_codes:
+        if len(action_codes) != 1:
+            raise ValueError(f"Expected one structured GUI action, received {len(action_codes)}")
+        action_text = "\n".join(part.strip() for part in text_parts if part.strip())
+        if not re.search(r"^\s*##\s*Action\s*:?", action_text, re.MULTILINE | re.IGNORECASE):
+            action_text = "## Action:\n" + (action_text or "Execute the generated click action.")
+        return action_text.rstrip() + "\n## Code:\n```python\n" + action_codes[0] + "\n```"
     if not text_parts:
         raise ValueError("Chat content contains no text parts")
     if len(text_parts) == 1:
@@ -654,7 +693,21 @@ def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
     """Normalize OpenAI native tool calls for text-protocol OSWorld agents."""
 
     raw_content = message.content or ""
-    content = _normalize_chat_content(raw_content)
+    normalization_error = None
+    try:
+        content = _normalize_chat_content(raw_content)
+    except Exception as exc:  # noqa: BLE001 - exact generation evidence must survive parser failures.
+        if not structured:
+            raise
+        # A semantic adapter failure must not erase a completed model call's
+        # prompt IDs, sampled IDs, logprobs, or routed experts.  Return the raw
+        # content to the agent parser, which will reject the action normally,
+        # while preserving exact evidence for trajectory reconstruction.
+        normalization_error = {
+            "type": type(exc).__name__,
+            "message": repr(exc),
+        }
+        content = raw_content if isinstance(raw_content, str) else repr(_jsonable(raw_content))
 
     # Tool-aware vLLM deployments can return native OpenAI tool_calls even
     # when the OSWorld agent scaffold expects textual <tool_call> blocks.
@@ -693,12 +746,15 @@ def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
             if think_match:
                 reasoning = think_match.group(1).strip()
                 content = content[think_match.end() :]
-        content = _normalize_chat_content(content)
+        if normalization_error is None:
+            content = _normalize_chat_content(content)
         normalized = {
             "content": content,
             "reasoning_content": reasoning,
             "raw_content": raw_content,
         }
+        if normalization_error is not None:
+            normalized["normalization_error"] = normalization_error
         for field in (
             "prompt_token_ids",
             "generation_token_ids",

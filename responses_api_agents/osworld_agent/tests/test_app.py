@@ -332,6 +332,48 @@ def test_normalize_chat_message_recovers_serialized_text_parts() -> None:
     assert "computer.terminate" not in normalized["content"]
 
 
+def test_normalize_chat_message_recovers_serialized_click_part() -> None:
+    parts = [
+        {"type": "click", "x": 0.984, "y": 0.129},
+        {
+            "type": "text",
+            "text": "## Action:\nClose the Chrome update notification.\n",
+        },
+    ]
+    message = SimpleNamespace(content=repr(parts), tool_calls=[], model_extra={})
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["content"] == (
+        "## Action:\nClose the Chrome update notification.\n## Code:\n```python\npyautogui.click(0.984, 0.129)\n```"
+    )
+    assert "normalization_error" not in normalized
+
+
+def test_structured_normalization_failure_preserves_exact_generation_evidence() -> None:
+    raw_content = [{"type": "unsupported-native-action", "value": 7}]
+    message = SimpleNamespace(
+        content=raw_content,
+        tool_calls=[],
+        model_extra={
+            "prompt_token_ids": [10, 11],
+            "generation_token_ids": [20, 21],
+            "generation_log_probs": [-0.1, -0.2],
+            "routed_experts": "route-evidence",
+        },
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["content"] == repr(raw_content)
+    assert normalized["raw_content"] == raw_content
+    assert normalized["normalization_error"]["type"] == "ValueError"
+    assert normalized["prompt_token_ids"] == [10, 11]
+    assert normalized["generation_token_ids"] == [20, 21]
+    assert normalized["generation_log_probs"] == [-0.1, -0.2]
+    assert normalized["routed_experts"] == "route-evidence"
+
+
 def test_normalize_chat_message_recovers_nested_serialized_text_parts() -> None:
     inner_parts = [
         {
