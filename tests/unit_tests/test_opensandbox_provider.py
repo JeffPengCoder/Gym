@@ -298,6 +298,48 @@ async def test_pool_create_uses_api_key_auth_without_execd_connect(
     assert calls[0]["json_body"]["metadata"][opensandbox_provider.POOLED_CREATE_MARKER_KEY]
 
 
+@pytest.mark.parametrize(
+    ("use_server_proxy", "expected_headers"),
+    [
+        (
+            True,
+            {"OPEN-SANDBOX-API-KEY": "pool-api-key"},  # pragma: allowlist secret
+        ),
+        (False, {}),
+    ],
+)
+async def test_pooled_endpoint_carries_api_auth_only_to_server_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+    use_server_proxy: bool,
+    expected_headers: dict[str, str],
+) -> None:
+    calls: list[str] = []
+
+    async def fake_rest_request(method: str, url: str, **_kwargs: Any) -> tuple[int, str]:
+        assert method == "GET"
+        calls.append(url)
+        return 200, '{"endpoint":"gateway.example/proxy/5000"}'
+
+    monkeypatch.setattr(opensandbox_provider, "_rest_request", fake_rest_request)
+    raw = opensandbox_provider._PooledRestSandbox(
+        sandbox_id="pooled-sandbox-1",
+        base_url="http://sandbox.example",
+        headers={"OPEN-SANDBOX-API-KEY": "pool-api-key"},  # pragma: allowlist secret
+        protocol="http",
+        timeout_s=30,
+        use_server_proxy=use_server_proxy,
+    )
+
+    endpoint = await raw.get_endpoint(5000)
+
+    assert endpoint.endpoint == "http://gateway.example/proxy/5000"
+    assert endpoint.headers == expected_headers
+    assert calls == [
+        "http://sandbox.example/v1/sandboxes/pooled-sandbox-1/endpoints/5000"
+        f"?use_server_proxy={'true' if use_server_proxy else 'false'}"
+    ]
+
+
 async def test_pool_connect_cancellation_deletes_known_sandbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

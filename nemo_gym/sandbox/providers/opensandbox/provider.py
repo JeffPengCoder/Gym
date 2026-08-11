@@ -107,9 +107,17 @@ class _PooledRestSandbox:
             ) from error
         if "://" not in endpoint:
             endpoint = f"{self.protocol}://{endpoint.lstrip('/')}"
+        endpoint_headers = _string_map(payload.get("headers") or {})
+        if self.use_server_proxy:
+            # The pooled endpoint API currently returns only the gateway URL.
+            # The gateway itself still requires the same API-key header used
+            # for lifecycle calls, so carry those trusted connection headers
+            # through the local forwarder. Never send them to a direct
+            # workload endpoint.
+            endpoint_headers = {**self.headers, **endpoint_headers}
         return _PooledEndpoint(
             endpoint=endpoint,
-            headers=_string_map(payload.get("headers") or {}),
+            headers=endpoint_headers,
         )
 
     async def get_info(self) -> _PooledLifecycleInfo:

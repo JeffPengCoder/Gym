@@ -800,7 +800,7 @@ class TestRolloutCollection:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
-            for i in range(3)
+            for i in range(4)
         ]
         input_jsonl_fpath.write_text("\n".join(samples) + "\n")
         output_jsonl_fpath = tmp_path / "output.jsonl"
@@ -808,7 +808,7 @@ class TestRolloutCollection:
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
-            limit=3,
+            limit=4,
             num_repeats=1,
         )
 
@@ -832,6 +832,8 @@ class TestRolloutCollection:
                         result[NG_FAILURE_CLASS_KEY] = "verify_failed"
                     elif example["x"] == 2:
                         result[NG_NO_PERSIST_KEY] = True
+                    elif example["x"] == 3:
+                        result["mask_sample"] = True
                     future.set_result((example, result))
                     futures.append(future)
                 return futures
@@ -845,7 +847,12 @@ class TestRolloutCollection:
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
 
-        assert [result["case"] for result in actual_returned_results] == ["case-0", "case-1", "case-2"]
+        assert [result["case"] for result in actual_returned_results] == [
+            "case-0",
+            "case-1",
+            "case-2",
+            "case-3",
+        ]
         assert [result["case"] for result in captured["results"]] == ["case-0"]
         assert [row["x"] for row in captured["rows"]] == [0]
 
@@ -856,8 +863,9 @@ class TestRolloutCollection:
         failures_fpath = _failures_path_for(output_jsonl_fpath)
         with failures_fpath.open() as f:
             actual_failure_results = [json.loads(line) for line in f]
-        assert [result["case"] for result in actual_failure_results] == ["case-1"]
+        assert [result["case"] for result in actual_failure_results] == ["case-1", "case-3"]
         assert actual_failure_results[0][NG_FAILURE_CLASS_KEY] == "verify_failed"
+        assert actual_failure_results[1][NG_FAILURE_CLASS_KEY] == "masked_sample"
 
     async def test_run_from_config_aggregate_metrics_includes_cached_persisted_rows(
         self, tmp_path: Path, empty_global_config: MagicMock
