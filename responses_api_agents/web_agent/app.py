@@ -52,6 +52,9 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     seed_retry_max_delay_secs: float = Field(default=30.0, ge=0.0)
     model_request_timeout_secs: float = Field(default=600.0, gt=0.0)
     judge_request_timeout_secs: float = Field(default=300.0, gt=0.0)
+    judge_max_retries: int = Field(default=2, ge=0, le=10)
+    judge_retry_initial_delay_secs: float = Field(default=1.0, ge=0.0)
+    judge_retry_max_delay_secs: float = Field(default=10.0, ge=0.0)
     close_request_timeout_secs: float = Field(default=30.0, gt=0.0)
     run_timeout_secs: float = Field(default=1800.0, gt=0.0)
 
@@ -346,6 +349,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                             parse_error_message(
                                 exc,
                                 action_prompt_profile=self.config.action_prompt_profile,
+                                action_profile=task.action_profile,
                             )
                         )
 
@@ -400,14 +404,6 @@ class WebAgent(SimpleResponsesAPIAgent):
             env_cookies = evaluate_response.cookies
             verifier_result = evaluation.result
 
-            if task.benchmark == WebBenchmark.WEBVOYAGER:
-                verifier_result = await self._judge_webvoyager(
-                    task=task,
-                    final_answer=final_answer or "",
-                    screenshots=list(screenshot_history),
-                    urls=list(url_history),
-                    body=body,
-                )
         finally:
             if seeded:
                 try:
@@ -424,6 +420,19 @@ class WebAgent(SimpleResponsesAPIAgent):
                     artifacts.recordings = close_data.recording_artifacts
                 except Exception:  # noqa: BLE001 - cleanup must not replace a completed result.
                     pass
+
+        # The WebVoyager judge only consumes retained evidence. Release the
+        # browser before the potentially slow VLM call so one judged episode
+        # does not occupy scarce browser/site capacity. WebArena-family native
+        # evaluators still run above while their live page is available.
+        if task.benchmark == WebBenchmark.WEBVOYAGER:
+            verifier_result = await self._judge_webvoyager(
+                task=task,
+                final_answer=final_answer or "",
+                screenshots=list(screenshot_history),
+                urls=list(url_history),
+                body=body,
+            )
 
         if last_model_response is None:
             raise RuntimeError("web rollout ended before the policy returned a response")
@@ -470,21 +479,43 @@ class WebAgent(SimpleResponsesAPIAgent):
                 failure_kind="webvoyager_judge_not_configured",
                 verifier_version="webvoyager-llm-judge-v1",
             )
-        _judge_response, payload = await self._post_json(
-            server_name=self.config.webvoyager_judge_server.name,
-            url_path="/verify_webvoyager",
-            json={
-                "task": task.model_dump(mode="json"),
-                "final_answer": final_answer,
-                "screenshots": screenshots,
-                "page_urls": urls,
-            },
-            timeout_secs=self.config.judge_request_timeout_secs,
-        )
-        candidate = payload.get("result") if isinstance(payload, dict) else None
-        if candidate is None:
-            raise RuntimeError("WebVoyager judge response did not contain result")
-        return WebVerifierResult.model_validate(candidate)
+        request_body = {
+            "task": task.model_dump(mode="json"),
+            "final_answer": final_answer,
+            "screenshots": screenshots,
+            "page_urls": urls,
+        }
+        delay = self.config.judge_retry_initial_delay_secs
+        for attempt in range(self.config.judge_max_retries + 1):
+            try:
+                _judge_response, payload = await self._post_json(
+                    server_name=self.config.webvoyager_judge_server.name,
+                    url_path="/verify_webvoyager",
+                    json=request_body,
+                    timeout_secs=self.config.judge_request_timeout_secs,
+                )
+                candidate = payload.get("result") if isinstance(payload, dict) else None
+                if candidate is None:
+                    raise RuntimeError("WebVoyager judge response did not contain result")
+                return WebVerifierResult.model_validate(candidate)
+            except Exception as exc:  # noqa: BLE001 - retry only this immutable evidence.
+                _failure_class, terminal, _failure_kind, _metadata = _failure_route(exc)
+                if terminal or attempt >= self.config.judge_max_retries:
+                    raise
+                sleep_for = min(delay, self.config.judge_retry_max_delay_secs)
+                print(
+                    f"[web-agent-judge-retry] {task.task_id}: attempt {attempt + 1} "
+                    f"failed with {type(exc).__name__}; retrying in {sleep_for:.1f}s",
+                    flush=True,
+                )
+                await asyncio.sleep(sleep_for)
+                if delay > 0:
+                    delay = min(
+                        max(delay * 2, self.config.judge_retry_initial_delay_secs),
+                        self.config.judge_retry_max_delay_secs,
+                    )
+
+        raise AssertionError("unreachable WebVoyager judge retry state")
 
     async def _post_json(
         self,

@@ -16,6 +16,15 @@ context. An invalid action gets bounded format-repair turns and does not step
 the browser. A policy failure remains a valid zero-reward sample; runtime or
 judge failures set `mask_sample`.
 
+Verification is episode-scoped rather than dataset-scoped. WebArena and
+VisualWebArena run their colocated native evaluator as soon as the rollout
+terminates. WebVoyager retains its final answer and last configured screenshots,
+closes the browser session, and then calls the external judge before returning
+that rollout to the collector. Transient judge failures are retried against the
+same immutable evidence; they never replay browser actions. Gym can run many of
+these independently verified episodes concurrently, while a learner consumes a
+rollout only after its reward is resolved.
+
 Bounded network, timeout, capacity, and session failures are written as
 retryable infrastructure sidecars. Structured invalid-task and benchmark
 precondition responses are written as terminal masked sidecars. Rollout

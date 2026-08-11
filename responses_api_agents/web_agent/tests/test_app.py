@@ -161,8 +161,9 @@ def test_redact_old_visual_observation_removes_both_image_and_page_text():
     assert old.content[0]["text"] == "large page tree"
 
 
+@pytest.mark.parametrize("benchmark", [WebBenchmark.WEBARENA, WebBenchmark.VISUALWEBARENA])
 @pytest.mark.asyncio
-async def test_webarena_rollout_uses_colocated_evaluator_and_closes_session():
+async def test_arena_family_rollout_uses_colocated_evaluator_and_closes_session(benchmark):
     agent = _agent()
     calls = _wire(
         agent,
@@ -203,7 +204,7 @@ async def test_webarena_rollout_uses_colocated_evaluator_and_closes_session():
     request.cookies = {}
     body = WebAgentRunRequest(
         responses_create_params={"input": "Solve the task"},
-        web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0"),
+        web_task=WebTask(benchmark=benchmark, task_id="0"),
     )
 
     result = await agent.run(request, body)
@@ -216,6 +217,7 @@ async def test_webarena_rollout_uses_colocated_evaluator_and_closes_session():
     assert result.recording_artifacts[0].mime_type == "video/webm"
     step_body = next(body for _server, path, body in calls if path == "/step")
     assert step_body["action"]["script"] == "send_msg_to_user('answer')"
+    assert [path for _server, path, _body in calls][-2:] == ["/evaluate", "/close"]
     assert calls[-1][1] == "/close"
 
 
@@ -314,6 +316,81 @@ async def test_webvoyager_routes_final_evidence_to_external_judge():
     assert judge_call[0] == "judge"
     assert judge_call[2]["final_answer"] == "42"
     assert len(judge_call[2]["screenshots"]) == 2
+    paths = [path for _server, path, _body in calls]
+    assert paths.index("/evaluate") < paths.index("/close") < paths.index("/verify_webvoyager")
+
+
+@pytest.mark.asyncio
+async def test_webvoyager_retries_only_judge_after_browser_is_closed():
+    agent = _agent(
+        judge=True,
+        judge_max_retries=1,
+        judge_retry_initial_delay_secs=0.0,
+        judge_retry_max_delay_secs=0.0,
+    )
+    calls = []
+    judge_attempts = 0
+
+    async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+        nonlocal judge_attempts
+        del cookies, kwargs
+        calls.append((server_name, url_path, json))
+        if url_path == "/seed_session":
+            return _FakeHttpResponse(_seed("ArXiv--0"))
+        if url_path == "/v1/responses":
+            return _FakeHttpResponse(_model_response("Thought: done\nAction: ANSWER; [42]"))
+        if url_path == "/step":
+            return _FakeHttpResponse(
+                {
+                    "operation_id": "step-0",
+                    "observation": _observation("https://example.test/result"),
+                    "execution_ok": True,
+                }
+            )
+        if url_path == "/evaluate":
+            return _FakeHttpResponse({"result": {"valid_sample": True}})
+        if url_path == "/close":
+            return _FakeHttpResponse({"closed": True, "session_id": "session-a"})
+        if url_path == "/verify_webvoyager":
+            judge_attempts += 1
+            if judge_attempts == 1:
+                raise RuntimeError("judge endpoint is warming")
+            return _FakeHttpResponse(
+                {
+                    "result": {
+                        "reward": 1.0,
+                        "raw_score": 1.0,
+                        "task_success": True,
+                        "valid_sample": True,
+                    }
+                }
+            )
+        raise AssertionError(f"unexpected path: {url_path}")
+
+    agent.server_client.post = AsyncMock(side_effect=post)
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": "Solve"},
+        web_task=WebTask(
+            benchmark=WebBenchmark.WEBVOYAGER,
+            task_id="ArXiv--0",
+            intent="Find the answer",
+            start_urls=["https://example.test"],
+            action_profile="webvoyager_legacy",
+        ),
+    )
+
+    result = await agent.run(request, body)
+
+    assert result.reward == 1.0
+    assert judge_attempts == 2
+    paths = [path for _server, path, _body in calls]
+    assert paths.count("/seed_session") == 1
+    assert paths.count("/step") == 1
+    assert paths.count("/close") == 1
+    assert paths.count("/verify_webvoyager") == 2
+    assert paths.index("/close") < paths.index("/verify_webvoyager")
 
 
 @pytest.mark.asyncio

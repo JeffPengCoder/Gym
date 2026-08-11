@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from nemo_gym.web.models import (
+    WebActionProfile,
     WebBenchmark,
     WebImage,
     WebObservation,
@@ -136,3 +137,15 @@ def test_browsergym_guidance_defaults_to_standard_action_shape():
     assert "Thought: concise reasoning\nAction: click('bid')" in text
     assert "## Code:" not in text
     assert "corrected Thought and Action only" in parse_error_message(ValueError("bad action")).content
+
+
+def test_webvoyager_parse_error_repeats_legacy_grammar_and_stop_boundary():
+    content = parse_error_message(
+        ValueError("bad action"),
+        action_profile=WebActionProfile.WEBVOYAGER_LEGACY,
+    ).content
+
+    assert "Action: Click [bid]" in content
+    assert "ANSWER; [final answer]" in content
+    assert "Type [38]; [SimCSE]" in content
+    assert "stop after its Action line" in content

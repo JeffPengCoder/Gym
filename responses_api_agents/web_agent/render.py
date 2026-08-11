@@ -53,6 +53,11 @@ WEBVOYAGER_ACTION_GUIDANCE = """Return exactly one WebVoyager-style Action:
 - Scroll [WINDOW]; up or Scroll [WINDOW]; down
 - Wait, GoBack, or Google
 - ANSWER; [final answer] when complete
+For Click and Type, replace `bid` with the exact numeric id shown in the
+labelled elements. For example, `[38] textbox 'Search'` must be
+`Type [38]; [SimCSE]`; never omit the id or describe the action in prose.
+Stop immediately after the Action line. Do not predict its result or write
+future Thought/Action turns in the same response.
 Use this exact shape:
 Thought: concise reasoning
 Action: Click [bid]"""
@@ -179,8 +184,14 @@ def render_observation(
 def parse_error_message(
     error: Exception,
     action_prompt_profile: str = "standard",
+    action_profile: WebActionProfile | str | None = None,
 ) -> NeMoGymEasyInputMessage:
-    if action_prompt_profile == "standard":
+    if action_profile is not None and WebActionProfile(action_profile) == WebActionProfile.WEBVOYAGER_LEGACY:
+        content = (
+            f"Action parse error: {error}. Return one corrected response and stop after its Action line.\n"
+            f"{WEBVOYAGER_ACTION_GUIDANCE}"
+        )
+    elif action_prompt_profile == "standard":
         content = (
             f"Action parse error: {error}. Return a corrected Thought and Action only, "
             "using the required action grammar."

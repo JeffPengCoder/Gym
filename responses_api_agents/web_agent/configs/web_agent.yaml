@@ -25,6 +25,9 @@ web_agent:
       seed_retry_max_delay_secs: 30.0
       model_request_timeout_secs: 600.0
       judge_request_timeout_secs: 300.0
+      judge_max_retries: 2
+      judge_retry_initial_delay_secs: 1.0
+      judge_retry_max_delay_secs: 10.0
       close_request_timeout_secs: 30.0
       run_timeout_secs: 1800.0
       datasets: []

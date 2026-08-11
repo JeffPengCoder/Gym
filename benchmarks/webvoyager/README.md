@@ -6,6 +6,12 @@ The first Gym profile runs the 643 official WebVoyager tasks through
 to BrowserGym high-level calls. The final answer and latest screenshots are
 scored by the separate WebVoyager VLM judge.
 
+For evaluation and RL collection, judging is per episode: the agent releases
+the browser after retaining the final evidence, then obtains a binary reward
+before returning that rollout. There is no 643-task evaluation barrier in the
+Gym path. Rollout concurrency supplies parallelism across episodes; judge
+retries reuse the captured evidence and do not repeat live-site actions.
+
 The default source is `../WebVoyager/data/WebVoyager_data.jsonl`. Set
 `WEBVOYAGER_SOURCE_JSONL` for another checkout and run:
 

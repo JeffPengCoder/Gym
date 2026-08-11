@@ -54,6 +54,26 @@ def _strip_model_scaffolding(text: str) -> str:
     return text.strip()
 
 
+def _first_legacy_action_section(text: str) -> str:
+    """Return the first labelled action, matching upstream WebVoyager.
+
+    The original Selenium loop splits on ``Thought:``, ``Action:``, and
+    ``Observation:`` and executes the section immediately following the first
+    ``Action:``. Some reasoning models continue by hallucinating later
+    Thought/Action turns in one completion. Treating the remainder as one
+    Python expression rejects an otherwise valid first legacy action.
+    """
+
+    action_match = re.search(
+        r"(?:^|\n)\s*Action\s*:\s*(.*?)(?=\n\s*(?:Thought|Action|Observation)\s*:|\Z)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if action_match:
+        return action_match.group(1).strip()
+    return _strip_model_scaffolding(text)
+
+
 def _literal(value: ast.AST) -> Any:
     try:
         return ast.literal_eval(value)
@@ -115,7 +135,7 @@ def parse_browsergym_action(text: str, *, max_calls: int = 2) -> WebAction:
 
 
 def _legacy_webvoyager_action(text: str) -> WebAction:
-    candidate = _strip_model_scaffolding(text).strip().rstrip(".")
+    candidate = _first_legacy_action_section(text).strip().rstrip(".")
 
     answer_match = re.fullmatch(r"ANSWER\s*[;:]?\s*\[?(.*?)\]?", candidate, flags=re.IGNORECASE | re.DOTALL)
     if answer_match:

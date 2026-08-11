@@ -40,3 +40,27 @@ def test_translates_webvoyager_answer_to_terminal_action() -> None:
     assert action.name == "send_msg_to_user"
     assert action.terminal
     assert action.answer == "The result is 42"
+
+
+def test_webvoyager_executes_only_the_first_labelled_action_section() -> None:
+    action = parse_model_action(
+        """Thought: Open the form.
+Action: Click [61]
+Thought: Pretend the click already happened.
+Action: Type [99]; [SimCSE]""",
+        WebActionProfile.WEBVOYAGER_LEGACY,
+    )
+
+    assert action.name == "click"
+    assert action.script == "click('61')"
+
+
+def test_webvoyager_does_not_cherry_pick_a_later_action_after_invalid_first_action() -> None:
+    with pytest.raises(ActionParseError):
+        parse_model_action(
+            """Thought: Open the form.
+Action: Click on the form button.
+Thought: Pretend the click already happened.
+Action: Click [61]""",
+            WebActionProfile.WEBVOYAGER_LEGACY,
+        )
