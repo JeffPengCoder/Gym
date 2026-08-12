@@ -2690,7 +2690,7 @@ requires-dist = [
     { name = "uvloop" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.24.0" },
     { name = "wandb" },
-    { name = "yappi" },
+    { name = "yappi", specifier = ">=1.7.6" },
 ]
 provides-extras = ["all", "vllm", "sandbox", "openshell", "dev"]
 
