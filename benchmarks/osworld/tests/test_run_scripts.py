@@ -17,11 +17,20 @@ CLEANUP_RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_run.sh"
 OPENSANDBOX_CLEANUP_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_opensandbox_run.py"
 OSWORLD_AGENT_CONFIG = REPO_ROOT / "responses_api_agents/osworld_agent/configs/osworld_agent.yaml"
 OSWORLD_AGENT_REQUIREMENTS = REPO_ROOT / "responses_api_agents/osworld_agent/requirements.txt"
+OSWORLD_AGENT_OVERRIDES = REPO_ROOT / "responses_api_agents/osworld_agent/overrides.txt"
+OSWORLD_RUNTIME_DEPS_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/install_optional_runtime_deps.sh"
 
 
 @pytest.mark.parametrize(
     "script",
-    [VM_PREPARE_SCRIPT, CHECK_ENVIRONMENT_SCRIPT, START_CONTROL_SCRIPT, RUN_EVAL_SCRIPT, CLEANUP_RUN_SCRIPT],
+    [
+        VM_PREPARE_SCRIPT,
+        CHECK_ENVIRONMENT_SCRIPT,
+        START_CONTROL_SCRIPT,
+        RUN_EVAL_SCRIPT,
+        CLEANUP_RUN_SCRIPT,
+        OSWORLD_RUNTIME_DEPS_SCRIPT,
+    ],
 )
 def test_public_host_setup_scripts_are_syntax_valid_and_portable(script: Path) -> None:
     subprocess.run(["bash", "-n", str(script)], check=True)
@@ -52,10 +61,22 @@ def test_start_control_preflights_native_build_toolchain() -> None:
 
 def test_managed_osworld_agent_installs_opensandbox_sdk() -> None:
     requirements = OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8").splitlines()
+    overrides = OSWORLD_AGENT_OVERRIDES.read_text(encoding="utf-8").splitlines()
+    runtime_script = OSWORLD_RUNTIME_DEPS_SCRIPT.read_text(encoding="utf-8")
 
     assert "-e nemo-gym[dev] @ ../../" in requirements
     assert "opensandbox>=0.1.15" in requirements
     assert "tenacity>=9.1.4" in requirements
+    assert not any(line.startswith("cryptography") for line in requirements)
+    assert not any(line.startswith("flask") for line in requirements)
+    assert not any(line.startswith("opencv-") for line in requirements)
+    assert "torch==2.11.0" in overrides
+    assert "matplotlib==3.10.6" in overrides
+    assert "agp-client; sys_platform == 'never'" in overrides
+    assert "--no-config" in runtime_script
+    assert "cryptography~=46.0" in runtime_script
+    assert "opencv-python-headless~=4.8.1.78" in runtime_script
+    assert "torchvision==0.26.0" in runtime_script
 
 
 def test_remote_docker_requires_a_reachable_publish_host() -> None:

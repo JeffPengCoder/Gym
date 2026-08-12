@@ -24,19 +24,18 @@ requests-toolbelt~=1.0.0
 # when transitive dependencies pull chardet 7.x.
 chardet<6
 
-# OSWorld imports these packages at runtime but does not declare all of them.
-cryptography
+# The Gym adapter imports these OSWorld paths at runtime. Repository policy
+# intentionally excludes cryptography, codec-bearing OpenCV, and torchvision
+# wheels from managed server resolution. Install those explicit opt-in runtime
+# dependencies after `gym env prefetch`; see
+# install_optional_runtime_deps.sh and benchmarks/osworld/README.md.
 cffi
 scipy
 numpy<2
 pynput
 ag2
 
-# The root resolver policy removes OSWorld's GUI OpenCV dependency edges; this
-# server supplies the compatible headless wheel instead.
-opencv-python-headless~=4.8.1.78
 Pillow~=11.0.0
 scikit-learn
 matplotlib~=3.7.4
-flask~=3.0.0
 func-timeout

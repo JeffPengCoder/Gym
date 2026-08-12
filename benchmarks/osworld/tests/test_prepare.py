@@ -262,7 +262,7 @@ def test_write_env_rejects_sandbox_without_explicit_vm(tmp_path: Path) -> None:
         )
 
 
-def test_write_env_configures_image_less_opensandbox_pool(tmp_path: Path) -> None:
+def test_write_env_configures_sdk_compatibility_image_for_opensandbox_pool(tmp_path: Path) -> None:
     env_path = tmp_path / "run" / "env.yaml"
 
     assert write_env(
@@ -285,7 +285,7 @@ def test_write_env_configures_image_less_opensandbox_pool(tmp_path: Path) -> Non
     assert agent["sandbox_provider"] == "osworld_opensandbox"
     assert agent["vm_path"] == OPENSANDBOX_VM_SENTINEL
     assert agent["sandbox_require_kvm"] is False
-    assert agent["sandbox_spec"]["image"] is None
+    assert agent["sandbox_spec"]["image"] == ("${oc.env:OPENSANDBOX_COMPAT_IMAGE,busybox:1.36}")
     assert agent["sandbox_spec"]["ttl_s"] == 14400
     assert agent["sandbox_spec"]["provider_options"]["extensions"]["poolRef"] == (
         "${oc.env:OPENSANDBOX_POOL_REF,osworld-kvm}"
@@ -320,6 +320,7 @@ def test_opensandbox_env_composes_with_strict_inherited_sandbox_spec(tmp_path: P
     GlobalConfigDictParser()._recursively_swap_keys(config)
 
     agent = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
+    assert agent["sandbox_spec"]["image"] == "busybox:1.36"
     assert agent["sandbox_spec"]["ttl_s"] == 14400
     assert agent["sandbox_spec"]["provider_options"]["extensions"]["poolRef"] == "osworld-kvm"
 

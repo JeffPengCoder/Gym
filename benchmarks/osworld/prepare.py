@@ -42,6 +42,7 @@ NANO_OMNI_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_nano_omni.ya
 OSWORLD_PROVIDER_CONFIG = BENCHMARK_DIR / "configs" / "osworld_docker_pinned.yaml"
 OPENSANDBOX_CONFIG = BENCHMARK_DIR / "configs" / "osworld_opensandbox.yaml"
 OPENSANDBOX_VM_SENTINEL = "/opensandbox/Ubuntu.qcow2"
+OPENSANDBOX_COMPAT_IMAGE = "busybox:1.36"
 
 PROFILE_CONFIGS: dict[str, tuple[Path, ...]] = {
     "default": (DEFAULT_CONFIG,),
@@ -300,9 +301,7 @@ def write_env(
         "gym_opensandbox": "osworld_opensandbox",
     }.get(execution_backend)
     emitted_vm_path: str | Path | None = (
-        OPENSANDBOX_VM_SENTINEL
-        if execution_backend == "gym_opensandbox"
-        else resolved_vm_path
+        OPENSANDBOX_VM_SENTINEL if execution_backend == "gym_opensandbox" else resolved_vm_path
     )
     contents = "\n".join(
         [
@@ -348,7 +347,8 @@ def write_env(
                     "      sandbox_require_kvm: false",
                     "      sandbox_ready_timeout_s: 600.0",
                     "      sandbox_spec:",
-                    "        image: null",
+                    "        # Required by the SDK; poolRef supplies the actual OSWorld VM.",
+                    f"        image: ${{oc.env:OPENSANDBOX_COMPAT_IMAGE,{OPENSANDBOX_COMPAT_IMAGE}}}",
                     "        ttl_s: 14400",
                     "        ready_timeout_s: 1200",
                     "        provider_options:",

@@ -211,9 +211,11 @@ The `gym_opensandbox` backend keeps the same OSWorld agent, task setup, action,
 and evaluator path while replacing the local or remote Docker lifecycle with
 an allocation from a server-managed KVM Pool. The Pool operator owns its VM
 image, entrypoint, and capacity. Consequently, clients provide neither a
-container image nor `--vm-path`; they only name a pre-provisioned Pool. The
-checked-in default is `osworld-kvm`, overridable with
-`OPENSANDBOX_POOL_REF`.
+VM image nor `--vm-path`; they name a pre-provisioned Pool and pass a small
+compatibility image solely because the OpenSandbox SDK requires one. The Pool
+supplies the actual OSWorld VM and does not use that compatibility image. The
+checked-in defaults are `osworld-kvm` and `busybox:1.36`, overridable with
+`OPENSANDBOX_POOL_REF` and `OPENSANDBOX_COMPAT_IMAGE`.
 
 Install Gym with the OpenSandbox SDK and configure the management endpoint.
 Keep credentials in the environment; `prepare.py` does not write the API key
@@ -250,6 +252,24 @@ python3 prepare.py \
   --policy-model-name SERVED_NANO_OMNI_MODEL \
   --force-env
 ```
+
+The managed OSWorld agent's default `requirements.txt` respects Gym's global
+security and codec exclusions. After `prepare.py` writes `env.yaml`, pre-create
+its isolated environment and explicitly install the two codec-bearing runtime
+packages that OSWorld imports but Gym does not ship in packages or containers:
+
+```bash
+gym env prefetch
+bash ../../responses_api_agents/osworld_agent/install_optional_runtime_deps.sh \
+  /absolute/run/root/server-venvs/responses_api_agents/osworld_agent/.venv
+```
+
+The script uses `--no-config` only for that named venv and installs
+cryptography, headless OpenCV, and the matching torchvision wheel. These are
+runtime imports for OSWorld's desktop stack, but repository policy excludes
+them from managed package and container resolution. `skip_venv_if_present:
+true` in the generated config then lets `gym env start` reuse the prepared
+environment.
 
 OpenSandbox may return path-based gateway endpoints with required routing
 headers rather than directly routable Pod addresses. The adapter creates

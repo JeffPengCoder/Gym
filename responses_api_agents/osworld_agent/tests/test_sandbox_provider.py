@@ -117,7 +117,7 @@ def test_build_spec_docker_tcg_mode_does_not_map_kvm(tmp_path) -> None:
     assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--cap-add", "NET_ADMIN")
 
 
-def test_build_spec_uses_image_less_opensandbox_pool(monkeypatch) -> None:
+def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatch) -> None:
     monkeypatch.setenv("OSWORLD_RUN_ID", "opensandbox-run")
     provider = osworld_sandbox.GymSandboxDesktopProvider(
         {
@@ -130,7 +130,7 @@ def test_build_spec_uses_image_less_opensandbox_pool(monkeypatch) -> None:
         },
         {
             "ttl_s": 1800,
-            "image": None,
+            "image": "busybox:1.36",
             "entrypoint": ["/run/entry.sh"],
             "env": {"KVM": "Y"},
             "resources": {"cpu": 4, "memory_mib": 16384},
@@ -144,7 +144,7 @@ def test_build_spec_uses_image_less_opensandbox_pool(monkeypatch) -> None:
         os_type="Ubuntu",
     )
 
-    assert spec.image is None
+    assert spec.image == "busybox:1.36"
     assert spec.ttl_s == 1800
     assert spec.ports == osworld_sandbox.OSWORLD_SERVICE_PORTS
     assert spec.provider_options == {"extensions": {"poolRef": "osworld-kvm"}}
@@ -160,7 +160,7 @@ def test_build_spec_rejects_invalid_opensandbox_pool_spec() -> None:
         {"opensandbox": {}},
         {"provider_options": {"extensions": {}}},
     )
-    with pytest.raises(ValueError, match="poolRef"):
+    with pytest.raises(ValueError, match="requires sandbox_spec.image"):
         provider._build_spec(
             "/opensandbox/Ubuntu.qcow2",
             headless=True,
@@ -170,11 +170,11 @@ def test_build_spec_rejects_invalid_opensandbox_pool_spec() -> None:
     provider = osworld_sandbox.GymSandboxDesktopProvider(
         {"opensandbox": {}},
         {
-            "image": "docker://osworld:latest",
-            "provider_options": {"extensions": {"poolRef": "osworld-kvm"}},
+            "image": "busybox:1.36",
+            "provider_options": {"extensions": {}},
         },
     )
-    with pytest.raises(ValueError, match="image-less"):
+    with pytest.raises(ValueError, match="poolRef"):
         provider._build_spec(
             "/opensandbox/Ubuntu.qcow2",
             headless=True,
@@ -229,10 +229,7 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
         def do_GET(self) -> None:
             seen["path"] = self.path
             seen["route"] = self.headers.get("X-Route", "")
-            content = (
-                b'{"webSocketDebuggerUrl":'
-                b'"ws://100.100.1.2:9222/devtools/browser/test"}'
-            )
+            content = b'{"webSocketDebuggerUrl":"ws://100.100.1.2:9222/devtools/browser/test"}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(content)))
@@ -259,9 +256,7 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
             "path": "/proxy/9222/json/version",
             "route": "gateway",
         }
-        assert response.json()["webSocketDebuggerUrl"] == (
-            f"ws://127.0.0.1:{port}/devtools/browser/test"
-        )
+        assert response.json()["webSocketDebuggerUrl"] == (f"ws://127.0.0.1:{port}/devtools/browser/test")
     finally:
         forwarder.shutdown()
         forwarder.server_close()
@@ -312,9 +307,7 @@ def test_start_failure_cleans_up_sandbox(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         osworld_sandbox,
         "start_forwarder",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("forwarder failed")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("forwarder failed")),
     )
 
     with pytest.raises(RuntimeError, match="forwarder failed"):

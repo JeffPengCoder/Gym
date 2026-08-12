@@ -1719,11 +1719,6 @@ def run_osworld_task(
             sandbox_provider_name = str(next(iter(sandbox_provider_config or {}), "")).lower().strip()
             if sandbox_provider_name == "docker":
                 effective_sandbox_spec.setdefault("image", container_image)
-            elif sandbox_provider_name == "opensandbox":
-                # An image-less create allocates a prebuilt QEMU guest from
-                # the server-side Pool. Do not let the reusable Docker
-                # profile's image select the SDK's container-create path.
-                effective_sandbox_spec.pop("image", None)
             env_kwargs.update(
                 {
                     "sandbox_provider": dict(sandbox_provider_config or {}),
