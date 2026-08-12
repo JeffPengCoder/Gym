@@ -21,6 +21,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,52 @@ PINNED_OSWORLD_IMAGE = (
 )
 
 
+def _setup_command_texts(task: dict[str, Any]) -> tuple[str, ...]:
+    """Return commands that OSWorld will execute during the task setup."""
+
+    config = task.get("config")
+    if not isinstance(config, list):
+        return ()
+
+    commands: list[str] = []
+    for setup_item in config:
+        if not isinstance(setup_item, dict):
+            continue
+        parameters = setup_item.get("parameters")
+        if not isinstance(parameters, dict):
+            continue
+        command = parameters.get("command")
+        if isinstance(command, str):
+            commands.append(command)
+        elif isinstance(command, list):
+            commands.append(" ".join(str(argument) for argument in command))
+    return tuple(commands)
+
+
+def _validate_chrome_cdp_relay(task: dict[str, Any], *, line_number: int) -> None:
+    """Require OSWorld's guest relay when task setup starts Chrome CDP."""
+
+    commands = _setup_command_texts(task)
+    starts_chrome_cdp = any(
+        re.search(r"--remote-debugging-port(?:=|\s+)1337(?!\d)", command, flags=re.IGNORECASE)
+        for command in commands
+    )
+    has_cdp_relay = any(
+        re.search(r"\bsocat\b", command, flags=re.IGNORECASE)
+        and re.search(r"\blisten:9222(?!\d)", command, flags=re.IGNORECASE)
+        and re.search(r"\b(?:localhost|127\.0\.0\.1):1337(?!\d)", command, flags=re.IGNORECASE)
+        for command in commands
+    )
+    if starts_chrome_cdp and not has_cdp_relay:
+        task_id = str(task.get("id") or "<unknown>")
+        raise ValueError(
+            f"OSWorld row {line_number} task {task_id!r} starts Chrome CDP on guest port 1337 "
+            "but verifier_metadata.osworld_task.config does not launch the required guest relay. "
+            "Add ['socat', 'tcp-listen:9222,fork', 'tcp:localhost:1337']; Gym publishes and "
+            "forwards port 9222 but does not start this task-owned process."
+        )
+
+
 def prepare(input_jsonl: Path = DEFAULT_INPUT) -> Path:
     """Validate and return an OSWorld JSONL suitable for rollout collection."""
 
@@ -88,6 +135,7 @@ def prepare(input_jsonl: Path = DEFAULT_INPUT) -> Path:
             metadata = row.get("verifier_metadata")
             if not isinstance(metadata, dict) or not isinstance(metadata.get("osworld_task"), dict):
                 raise ValueError(f"OSWorld row {line_number} must contain verifier_metadata.osworld_task")
+            _validate_chrome_cdp_relay(metadata["osworld_task"], line_number=line_number)
             row_count += 1
 
     if row_count == 0:

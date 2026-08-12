@@ -32,6 +32,58 @@ def test_prepare_validates_committed_example() -> None:
     assert prepare() == DEFAULT_INPUT.resolve()
 
 
+def test_prepare_rejects_chrome_cdp_without_guest_relay(tmp_path: Path) -> None:
+    input_jsonl = tmp_path / "missing-cdp-relay.jsonl"
+    input_jsonl.write_text(
+        json.dumps(
+            {
+                "verifier_metadata": {
+                    "osworld_task": {
+                        "id": "chrome-without-relay",
+                        "config": [
+                            {
+                                "type": "launch",
+                                "parameters": {"command": "google-chrome --remote-debugging-port 1337"},
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        prepare(input_jsonl)
+
+    message = str(exc_info.value)
+    assert "OSWorld row 1" in message
+    assert "chrome-without-relay" in message
+    assert "tcp-listen:9222" in message
+    assert "task-owned process" in message
+
+
+def test_prepare_does_not_require_cdp_relay_without_chrome_cdp(tmp_path: Path) -> None:
+    input_jsonl = tmp_path / "non-chrome.jsonl"
+    input_jsonl.write_text(
+        json.dumps(
+            {
+                "verifier_metadata": {
+                    "osworld_task": {
+                        "id": "non-chrome-task",
+                        "config": [{"type": "launch", "parameters": {"command": ["libreoffice"]}}],
+                    }
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert prepare(input_jsonl) == input_jsonl.resolve()
+
+
 @pytest.mark.parametrize(
     "shard_args",
     [[], ["--num-shards", "1", "--shard-index", "0"]],
