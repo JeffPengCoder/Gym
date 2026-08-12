@@ -35,6 +35,7 @@ class BaseServiceConfig(_StrictModel):
     # Resolved to the sole compute resource name at validation time when not set.
     placement: str | None = None
     health_check: HealthCheckConfig | None = None
+    env: dict[str, str] = {}
 
 
 class BaseModelServiceConfig(BaseServiceConfig):
@@ -121,6 +122,7 @@ class DriverConfig(_StrictModel):
     # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.
     policy_model: str | None = None
     benchmarks: dict[str, BenchmarkRunConfig]
+    env: dict[str, str] = {}
 
 
 class JobConfig(_StrictModel):

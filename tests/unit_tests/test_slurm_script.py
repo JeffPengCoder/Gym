@@ -15,6 +15,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
 from nemo_gym.orchestration.executors.slurm_script import (
@@ -22,6 +24,7 @@ from nemo_gym.orchestration.executors.slurm_script import (
     _render_directives,
     _render_pool_directives,
     _render_service_command,
+    _resolve_env,
     build_sbatch_script,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
@@ -262,10 +265,189 @@ def test_build_sbatch_script_policy_model_flags(submit_config_with_policy, bench
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# _resolve_env
 # ---------------------------------------------------------------------------
 
-import pytest
+
+def test_resolve_env_literal():
+    out = _resolve_env({"FOO": "bar", "BAZ": "qux"})
+    assert "FOO=bar" in out
+    assert "BAZ=qux" in out
+    assert out.startswith("env ")
+
+
+def test_resolve_env_value_with_spaces():
+    out = _resolve_env({"MSG": "hello world"})
+    assert "MSG='hello world'" in out
+
+
+def test_resolve_env_empty():
+    assert _resolve_env({}) == ""
+
+
+def test_resolve_env_invalid_key_raises():
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        _resolve_env({"X; rm -rf /": "v"})
+
+
+def test_resolve_env_valid_keys():
+    out = _resolve_env({"_VALID_KEY": "a", "key1": "b", "KEY_123": "c"})
+    assert "_VALID_KEY=a" in out
+    assert "key1=b" in out
+    assert "KEY_123=c" in out
+
+
+def test_resolve_env_invalid_key_with_spaces():
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        _resolve_env({"KEY WITH SPACE": "v"})
+
+
+def test_resolve_env_invalid_key_with_hyphen():
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        _resolve_env({"KEY-NAME": "v"})
+
+
+def test_resolve_env_invalid_key_starts_with_digit():
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        _resolve_env({"1KEY": "v"})
+
+
+def test_resolve_env_invalid_key_with_equals():
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        _resolve_env({"KEY=BAD": "v"})
+
+
+def test_resolve_env_invalid_key_with_dollar():
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        _resolve_env({"$KEY": "v"})
+
+
+def test_resolve_env_value_with_semicolons_is_quoted():
+    out = _resolve_env({"KEY": "val;rm -rf /"})
+    assert "KEY='val;rm -rf /'" in out
+
+
+def test_resolve_env_value_with_newline_is_quoted():
+    out = _resolve_env({"KEY": "line1\nline2"})
+    assert "KEY='line1\nline2'" in out
+
+
+# ---------------------------------------------------------------------------
+# build_sbatch_script — env injection
+# ---------------------------------------------------------------------------
+
+
+def test_build_sbatch_script_resolved_tp_in_vllm_cmd(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "tensor_parallel_size": 8,
+                }
+            },
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "--tensor-parallel-size 8" in script
+
+
+def test_build_sbatch_script_service_env_before_driver_env(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "env": {"SVC_KEY": "svc_val"},
+                }
+            },
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}, "env": {"DRV_KEY": "drv_val"}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    svc_env_idx = script.index("SVC_KEY=svc_val")
+    drv_env_idx = script.index("DRV_KEY=drv_val")
+    svc_srun_idx = script.index("srun --overlap --no-container-mount-home --container-image=vllm:latest")
+    drv_srun_idx = script.index("srun --overlap --no-container-mount-home --container-image=python:3.12")
+    # Service env prefix appears before service srun; driver env prefix appears before driver srun.
+    assert svc_env_idx < svc_srun_idx
+    assert drv_env_idx < drv_srun_idx
+    # Service env prefix appears before driver env prefix.
+    assert svc_env_idx < drv_env_idx
+
+
+def test_render_service_command_with_env():
+    out = _render_service_command("svc", "img:latest", "cmd", {"FOO": "bar"})
+    assert "FOO=bar" in out
+    # env prefix must appear before srun on the same line or earlier
+    foo_idx = out.index("FOO=bar")
+    srun_idx = out.index("srun")
+    assert foo_idx < srun_idx
+
+
+def test_render_service_command_no_env():
+    out = _render_service_command("svc", "img:latest", "cmd")
+    assert "export" not in out
+
+
+def test_build_sbatch_script_service_env(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "env": {"HF_TOKEN": "hf_test", "LIT": "val"},
+                }
+            },
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "HF_TOKEN=hf_test" in script
+    assert "LIT=val" in script
+
+
+def test_build_sbatch_script_driver_env(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {"gsm8k": {}},
+                "env": {"WANDB_API_KEY": "wb_secret"},  # pragma: allowlist secret
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "WANDB_API_KEY=wb_secret" in script
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 from nemo_gym.orchestration.api import NodePool, SlurmComputeConfig, VllmServiceConfig
 
