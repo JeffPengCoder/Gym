@@ -320,6 +320,16 @@ root without `--reap`:
   --run-id my-osworld-opensandbox-run
 ```
 
+There is one unavoidable create-timeout boundary: the OpenSandbox server may
+accept `Sandbox.create()` while its response is lost or delayed, so the SDK
+caller can time out before receiving the sandbox ID. Gym cannot immediately
+call `kill()` on an ID it has never observed. This is an SDK/server lifecycle
+window, not a reason to maintain a second REST lifecycle in Gym. Attribution
+metadata is included in the original create request, so keep a stable,
+run-unique `OSWORLD_RUN_ID` and run the exact-ID cleanup above after an abnormal
+exit or create timeout. Once the SDK returns a handle, Gym performs normal
+`kill()` and local `close()` cleanup directly.
+
 ## Multi-environment runs
 
 Set concurrency and data selection during preparation, then use the same two
