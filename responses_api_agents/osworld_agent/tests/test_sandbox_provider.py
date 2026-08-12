@@ -167,7 +167,7 @@ def test_build_spec_rejects_invalid_remote_daemon_override(monkeypatch) -> None:
         )
 
 
-def test_build_spec_uses_image_less_opensandbox_pool(monkeypatch) -> None:
+def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatch) -> None:
     monkeypatch.setenv("OSWORLD_RUN_ID", "opensandbox-run")
     provider = osworld_sandbox.GymSandboxDesktopProvider(
         {
@@ -180,7 +180,7 @@ def test_build_spec_uses_image_less_opensandbox_pool(monkeypatch) -> None:
         },
         {
             "ttl_s": 1800,
-            "image": None,
+            "image": "busybox:1.36",
             "entrypoint": ["/run/entry.sh"],
             "env": {"KVM": "Y"},
             "resources": {"cpu": 4, "memory_mib": 16384},
@@ -194,7 +194,7 @@ def test_build_spec_uses_image_less_opensandbox_pool(monkeypatch) -> None:
         os_type="Ubuntu",
     )
 
-    assert spec.image is None
+    assert spec.image == "busybox:1.36"
     assert spec.ttl_s == 1800
     assert spec.ports == osworld_sandbox.OSWORLD_SERVICE_PORTS
     assert spec.provider_options == {"extensions": {"poolRef": "osworld-kvm"}}
@@ -210,7 +210,7 @@ def test_build_spec_rejects_invalid_opensandbox_pool_spec() -> None:
         {"opensandbox": {}},
         {"provider_options": {"extensions": {}}},
     )
-    with pytest.raises(ValueError, match="poolRef"):
+    with pytest.raises(ValueError, match="requires sandbox_spec.image"):
         provider._build_spec(
             "/opensandbox/Ubuntu.qcow2",
             headless=True,
@@ -220,11 +220,11 @@ def test_build_spec_rejects_invalid_opensandbox_pool_spec() -> None:
     provider = osworld_sandbox.GymSandboxDesktopProvider(
         {"opensandbox": {}},
         {
-            "image": "docker://osworld:latest",
-            "provider_options": {"extensions": {"poolRef": "osworld-kvm"}},
+            "image": "busybox:1.36",
+            "provider_options": {"extensions": {}},
         },
     )
-    with pytest.raises(ValueError, match="image-less"):
+    with pytest.raises(ValueError, match="poolRef"):
         provider._build_spec(
             "/opensandbox/Ubuntu.qcow2",
             headless=True,
@@ -279,7 +279,7 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
         def do_GET(self) -> None:
             seen["path"] = self.path
             seen["route"] = self.headers.get("X-Route", "")
-            content = b'{"webSocketDebuggerUrl":"ws://10.0.0.22:9222/devtools/browser/test"}'
+            content = b'{"webSocketDebuggerUrl":"ws://100.100.1.2:9222/devtools/browser/test"}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(content)))

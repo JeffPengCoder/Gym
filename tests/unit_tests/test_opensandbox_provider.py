@@ -241,136 +241,87 @@ async def test_direct_create_passes_image_auth_to_sdk_create(
     assert image.auth.password == TEST_REGISTRY_PASSWORD
 
 
-async def test_pool_create_uses_api_key_auth_without_execd_connect(
+async def test_pool_create_uses_sdk_compatibility_image_and_proxy_auth(
     fake_opensandbox_sdk: None,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[dict[str, Any]] = []
-
-    async def fake_rest_request(
-        method: str,
-        url: str,
-        *,
-        json_body: Any | None = None,
-        headers: dict[str, str] | None = None,
-        timeout_s: float = 300.0,
-    ) -> tuple[int, str]:
-        calls.append(
-            {
-                "method": method,
-                "url": url,
-                "json_body": json_body,
-                "headers": headers,
-                "timeout_s": timeout_s,
-            }
-        )
-        return 201, '{"id": "pooled-sandbox-1"}'
-
-    monkeypatch.setattr(opensandbox_provider, "_rest_request", fake_rest_request)
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={
-            "domain": "http://sandbox.example",
+            "domain": "http://sandbox.example/",
             "api_key": "pool-api-key",  # pragma: allowlist secret
             "request_timeout_s": 30,
+            "use_server_proxy": True,
         },
-        create={"request_timeout_s": 120, "timeout_s": 30},
+        create={
+            "request_timeout_s": 120,
+            "timeout_s": 30,
+            "skip_health_check": True,
+        },
         probe={"command": None},
     )
     handle = await provider.create(
         SandboxSpec(
+            image="busybox:1.36",
             ttl_s=1800,
             metadata={"purpose": "osworld"},
             provider_options={"extensions": {"poolRef": "osworld-kvm"}},
         )
     )
 
-    assert handle.sandbox_id == "pooled-sandbox-1"
-    assert isinstance(handle.raw, opensandbox_provider._PooledRestSandbox)
-    assert FakeSandbox.connected_args == ()
-    assert calls[0]["method"] == "POST"
-    assert calls[0]["url"] == "http://sandbox.example/v1/sandboxes"
-    assert calls[0]["headers"] == {
+    assert handle.sandbox_id == "sandbox-1"
+    assert FakeSandbox.created_kwargs["image"] == "busybox:1.36"
+    assert FakeSandbox.created_kwargs["timeout"] == timedelta(seconds=1800)
+    assert FakeSandbox.created_kwargs["extensions"]["poolRef"] == "osworld-kvm"
+    assert FakeSandbox.created_kwargs["metadata"]["purpose"] == "osworld"
+    assert FakeSandbox.created_kwargs["skip_health_check"] is True
+    create_connection = FakeSandbox.created_kwargs["connection_config"]
+    assert create_connection.kwargs["domain"] == "http://sandbox.example"
+    assert create_connection.kwargs["headers"] == {
         "OPEN-SANDBOX-API-KEY": "pool-api-key"  # pragma: allowlist secret
     }
-    assert calls[0]["json_body"]["timeout"] == 1800
-    assert calls[0]["json_body"]["extensions"] == {"poolRef": "osworld-kvm"}
-    assert calls[0]["json_body"]["metadata"]["purpose"] == "osworld"
-    assert calls[0]["json_body"]["metadata"][opensandbox_provider.POOLED_CREATE_MARKER_KEY]
+    assert FakeSandbox.connected_args == ("sandbox-1",)
+    assert FakeSandbox.connected_kwargs["skip_health_check"] is True
 
 
-@pytest.mark.parametrize(
-    ("use_server_proxy", "expected_headers"),
-    [
-        (
-            True,
-            {"OPEN-SANDBOX-API-KEY": "pool-api-key"},  # pragma: allowlist secret
-        ),
-        (False, {}),
-    ],
-)
-async def test_pooled_endpoint_carries_api_auth_only_to_server_proxy(
+async def test_pool_connect_cancellation_destroys_known_sdk_sandbox(
     monkeypatch: pytest.MonkeyPatch,
-    use_server_proxy: bool,
-    expected_headers: dict[str, str],
 ) -> None:
-    calls: list[str] = []
+    lifecycle: list[str] = []
 
-    async def fake_rest_request(method: str, url: str, **_kwargs: Any) -> tuple[int, str]:
-        assert method == "GET"
-        calls.append(url)
-        return 200, '{"endpoint":"gateway.example/proxy/5000"}'
+    class CancellingSandbox:
+        def __init__(self) -> None:
+            self.id = "pooled-cancelled-connect"
 
-    monkeypatch.setattr(opensandbox_provider, "_rest_request", fake_rest_request)
-    raw = opensandbox_provider._PooledRestSandbox(
-        sandbox_id="pooled-sandbox-1",
-        base_url="http://sandbox.example",
-        headers={"OPEN-SANDBOX-API-KEY": "pool-api-key"},  # pragma: allowlist secret
-        protocol="http",
-        timeout_s=30,
-        use_server_proxy=use_server_proxy,
+        @classmethod
+        async def create(cls, **_kwargs: Any) -> "CancellingSandbox":
+            lifecycle.append("create")
+            return cls()
+
+        @classmethod
+        async def connect(cls, *_args: Any, **_kwargs: Any) -> "CancellingSandbox":
+            lifecycle.append("connect")
+            raise asyncio.CancelledError
+
+        async def kill(self) -> None:
+            lifecycle.append("kill")
+
+        async def close(self) -> None:
+            lifecycle.append("close")
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (CancellingSandbox, FakeConnectionConfig, object, FakePlatformSpec, FakeVolume),
     )
-
-    endpoint = await raw.get_endpoint(5000)
-
-    assert endpoint.endpoint == "http://gateway.example/proxy/5000"
-    assert endpoint.headers == expected_headers
-    assert calls == [
-        "http://sandbox.example/v1/sandboxes/pooled-sandbox-1/endpoints/5000"
-        f"?use_server_proxy={'true' if use_server_proxy else 'false'}"
-    ]
-
-
-async def test_pool_connect_cancellation_deletes_known_sandbox(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, str]] = []
-
-    async def fake_rest_request(
-        method: str,
-        url: str,
-        **_kwargs: Any,
-    ) -> tuple[int, str]:
-        calls.append((method, url))
-        if method == "POST":
-            return 201, '{"id": "pooled-cancelled-connect"}'
-        if method == "DELETE":
-            return 204, ""
-        raise AssertionError(f"unexpected request: {method} {url}")
-
-    monkeypatch.setattr(opensandbox_provider, "_rest_request", fake_rest_request)
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"domain": "http://sandbox.example"},
+        create={"skip_health_check": True},
         probe={"command": None},
     )
-
-    async def cancelled_verify(_handle: Any) -> None:
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(provider, "_verify_created_handle", cancelled_verify)
 
     with pytest.raises(asyncio.CancelledError):
         await provider._create_once(
             SandboxSpec(
+                image="busybox:1.36",
                 ready_timeout_s=30,
                 provider_options={
                     "extensions": {
@@ -380,93 +331,10 @@ async def test_pool_connect_cancellation_deletes_known_sandbox(
             )
         )
 
-    assert calls == [
-        ("POST", "http://sandbox.example/v1/sandboxes"),
-        (
-            "DELETE",
-            "http://sandbox.example/v1/sandboxes/pooled-cancelled-connect",
-        ),
-    ]
+    assert lifecycle == ["create", "connect", "kill", "close"]
 
 
-async def test_pool_post_cancellation_reaps_exact_create_marker(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, str]] = []
-    create_marker = ""
-
-    async def fake_rest_request(
-        method: str,
-        url: str,
-        *,
-        json_body: Any | None = None,
-        **_kwargs: Any,
-    ) -> tuple[int, str]:
-        nonlocal create_marker
-        calls.append((method, url))
-        if method == "POST":
-            create_marker = str(json_body["metadata"][opensandbox_provider.POOLED_CREATE_MARKER_KEY])
-            raise asyncio.CancelledError
-        if method == "GET":
-            if "page=1&" in url:
-                return (
-                    200,
-                    (
-                        '{"items":[{"id":"some-other-create",'
-                        '"metadata":{"nemo-gym-create-id":"other"}}],'
-                        '"pagination":{"page":1,"pageSize":200,'
-                        '"totalPages":2,"hasNextPage":true}}'
-                    ),
-                )
-            return (
-                200,
-                (
-                    '{"items":[{"id":"lost-create",'
-                    f'"metadata":{{"{opensandbox_provider.POOLED_CREATE_MARKER_KEY}":'
-                    f'"{create_marker}"}}}}],'
-                    '"pagination":{"page":2,"pageSize":200,'
-                    '"totalPages":2,"hasNextPage":false}}'
-                ),
-            )
-        if method == "DELETE":
-            return 204, ""
-        raise AssertionError(f"unexpected request: {method} {url}")
-
-    monkeypatch.setattr(opensandbox_provider, "_rest_request", fake_rest_request)
-    provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"domain": "http://sandbox.example"},
-        probe={"command": None},
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await provider._create_once(
-            SandboxSpec(
-                provider_options={
-                    "extensions": {
-                        "poolRef": "osworld-kvm",
-                    }
-                },
-            )
-        )
-
-    assert create_marker
-    assert calls == [
-        ("POST", "http://sandbox.example/v1/sandboxes"),
-        ("GET", "http://sandbox.example/v1/sandboxes?page=1&pageSize=200"),
-        ("GET", "http://sandbox.example/v1/sandboxes?page=2&pageSize=200"),
-        ("DELETE", "http://sandbox.example/v1/sandboxes/lost-create"),
-    ]
-
-
-async def test_pool_create_requires_pool_ref(
-    fake_opensandbox_sdk: None,
-) -> None:
-    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
-    with pytest.raises(ValueError, match="poolRef"):
-        await provider._create_once(SandboxSpec())
-
-
-async def test_endpoint_normalizes_missing_scheme() -> None:
+async def test_endpoint_normalizes_missing_scheme_and_adds_proxy_auth() -> None:
     class FakeRaw:
         async def get_endpoint(self, port: int) -> Any:
             assert port == 5000
@@ -476,7 +344,11 @@ async def test_endpoint_normalizes_missing_scheme() -> None:
             )
 
     provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"protocol": "http"},
+        connection={
+            "domain": "https://sandbox.example/",
+            "api_key": "pool-api-key",  # pragma: allowlist secret
+            "use_server_proxy": True,
+        },
         operations={"retries": 0},
         probe={"command": None},
     )
@@ -489,8 +361,77 @@ async def test_endpoint_normalizes_missing_scheme() -> None:
         5000,
     )
 
-    assert resolved.endpoint == "http://10.0.0.22:5000"
-    assert resolved.headers == {"X-Route": "sandbox"}
+    assert resolved.endpoint == "https://10.0.0.22:5000"
+    assert resolved.headers == {
+        "X-Route": "sandbox",
+        "OPEN-SANDBOX-API-KEY": "pool-api-key",  # pragma: allowlist secret
+    }
+
+
+async def test_endpoint_uses_configured_protocol_for_domain_without_scheme() -> None:
+    class FakeRaw:
+        async def get_endpoint(self, _port: int) -> Any:
+            return SimpleNamespace(endpoint="sandbox.example:5000", headers={})
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "gateway.example:8080/",
+            "protocol": "https",
+        },
+        operations={"retries": 0},
+        probe={"command": None},
+    )
+    resolved = await provider.endpoint(
+        opensandbox_provider.SandboxHandle(
+            sandbox_id="sandbox-1",
+            provider_name="opensandbox",
+            raw=FakeRaw(),
+        ),
+        5000,
+    )
+
+    assert resolved.endpoint == "https://sandbox.example:5000"
+
+
+async def test_direct_endpoint_never_receives_management_api_key() -> None:
+    class FakeRaw:
+        async def get_endpoint(self, _port: int) -> Any:
+            return SimpleNamespace(endpoint="http://10.0.0.22:5000", headers={})
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "api_key": "pool-api-key",  # pragma: allowlist secret
+            "use_server_proxy": False,
+        },
+        operations={"retries": 0},
+        probe={"command": None},
+    )
+    resolved = await provider.endpoint(
+        opensandbox_provider.SandboxHandle(
+            sandbox_id="sandbox-1",
+            provider_name="opensandbox",
+            raw=FakeRaw(),
+        ),
+        5000,
+    )
+
+    assert resolved.headers == {}
+
+
+async def test_endpoint_requires_sdk_get_endpoint() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 0},
+        probe={"command": None},
+    )
+    with pytest.raises(NotImplementedError, match="opensandbox>=0.1.15"):
+        await provider.endpoint(
+            opensandbox_provider.SandboxHandle(
+                sandbox_id="sandbox-1",
+                provider_name="opensandbox",
+                raw=object(),
+            ),
+            5000,
+        )
 
 
 def test_provider_validation_and_retry_helpers() -> None:
@@ -587,7 +528,7 @@ def test_provider_options_from_mapping() -> None:
 def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={
-            "domain": "sandbox.example",
+            "domain": "sandbox.example/",
             "api_key": "key",  # pragma: allowlist secret
             "protocol": "https",
             "request_timeout_s": 10,
@@ -604,9 +545,20 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
         "protocol": "https",
         "request_timeout": timedelta(seconds=10),
         "use_server_proxy": True,
+        # The API key must also travel as a header: the SDK's execd clients
+        # (health ping, commands, files) send only ConnectionConfig.headers,
+        # and proxied /proxy/* routes may enforce auth.
+        "headers": {"OPEN-SANDBOX-API-KEY": "key"},  # pragma: allowlist secret
     }
     short_timeout_config = provider._connection_config(request_timeout_s=3)
     assert short_timeout_config.kwargs["request_timeout"] == timedelta(seconds=3)
+
+    # Direct-endpoint mode must NOT carry the key: the sandbox runs untrusted
+    # code and would be able to read it.
+    direct = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "api_key": "key"}  # pragma: allowlist secret
+    )
+    assert "headers" not in direct._connection_config().kwargs
 
 
 def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -692,6 +644,24 @@ def test_connection_transport_backend_aiohttp_opt_in(fake_opensandbox_sdk: None)
 
     no_policy_provider = opensandbox_provider.OpenSandboxProvider(create={"image_pull_policy": None})
     assert no_policy_provider._resolve_extensions({"imagePullPolicy": "Never"}) == {"imagePullPolicy": "Never"}
+
+
+def test_connection_config_disable_pooling_sets_fresh_transport(fake_opensandbox_sdk: None) -> None:
+    import httpx
+
+    # Default: a keepalive-bounded transport with connection reuse enabled.
+    pooled = opensandbox_provider.OpenSandboxProvider(connection={"domain": "sandbox.example"})
+    pooled_transport = pooled._connection_config().kwargs["transport"]
+    assert isinstance(pooled_transport, httpx.AsyncHTTPTransport)
+    assert pooled_transport._pool._max_keepalive_connections > 0
+
+    # disable_connection_pooling -> same transport plumbing, but no reuse.
+    fresh = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "disable_connection_pooling": True}
+    )
+    transport = fresh._connection_config().kwargs.get("transport")
+    assert isinstance(transport, httpx.AsyncHTTPTransport)
+    assert transport._pool._max_keepalive_connections == 0
 
 
 async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -786,6 +756,214 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
     assert await provider.status(handle) == SandboxStatus.RUNNING
     bare_handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-2", provider_name="opensandbox", raw=object())
     assert await provider.status(bare_handle) == SandboxStatus.UNKNOWN
+
+
+async def _no_sleep(_seconds: float) -> None:
+    return None
+
+
+@pytest.mark.asyncio
+async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """background_exec submits, polls status until finished, then reads logs."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.run_calls: list[tuple[str, FakeRunCommandOpts]] = []
+            self.status_calls: list[str] = []
+            self.log_calls: list[str] = []
+            self._status_sequence = [
+                SimpleNamespace(running=True, exit_code=None, error=None),
+                SimpleNamespace(running=False, exit_code=7, error=None),
+            ]
+
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            self.run_calls.append((command, opts))
+            return SimpleNamespace(id="exec-42")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            return self._status_sequence[min(len(self.status_calls) - 1, len(self._status_sequence) - 1)]
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            self.log_calls.append(execution_id)
+            return SimpleNamespace(content="combined output", cursor=None)
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "background_poll_interval_s": 0.01},
+    )
+    raw = FakeRaw()
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-bg", provider_name="opensandbox", raw=raw)
+
+    result = await provider.exec(handle, "make build", cwd="/repo", timeout_s=30)
+
+    assert result == opensandbox_provider.SandboxExecResult(
+        stdout="combined output", stderr=None, return_code=7, error_type=None
+    )
+    # Submitted once with background=True; polled twice (running -> finished); read logs once.
+    assert len(raw.commands.run_calls) == 1
+    assert raw.commands.run_calls[0][1].kwargs["background"] is True
+    assert raw.commands.status_calls == ["exec-42", "exec-42"]
+    assert raw.commands.log_calls == ["exec-42"]
+
+
+@pytest.mark.parametrize(
+    ("status", "missing"),
+    [
+        (SimpleNamespace(exit_code=0, error=None), "running"),
+        (SimpleNamespace(running=False, error=None), "exit_code"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_exec_background_rejects_status_missing_a_field(
+    monkeypatch: pytest.MonkeyPatch, status: Any, missing: str
+) -> None:
+    """An SDK field rename must fail loudly, not score a failed command as success."""
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-42")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            return status
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            return SimpleNamespace(content="combined output", cursor=None)
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "background_poll_interval_s": 0.01},
+    )
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-bg", provider_name="opensandbox", raw=SimpleNamespace(commands=FakeCommands())
+    )
+
+    with pytest.raises(RuntimeError, match=missing):
+        await provider.exec(handle, "make build", timeout_s=30)
+
+
+async def test_exec_hard_cap_converts_wait_for_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wedged exec (hard wall-clock cap tripping) surfaces as TimeoutError."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:  # pragma: no cover
+            return SimpleNamespace(id="exec-wedged")
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+
+    # Simulate the outer hard-cap wait_for timing out before _dispatch completes.
+    async def fake_wait_for(awaitable: Any, timeout: float | None = None) -> Any:
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-wedge", provider_name="opensandbox", raw=FakeRaw())
+
+    with pytest.raises(TimeoutError, match="hard cap"):
+        await provider.exec(handle, "sleep 999", timeout_s=30)
+
+
+@pytest.mark.parametrize("request_timeout_s", [None, 5])
+async def test_exec_background_without_timeout_skips_hard_cap(
+    monkeypatch: pytest.MonkeyPatch, request_timeout_s: int | None
+) -> None:
+    """An uncapped background command stays uncapped; request_timeout_s bounds one poll."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.status_calls: list[str] = []
+
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(id="exec-uncapped")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            running = len(self.status_calls) < 2
+            return SimpleNamespace(running=running, exit_code=0, error=None)
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            return SimpleNamespace(content="ok", cursor=None)
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    wait_for_timeouts: list[float | None] = []
+    real_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable: Any, timeout: float | None = None) -> Any:
+        wait_for_timeouts.append(timeout)
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", recording_wait_for)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": request_timeout_s},
+        probe={"command": None},
+        operations={"background_exec": True, "background_poll_interval_s": 0.01},
+    )
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-uncapped", provider_name="opensandbox", raw=FakeRaw()
+    )
+
+    result = await provider.exec(handle, "echo hi")
+
+    assert result == opensandbox_provider.SandboxExecResult(stdout="ok", stderr=None, return_code=0, error_type=None)
+    if request_timeout_s is not None:
+        # The per-poll timeout must not become the whole command's hard cap.
+        assert 2.0 * request_timeout_s + 30.0 not in wait_for_timeouts
 
 
 async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1252,3 +1430,112 @@ async def test_create_attribution_run_id_generated(
 def test_attribution_invalid_key_prefix_raises(key_prefix: str) -> None:
     with pytest.raises(ValueError, match="key_prefix"):
         opensandbox_provider.OpenSandboxAttributionConfig(key_prefix=key_prefix)
+
+
+async def test_connect_health_checks_by_default(fake_opensandbox_sdk: None) -> None:
+    """An unchecked handle would defer the exec-daemon startup gap to the first call."""
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    await provider.connect({"sandbox_id": "sandbox-9"})
+
+    assert FakeSandbox.connected_kwargs["skip_health_check"] is False
+
+
+async def test_connect_honours_skip_health_check_opt_out(fake_opensandbox_sdk: None) -> None:
+    """Callers that explicitly opt out still get an unchecked handle."""
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"skip_health_check": True},
+        probe={"command": None},
+    )
+
+    await provider.connect({"sandbox_id": "sandbox-9"})
+
+    assert FakeSandbox.connected_kwargs["skip_health_check"] is True
+
+
+@pytest.mark.asyncio
+async def test_exec_retries_backend_connect_502_despite_zero_command_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy 502 means the command never started; it retries even with command_retries=0."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class Backend502Error(Exception):
+        status_code = 502
+
+    calls = {"n": 0}
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise Backend502Error("Failed to run command. Status code: 502")
+            return SimpleNamespace(logs=SimpleNamespace(stdout=[], stderr=[]), error=None, exit_code=0)
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"retries": 3},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sb-flap", provider_name="opensandbox", raw=FakeRaw())
+
+    result = await provider.exec(handle, "echo ok", timeout_s=30)
+
+    assert result.return_code == 0
+    assert calls["n"] == 3  # two 502s absorbed, command never double-ran
+
+
+@pytest.mark.asyncio
+async def test_exec_persistent_502_raises_typed_backend_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """502s that outlive the budget mean a dead backend: fail fast and typed."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class Backend502Error(Exception):
+        status_code = 502
+
+    calls = {"n": 0}
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            calls["n"] += 1
+            raise Backend502Error("Failed to run command. Status code: 502")
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"retries": 2},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sb-dead", provider_name="opensandbox", raw=FakeRaw())
+
+    with pytest.raises(opensandbox_provider.SandboxBackendUnreachableError, match="likely dead"):
+        await provider.exec(handle, "echo ok", timeout_s=30)
+
+    assert calls["n"] == 3  # operations.retries + 1 submissions, then typed failure

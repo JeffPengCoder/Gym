@@ -18,11 +18,22 @@ CLEANUP_RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_run.sh"
 OPENSANDBOX_CLEANUP_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_opensandbox_run.py"
 OSWORLD_AGENT_CONFIG = REPO_ROOT / "responses_api_agents/osworld_agent/configs/osworld_agent.yaml"
 OSWORLD_AGENT_REQUIREMENTS = REPO_ROOT / "responses_api_agents/osworld_agent/requirements.txt"
+OSWORLD_AGENT_APP = REPO_ROOT / "responses_api_agents/osworld_agent/app.py"
+OSWORLD_AGENT_OVERRIDES = REPO_ROOT / "responses_api_agents/osworld_agent/overrides.txt"
+OSWORLD_RUNTIME_DEPS_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/install_optional_runtime_deps.sh"
+OSWORLD_RUNTIME_DEPS_CHECKER = REPO_ROOT / "responses_api_agents/osworld_agent/runtime_dependencies.py"
 
 
 @pytest.mark.parametrize(
     "script",
-    [VM_PREPARE_SCRIPT, CHECK_ENVIRONMENT_SCRIPT, START_CONTROL_SCRIPT, RUN_EVAL_SCRIPT, CLEANUP_RUN_SCRIPT],
+    [
+        VM_PREPARE_SCRIPT,
+        CHECK_ENVIRONMENT_SCRIPT,
+        START_CONTROL_SCRIPT,
+        RUN_EVAL_SCRIPT,
+        CLEANUP_RUN_SCRIPT,
+        OSWORLD_RUNTIME_DEPS_SCRIPT,
+    ],
 )
 def test_public_host_setup_scripts_are_syntax_valid_and_portable(script: Path) -> None:
     subprocess.run(["bash", "-n", str(script)], check=True)
@@ -74,6 +85,11 @@ def test_runtime_wrappers_execute_from_run_specific_env_directory(tmp_path: Path
     fake_python = tmp_path / "python"
     fake_python.write_text(f'#!/bin/bash\nprintf "%s\\n" "{python_include}"\n', encoding="utf-8")
     fake_python.chmod(0o755)
+    agent_venv = tmp_path / "agent-venv"
+    agent_python = agent_venv / "bin/python"
+    agent_python.parent.mkdir(parents=True)
+    agent_python.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    agent_python.chmod(0o755)
 
     env = os.environ.copy()
     env.pop("DOCKER_HOST", None)
@@ -82,6 +98,7 @@ def test_runtime_wrappers_execute_from_run_specific_env_directory(tmp_path: Path
             "GYM_BIN": str(fake_gym),
             "GYM_PYTHON": str(fake_python),
             "NEMO_GYM_CONTROL_HOST": "127.0.0.1",
+            "OSWORLD_AGENT_VENV": str(agent_venv),
             "OSWORLD_ENV_FILE": str(env_dir / "env.yaml"),
             "OSWORLD_RUN_ID": "test-profile",
             "PWD_CAPTURE": str(cwd_capture),
@@ -92,12 +109,36 @@ def test_runtime_wrappers_execute_from_run_specific_env_directory(tmp_path: Path
     assert cwd_capture.read_text(encoding="utf-8").strip() == str(env_dir)
 
 
+def test_start_control_requires_explicit_osworld_runtime_setup() -> None:
+    text = START_CONTROL_SCRIPT.read_text(encoding="utf-8")
+
+    assert "runtime_dependencies.py" in text
+    assert "OSWORLD_AGENT_VENV" in text
+    assert "gym env prefetch" in text
+    assert "install_optional_runtime_deps.sh" in text
+    assert "uv pip install" not in text
+    assert "require_optional_runtime_dependencies()" in OSWORLD_AGENT_APP.read_text(encoding="utf-8")
+
+
 def test_managed_osworld_agent_installs_opensandbox_sdk() -> None:
     requirements = OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8").splitlines()
+    overrides = OSWORLD_AGENT_OVERRIDES.read_text(encoding="utf-8").splitlines()
+    runtime_script = OSWORLD_RUNTIME_DEPS_SCRIPT.read_text(encoding="utf-8")
 
     assert "-e nemo-gym[dev] @ ../../" in requirements
     assert "opensandbox>=0.1.15" in requirements
     assert "tenacity>=9.1.4" in requirements
+    assert not any(line.startswith("cryptography") for line in requirements)
+    assert not any(line.startswith("flask") for line in requirements)
+    assert not any(line.startswith("opencv-") for line in requirements)
+    assert "torch==2.11.0" in overrides
+    assert "matplotlib==3.10.6" in overrides
+    assert "agp-client; sys_platform == 'never'" in overrides
+    assert "--no-config" in runtime_script
+    assert '"numpy<2"' in runtime_script
+    assert "cryptography~=46.0" in runtime_script
+    assert "opencv-python-headless~=4.8.1.78" in runtime_script
+    assert "torchvision==0.26.0" in runtime_script
 
 
 def test_remote_docker_requires_a_reachable_publish_host() -> None:
@@ -121,6 +162,11 @@ def test_role_checks_cover_environment_and_model_contracts() -> None:
     assert "/models" in model_text
     assert "/chat/completions" in model_text
     compile(model_text, str(MODEL_PROBE_SCRIPT), "exec")
+    compile(
+        OSWORLD_RUNTIME_DEPS_CHECKER.read_text(encoding="utf-8"),
+        str(OSWORLD_RUNTIME_DEPS_CHECKER),
+        "exec",
+    )
 
 
 def test_cleanup_is_scoped_to_the_run_id() -> None:

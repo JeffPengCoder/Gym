@@ -541,8 +541,7 @@ def _patch_chrome_setup_cdp_lifecycle() -> None:
     open_tabs = controller_class._chrome_open_tabs_setup
     close_tabs = controller_class._chrome_close_tabs_setup
     if callable(getattr(setup_module, "_connect_chrome_over_cdp", None)) or (
-        getattr(open_tabs, "_nemo_gym_cdp_lifecycle", False)
-        and getattr(close_tabs, "_nemo_gym_cdp_lifecycle", False)
+        getattr(open_tabs, "_nemo_gym_cdp_lifecycle", False) and getattr(close_tabs, "_nemo_gym_cdp_lifecycle", False)
     ):
         return
 
@@ -2054,11 +2053,6 @@ def run_osworld_task(
             sandbox_provider_name = str(next(iter(sandbox_provider_config or {}), "")).lower().strip()
             if sandbox_provider_name == "docker":
                 effective_sandbox_spec.setdefault("image", container_image)
-            elif sandbox_provider_name == "opensandbox":
-                # An image-less create allocates a prebuilt QEMU guest from
-                # the server-side Pool. Do not let the reusable Docker
-                # profile's image select the SDK's container-create path.
-                effective_sandbox_spec.pop("image", None)
             env_kwargs.update(
                 {
                     "sandbox_provider": dict(sandbox_provider_config or {}),
@@ -2073,11 +2067,7 @@ def run_osworld_task(
         env = env_cls(
             **env_kwargs,
         )
-        linked_cache_files = (
-            0
-            if use_remote_resources
-            else _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
-        )
+        linked_cache_files = 0 if use_remote_resources else _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
         if linked_cache_files:
             LOG.info(
                 "Linked %d pre-staged setup cache entries for task %s", linked_cache_files, _safe_task_id(task_config)

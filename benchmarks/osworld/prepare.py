@@ -21,11 +21,14 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shlex
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from benchmarks.osworld.assets import DEFAULT_SETUP_CACHE, ensure_osworld_assets
+from responses_api_agents.osworld_agent.runtime_dependencies import managed_agent_venv_path
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent
@@ -34,6 +37,9 @@ DEFAULT_CONFIG = BENCHMARK_DIR / "config.yaml"
 DEFAULT_INPUT = BENCHMARK_DIR / "data" / "example.jsonl"
 DEFAULT_OUTPUT = REPO_ROOT / "results" / "osworld" / "rollouts.jsonl"
 DEFAULT_ENV = BENCHMARK_DIR / "env.yaml"
+OSWORLD_RUNTIME_DEPS_INSTALLER = (
+    REPO_ROOT / "responses_api_agents" / "osworld_agent" / "install_optional_runtime_deps.sh"
+)
 
 BASE_AGENT_CONFIG = REPO_ROOT / "responses_api_agents" / "osworld_agent" / "configs" / "osworld_agent.yaml"
 OPENAI_MODEL_CONFIG = REPO_ROOT / "responses_api_models" / "openai_model" / "configs" / "openai_model.yaml"
@@ -42,6 +48,7 @@ NANO_OMNI_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_nano_omni.ya
 OSWORLD_PROVIDER_CONFIG = BENCHMARK_DIR / "configs" / "osworld_docker_pinned.yaml"
 OPENSANDBOX_CONFIG = BENCHMARK_DIR / "configs" / "osworld_opensandbox.yaml"
 OPENSANDBOX_VM_SENTINEL = "/opensandbox/Ubuntu.qcow2"
+OPENSANDBOX_COMPAT_IMAGE = "busybox:1.36"
 
 PROFILE_CONFIGS: dict[str, tuple[Path, ...]] = {
     "default": (DEFAULT_CONFIG,),
@@ -66,6 +73,51 @@ PINNED_OSWORLD_IMAGE = (
 )
 
 
+def _setup_command_texts(task: dict[str, Any]) -> tuple[str, ...]:
+    """Return commands that OSWorld will execute during the task setup."""
+
+    config = task.get("config")
+    if not isinstance(config, list):
+        return ()
+
+    commands: list[str] = []
+    for setup_item in config:
+        if not isinstance(setup_item, dict):
+            continue
+        parameters = setup_item.get("parameters")
+        if not isinstance(parameters, dict):
+            continue
+        command = parameters.get("command")
+        if isinstance(command, str):
+            commands.append(command)
+        elif isinstance(command, list):
+            commands.append(" ".join(str(argument) for argument in command))
+    return tuple(commands)
+
+
+def _validate_chrome_cdp_relay(task: dict[str, Any], *, line_number: int) -> None:
+    """Require OSWorld's guest relay when task setup starts Chrome CDP."""
+
+    commands = _setup_command_texts(task)
+    starts_chrome_cdp = any(
+        re.search(r"--remote-debugging-port(?:=|\s+)1337(?!\d)", command, flags=re.IGNORECASE) for command in commands
+    )
+    has_cdp_relay = any(
+        re.search(r"\bsocat\b", command, flags=re.IGNORECASE)
+        and re.search(r"\blisten:9222(?!\d)", command, flags=re.IGNORECASE)
+        and re.search(r"\b(?:localhost|127\.0\.0\.1):1337(?!\d)", command, flags=re.IGNORECASE)
+        for command in commands
+    )
+    if starts_chrome_cdp and not has_cdp_relay:
+        task_id = str(task.get("id") or "<unknown>")
+        raise ValueError(
+            f"OSWorld row {line_number} task {task_id!r} starts Chrome CDP on guest port 1337 "
+            "but verifier_metadata.osworld_task.config does not launch the required guest relay. "
+            "Add ['socat', 'tcp-listen:9222,fork', 'tcp:localhost:1337']; Gym publishes and "
+            "forwards port 9222 but does not start this task-owned process."
+        )
+
+
 def prepare(input_jsonl: Path = DEFAULT_INPUT) -> Path:
     """Validate and return an OSWorld JSONL suitable for rollout collection."""
 
@@ -87,6 +139,7 @@ def prepare(input_jsonl: Path = DEFAULT_INPUT) -> Path:
             metadata = row.get("verifier_metadata")
             if not isinstance(metadata, dict) or not isinstance(metadata.get("osworld_task"), dict):
                 raise ValueError(f"OSWorld row {line_number} must contain verifier_metadata.osworld_task")
+            _validate_chrome_cdp_relay(metadata["osworld_task"], line_number=line_number)
             row_count += 1
 
     if row_count == 0:
@@ -346,7 +399,8 @@ def write_env(
                     "      sandbox_require_kvm: false",
                     "      sandbox_ready_timeout_s: 600.0",
                     "      sandbox_spec:",
-                    "        image: null",
+                    "        # Required by the SDK; poolRef supplies the actual OSWorld VM.",
+                    f"        image: ${{oc.env:OPENSANDBOX_COMPAT_IMAGE,{OPENSANDBOX_COMPAT_IMAGE}}}",
                     "        ttl_s: 14400",
                     "        ready_timeout_s: 1200",
                     "        provider_options:",
@@ -550,8 +604,21 @@ def main() -> None:
             force=args.force_env,
         )
 
-    print("\nNext steps:")
-    print(f"  cd {args.env_file.expanduser().resolve().parent}")
+    agent_venv = managed_agent_venv_path(REPO_ROOT, args.server_venv_root)
+    env_dir = args.env_file.expanduser().resolve().parent
+    print("\nNext steps (the OSWorld runtime package install is an explicit opt-in):")
+    print(f"  cd {shlex.quote(str(env_dir))}")
+    print("  gym env prefetch")
+    print(
+        "  "
+        + shlex.join(
+            [
+                "bash",
+                str(OSWORLD_RUNTIME_DEPS_INSTALLER),
+                str(agent_venv),
+            ]
+        )
+    )
     print("  gym env start")
     print("  gym eval run --no-serve")
 

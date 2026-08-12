@@ -425,7 +425,7 @@ def test_gym_sandbox_backend_is_passed_as_plain_env_configuration(monkeypatch) -
     assert kwargs["sandbox_ready_poll_s"] == 0.25
 
 
-def test_opensandbox_pool_backend_discards_inherited_docker_image(monkeypatch) -> None:
+def test_opensandbox_pool_backend_preserves_sdk_compatibility_image(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 
     result = osworld_client.run_osworld_task(
@@ -434,7 +434,7 @@ def test_opensandbox_pool_backend_discards_inherited_docker_image(monkeypatch) -
         env_class_path="fake.FakeEnv",
         sandbox_provider_config={"opensandbox": {"connection": {}}},
         sandbox_spec={
-            "image": "docker://inherited-osworld-image",
+            "image": "busybox:1.36",
             "provider_options": {
                 "extensions": {"poolRef": "osworld-kvm"},
             },
@@ -450,7 +450,7 @@ def test_opensandbox_pool_backend_discards_inherited_docker_image(monkeypatch) -
     assert kwargs["sandbox_provider"] == {
         "opensandbox": {"connection": {}},
     }
-    assert "image" not in kwargs["sandbox_spec"]
+    assert kwargs["sandbox_spec"]["image"] == "busybox:1.36"
     assert kwargs["sandbox_spec"]["provider_options"]["extensions"]["poolRef"] == ("osworld-kvm")
     assert kwargs["path_to_vm"] == "/opensandbox/Ubuntu.qcow2"
     assert kwargs["sandbox_require_kvm"] is False

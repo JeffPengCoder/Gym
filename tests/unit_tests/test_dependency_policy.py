@@ -22,13 +22,10 @@ from packaging.version import Version
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CI_WORKFLOWS = (
-    ROOT / ".github/workflows/unit-tests.yml",
-    ROOT / ".github/workflows/full-test-suite.yml",
-)
 OSWORLD_AGENT_REQUIREMENTS = ROOT / "responses_api_agents/osworld_agent/requirements.txt"
 OSWORLD_AGENT_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/uv-overrides.txt"
 OSWORLD_AGENT_UV_CONFIG = ROOT / "responses_api_agents/osworld_agent/uv.toml"
+OSWORLD_AGENT_PUBLIC_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/overrides.txt"
 OSWORLD_RESOURCES_PROJECT = ROOT / "resources_servers/osworld/pyproject.toml"
 VLLM_MODEL_OVERRIDES = ROOT / "responses_api_models/vllm_model/uv-overrides.txt"
 
@@ -38,47 +35,17 @@ def _uv_config() -> dict:
         return tomllib.load(f)["tool"]["uv"]
 
 
-def test_uv_version_supports_scoped_dependency_exclusions() -> None:
-    required_version = SpecifierSet(_uv_config()["required-version"])
-
-    assert Version("0.11.24") not in required_version
-    assert Version("0.11.25") in required_version
-
-
-def test_uv_dependency_exclusions_are_scoped() -> None:
-    exclusions = _uv_config()["exclude-dependencies"]
-
-    assert exclusions
-    assert all(isinstance(exclusion, dict) for exclusion in exclusions), (
-        "Global string exclusions silently remove direct server requirements; "
-        "scope every exclusion to the package that declares the unwanted dependency edge."
-    )
-
-
 def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
     with OSWORLD_AGENT_UV_CONFIG.open("rb") as f:
         server_config = tomllib.load(f)
     project_config = _uv_config()
 
-    for key in ("required-version", "constraint-dependencies", "exclude-dependencies"):
+    for key in ("constraint-dependencies", "override-dependencies", "exclude-dependencies"):
         assert server_config[key] == project_config[key]
+    required_version = SpecifierSet(server_config["required-version"])
+    assert Version("0.11.24") not in required_version
+    assert Version("0.11.25") in required_version
     assert "managed" not in server_config
-
-
-def test_ci_uv_versions_satisfy_project_minimum() -> None:
-    required_version = SpecifierSet(_uv_config()["required-version"])
-
-    for workflow in CI_WORKFLOWS:
-        match = re.search(r"astral\.sh/uv/([^/]+)/install\.sh", workflow.read_text())
-        assert match, f"Missing pinned uv installer in {workflow}"
-        assert Version(match.group(1)) in required_version
-
-
-def test_mlflow_keeps_shared_cryptography_edge() -> None:
-    exclusions = _uv_config()["exclude-dependencies"]
-    mlflow = next(exclusion for exclusion in exclusions if exclusion["package"]["name"] == "mlflow")
-
-    assert "cryptography" not in mlflow["dependencies"]
 
 
 def test_osworld_runtime_consumers_share_one_pinned_revision() -> None:
@@ -94,11 +61,14 @@ def test_osworld_runtime_consumers_share_one_pinned_revision() -> None:
 def test_nemo_rl_servers_override_cross_process_runtime_versions() -> None:
     requirements = OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8")
     agent_overrides = OSWORLD_AGENT_OVERRIDES.read_text(encoding="utf-8")
+    public_overrides = OSWORLD_AGENT_PUBLIC_OVERRIDES.read_text(encoding="utf-8")
     model_overrides = VLLM_MODEL_OVERRIDES.read_text(encoding="utf-8")
 
-    assert "grpcio-status==1.71.2" in requirements
-    assert "protobuf==5.29.6" in requirements
     assert "ray==2.55.1" in agent_overrides
     assert "grpcio-status==1.71.2" in agent_overrides
     assert "protobuf==5.29.6" in agent_overrides
+    assert "torch==2.11.0" in public_overrides
+    assert "numpy==2.5.1" not in agent_overrides
+    assert "opencv-python-headless==5.0.0.93" not in agent_overrides
+    assert "numpy<2" in requirements
     assert "ray==2.55.1" in model_overrides

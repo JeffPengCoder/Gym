@@ -101,14 +101,18 @@ def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
         return ""
 
 
+def get_venv_path(dir_path: Path, global_config_dict: DictConfig) -> Path:
+    """Return the server venv path for the configured venv root."""
+    root_venv_path = Path(global_config_dict[UV_VENV_DIR_KEY_NAME])
+    if root_venv_path.resolve() != PARENT_DIR.resolve():
+        return Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
+    return (dir_path / ".venv").absolute()
+
+
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
     head_server_deps = global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]
 
-    root_venv_path = global_config_dict[UV_VENV_DIR_KEY_NAME]
-    if Path(root_venv_path).resolve() != PARENT_DIR.resolve():
-        venv_path = Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
-    else:
-        venv_path = (dir_path / ".venv").absolute()
+    venv_path = get_venv_path(dir_path, global_config_dict)
 
     python_request = str(global_config_dict[PYTHON_VERSION_KEY_NAME])
     python_request_arg = python_request
@@ -123,23 +127,16 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     if managed_python_path.exists():
         managed_python = managed_python_path.read_text(encoding="utf-8").strip().lower()
         if managed_python != "true":
-            raise RuntimeError(
-                f"Expected 'true' in {managed_python_path}, got {managed_python!r}"
-            )
+            raise RuntimeError(f"Expected 'true' in {managed_python_path}, got {managed_python!r}")
         python_venv_flags = "--managed-python "
 
     # `uv pip --project` has no effect. A server-local uv.toml passed via
     # --config-file is the supported way to keep an enclosing workspace (for
     # example /opt/nemo-rl) from contributing unrelated resolver policy.
     uv_config_path = dir_path / "uv.toml"
-    uv_config_flag = (
-        f"--config-file {shlex.quote(str(uv_config_path.resolve()))} "
-        if uv_config_path.exists()
-        else ""
-    )
+    uv_config_flag = f"--config-file {shlex.quote(str(uv_config_path.resolve()))} " if uv_config_path.exists() else ""
     uv_venv_cmd = (
-        f"uv venv {uv_config_flag}--seed --allow-existing "
-        f"{python_venv_flags}--python {python_request_arg} {venv_path}"
+        f"uv venv {uv_config_flag}--seed --allow-existing {python_venv_flags}--python {python_request_arg} {venv_path}"
     )
 
     venv_python_fpath = venv_path / "bin/python"
@@ -183,9 +180,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
         elif has_pyproject_toml:
             if is_editable_install:
-                install_cmd = (
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
-                )
+                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 # with support for pre-releases, custom indexes, and version pinning

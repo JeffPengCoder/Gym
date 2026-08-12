@@ -41,6 +41,25 @@ Docker SSH setup below. Start the model first, verify the environment second,
 then prepare and run Gym. Neither the operator workstation nor a persistent
 interactive SSH session is part of runtime communication.
 
+### Chrome CDP port ownership
+
+OSWorld task setup, rather than a deployment script or the Gym adapter, owns
+the guest processes that expose Chrome DevTools. Canonical tasks launch Chrome
+with `--remote-debugging-port=1337` and then launch
+`socat tcp-listen:9222,fork tcp:localhost:1337`. `DesktopEnv.reset()` executes
+both commands from `verifier_metadata.osworld_task.config` for each fresh VM.
+
+The Docker image or OpenSandbox Pool must include `socat` and publish guest
+port 9222; Gym forwards that published HTTP/WebSocket endpoint to OSWorld. A
+user running canonical OSWorld inputs does not need to run either command
+manually. Authors of custom inputs must include the relay whenever their task
+setup starts Chrome CDP on port 1337. `prepare.py` checks this contract and
+fails early with the missing setup command instead of allowing a later 502.
+
+A standalone Sandbox API smoke test that bypasses `DesktopEnv.reset()` must
+start both Chrome and the relay before probing port 9222. Screenshot-only
+checks against the OSWorld service on port 5000 do not require this relay.
+
 ## Requirements
 
 - Linux x86_64 with Docker 20+ and access to the local Docker daemon.
@@ -120,7 +139,9 @@ prefetches setup and evaluator files, and writes a private, gitignored
 settings. Hugging Face assets use the official client cache and `HF_TOKEN` when
 configured. It keeps an existing env file unless `--force-env` is supplied.
 Python component dependencies are installed by `gym env start` from the agent
-and model server project files.
+and model server project files, except for the OSWorld agent's explicitly
+opted-in runtime packages. `prepare.py` prints the exact prefetch and install
+commands for the selected managed-agent venv before its normal start commands.
 
 Asset preparation is idempotent: `gym env start` checks the same selected JSONL and
 shared cache at server startup without contacting the remote source for task
@@ -211,9 +232,11 @@ The `gym_opensandbox` backend keeps the same OSWorld agent, task setup, action,
 and evaluator path while replacing the local or remote Docker lifecycle with
 an allocation from a server-managed KVM Pool. The Pool operator owns its VM
 image, entrypoint, and capacity. Consequently, clients provide neither a
-container image nor `--vm-path`; they only name a pre-provisioned Pool. The
-checked-in default is `osworld-kvm`, overridable with
-`OPENSANDBOX_POOL_REF`.
+VM image nor `--vm-path`; they name a pre-provisioned Pool and pass a small
+compatibility image solely because the OpenSandbox SDK requires one. The Pool
+supplies the actual OSWorld VM and does not use that compatibility image. The
+checked-in defaults are `osworld-kvm` and `busybox:1.36`, overridable with
+`OPENSANDBOX_POOL_REF` and `OPENSANDBOX_COMPAT_IMAGE`.
 
 Install Gym with the OpenSandbox SDK and configure the management endpoint.
 Keep credentials in the environment; `prepare.py` does not write the API key
@@ -251,6 +274,32 @@ python3 prepare.py \
   --force-env
 ```
 
+The managed OSWorld agent's default `requirements.txt` respects Gym's global
+security and codec exclusions. After `prepare.py` writes `env.yaml`, run the
+exact path-aware next steps that it prints. They pre-create the isolated agent
+environment and explicitly install the runtime packages that OSWorld imports
+but Gym does not ship in packages or containers:
+
+```bash
+gym env prefetch
+bash ../../responses_api_agents/osworld_agent/install_optional_runtime_deps.sh \
+  /absolute/run/root/server-venvs/responses_api_agents/osworld_agent/.venv
+```
+
+The script uses `--no-config` only for that named agent venv and installs
+cryptography, headless OpenCV, and the matching torchvision wheel. It is
+idempotent, but skips installation only when the required versions are both
+present and importable. It also reasserts the normal agent's `numpy<2`
+constraint because the OpenCV 4.8 wheel uses NumPy's 1.x ABI. These are runtime
+imports for OSWorld's desktop stack,
+but repository policy excludes them from managed package and container
+resolution. `skip_venv_if_present: true` in the generated config then lets
+`gym env start` reuse the prepared environment. `tools/start_control.sh` checks
+the same venv and exits before starting Gym with copyable remediation commands
+if the explicit step was skipped; it never installs the packages itself. The
+OSWorld agent entrypoint repeats the non-mutating check, so a direct
+`gym env start` fails early with the scoped installer command as well.
+
 OpenSandbox may return path-based gateway endpoints with required routing
 headers rather than directly routable Pod addresses. The adapter creates
 client-local forwarders that preserve those paths and headers for OSWorld's
@@ -280,6 +329,16 @@ root without `--reap`:
 .venv/bin/python benchmarks/osworld/tools/cleanup_opensandbox_run.py \
   --run-id my-osworld-opensandbox-run
 ```
+
+There is one unavoidable create-timeout boundary: the OpenSandbox server may
+accept `Sandbox.create()` while its response is lost or delayed, so the SDK
+caller can time out before receiving the sandbox ID. Gym cannot immediately
+call `kill()` on an ID it has never observed. This is an SDK/server lifecycle
+window, not a reason to maintain a second REST lifecycle in Gym. Attribution
+metadata is included in the original create request, so keep a stable,
+run-unique `OSWORLD_RUN_ID` and run the exact-ID cleanup above after an abnormal
+exit or create timeout. Once the SDK returns a handle, Gym performs normal
+`kill()` and local `close()` cleanup directly.
 
 ## Multi-environment runs
 

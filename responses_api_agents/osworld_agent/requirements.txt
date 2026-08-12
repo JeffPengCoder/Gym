@@ -20,45 +20,23 @@ anthropic
 boto3
 parallel-web
 requests-toolbelt~=1.0.0
-# Support deployment-scoped SOCKS routing to remote Docker-published OSWorld
-# service endpoints without proxying Ray or model traffic.
-PySocks~=1.7.1
 
 # OSWorld currently pins requests<2.32; prevent RequestsDependencyWarning
 # when transitive dependencies pull chardet 7.x.
 chardet<6
 
-# This process joins the parent Ray cluster, so Python (selected by
-# uv-python-version.txt) and Ray must match that cross-process boundary. Torch
-# remains CPU-only and is isolated from the trainer's CUDA environment.
-ray==2.55.1
-torch==2.11.0
-torchvision==0.26.0
-
-# OSWorld imports these packages at runtime but does not declare all of them.
-cryptography
+# The Gym adapter imports these OSWorld paths at runtime. Repository policy
+# intentionally excludes cryptography, codec-bearing OpenCV, and torchvision
+# wheels from managed server resolution. Install those explicit opt-in runtime
+# dependencies after `gym env prefetch`; see
+# install_optional_runtime_deps.sh and benchmarks/osworld/README.md.
 cffi
 scipy
-# The standalone OSWorld Python 3.12 pins do not provide a compatible Python
-# 3.13 numerical stack. These versions are also mirrored in uv-overrides.txt
-# so transitive OSWorld constraints cannot downgrade them.
-numpy==2.5.1
+numpy<2
 pynput
 ag2
 
-# The root resolver policy removes OSWorld's GUI OpenCV dependency edges; this
-# server supplies the compatible headless wheel instead.
-opencv-python-headless==5.0.0.93
-easyocr==1.7.2
 Pillow~=11.0.0
 scikit-learn
-matplotlib==3.10.6
-# The open Google gRPC dependency now selects grpcio-status 1.81.0, which
-# requires protobuf>=6.33.5, while OSWorld's google-generativeai dependency
-# still requires protobuf<6. Keep the known protobuf-5-compatible status
-# release; its grpcio>=1.71.2 lower bound remains compatible with Gym's
-# repository-wide grpcio security floor.
-grpcio-status==1.71.2
-protobuf==5.29.6
-flask~=3.0.0
+matplotlib~=3.7.4
 func-timeout

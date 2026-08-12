@@ -8,13 +8,21 @@ constraint-dependencies = [
     "grpcio>=1.81.0rc1",
 ]
 
-# Mirror Gym's resolver-relevant scoped exclusions. The dependency-policy test
-# prevents this server-local copy from drifting from Gym's project policy.
-[[exclude-dependencies]]
-package = { name = "mlflow" }
-dependencies = [
+# Mirror Gym's public resolver policy because an explicit config file does not
+# inherit the checkout's [tool.uv] table. The OSWorld opt-in installer uses
+# --no-config to add the runtime packages deliberately after env prefetch.
+override-dependencies = [
+    "spacy>=3.8.13",
+    "opencv-python-headless; sys_platform == 'never'",
+    "torchvision; sys_platform == 'never'",
+    "torchaudio; sys_platform == 'never'",
+    "pycountry; sys_platform == 'never'",
+]
+exclude-dependencies = [
+    "fasttext-wheel",
     "alembic",
     "blinker",
+    "cryptography",
     "flask",
     "flask-cors",
     "graphene",
@@ -28,25 +36,5 @@ dependencies = [
     "wcwidth",
     "werkzeug",
     "waitress",
-]
-
-[[exclude-dependencies]]
-package = { name = "osworld" }
-dependencies = [
-    "agp-client",
-    "opencv-python",
-    "opencv-contrib-python",
-]
-
-[[exclude-dependencies]]
-package = { name = "paddleocr" }
-dependencies = [
-    "opencv-python",
-    "opencv-contrib-python",
-]
-
-[[exclude-dependencies]]
-package = { name = "albumentations" }
-dependencies = [
-    "opencv-python",
+    "diskcache",
 ]
