@@ -95,8 +95,7 @@ def _validate_chrome_cdp_relay(task: dict[str, Any], *, line_number: int) -> Non
 
     commands = _setup_command_texts(task)
     starts_chrome_cdp = any(
-        re.search(r"--remote-debugging-port(?:=|\s+)1337(?!\d)", command, flags=re.IGNORECASE)
-        for command in commands
+        re.search(r"--remote-debugging-port(?:=|\s+)1337(?!\d)", command, flags=re.IGNORECASE) for command in commands
     )
     has_cdp_relay = any(
         re.search(r"\bsocat\b", command, flags=re.IGNORECASE)
