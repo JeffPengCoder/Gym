@@ -105,9 +105,22 @@ service endpoints, status, and cleanup.
 | `sandbox_desktop_env.py` | Scoped `DesktopEnv` compatibility wiring for the Gym Sandbox backend |
 | `sandbox_provider.py` | OSWorld provider contract backed by Gym Sandbox lifecycle and endpoints |
 
-The runtime uses a pinned, unmodified OSWorld dependency. Compatibility code
-is opt-in or narrowly scoped in the Gym adapter rather than patched into the
-OSWorld checkout.
+### OSWorld source dependency
+
+This agent intentionally installs the immutable
+[`JeffPengCoder/OSWorld`](https://github.com/JeffPengCoder/OSWorld) fork at
+commit `6cc00cc53f1d4c11a6dac559f53296347e41a452`, as declared in
+[`requirements.txt`](requirements.txt). That revision starts from upstream
+OSWorld `83e85344` and includes the `nv-gym` provider overlay, proxy-runtime
+repair, VLC gateway-auth fallback, and the privileged-setup fix used by the
+canonical restricted-home fixture. It is therefore a runtime dependency of
+this branch, not an interchangeable link to upstream OSWorld `main`.
+
+The dependency is consumed as a commit-addressed source archive so uv does not
+initialize optional OSWorld submodules. Gym does not mutate the installed
+checkout at runtime: additional compatibility behavior remains opt-in or
+narrowly scoped in this adapter. Update the fork URL or commit only together
+with resolver tests, the restricted-home fixture, and a real OSWorld rollout.
 
 ## Supported runners
 
