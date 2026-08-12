@@ -32,6 +32,15 @@ VLLM_MODEL_PYTHON = ROOT / "responses_api_models/vllm_model/uv-python-version.tx
 VLLM_MODEL_MANAGED_PYTHON = ROOT / "responses_api_models/vllm_model/uv-managed-python.txt"
 OSWORLD_AGENT_PYTHON = ROOT / "responses_api_agents/osworld_agent/uv-python-version.txt"
 OSWORLD_AGENT_MANAGED_PYTHON = ROOT / "responses_api_agents/osworld_agent/uv-managed-python.txt"
+OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES = {
+    "alibabacloud-ecs20140526",
+    "alibabacloud-tea-openapi",
+    "alibabacloud-tea-util",
+    "azure-identity",
+    "azure-mgmt-compute",
+    "azure-mgmt-network",
+    "volcengine-python-sdk",
+}
 
 
 def _uv_config() -> dict:
@@ -44,8 +53,12 @@ def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
         server_config = tomllib.load(f)
     project_config = _uv_config()
 
-    for key in ("constraint-dependencies", "override-dependencies", "exclude-dependencies"):
+    for key in ("constraint-dependencies", "override-dependencies"):
         assert server_config[key] == project_config[key]
+    project_exclusions = set(project_config["exclude-dependencies"])
+    server_exclusions = set(server_config["exclude-dependencies"])
+    assert project_exclusions <= server_exclusions
+    assert server_exclusions - project_exclusions == OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES
     required_version = SpecifierSet(server_config["required-version"])
     assert Version("0.11.24") not in required_version
     assert Version("0.11.25") in required_version

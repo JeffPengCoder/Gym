@@ -238,6 +238,10 @@ gym eval run --no-serve
 
 The installer targets only the managed OSWorld agent venv. It does not modify
 the system Python, Gym's root venv, the model server, or the OSWorld VM. The
+managed environment excludes OSWorld's Azure, Aliyun, and Volcengine VM
+provisioning SDKs: this adapter supports direct Docker plus Gym Docker and
+OpenSandbox lifecycle, and none of those paths imports the excluded providers.
+The pinned OSWorld task/setup/evaluator code remains installed unchanged. The
 public `benchmarks/osworld/tools/start_control.sh` wrapper checks that the
 required package versions are importable and fails with the exact setup
 commands when this explicit step has been omitted. The agent entrypoint repeats
