@@ -4,7 +4,7 @@
 [project]
 name = "browsergym-web-resources-server"
 version = "0.0.0"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.13.14,<3.14"
 dependencies = [
     "nemo-gym[dev]",
     "browsergym-webarena==0.14.3",

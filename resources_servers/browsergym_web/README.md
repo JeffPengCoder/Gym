@@ -46,13 +46,23 @@ referenced by the prepared task population. Validate those URLs before a long
 run; a missing task image is reported as a masked `benchmark_precondition`, not
 as a model failure or a retryable capacity error.
 
-VisualWebArena 0.0.15 also hard-codes `gpt-4-1106-preview` for fuzzy and
-unachievable-answer evaluator calls. Set `OPENAI_BASE_URL` and
-`OPENAI_API_KEY` for the judge endpoint, then set
+WebArena and VisualWebArena also hard-code `gpt-4-1106-preview` for fuzzy and
+unachievable-answer evaluator calls. Set `evaluator_base_url`, put the judge
+credential in the environment variable named by `evaluator_api_key_env`
+(default `OPENAI_API_KEY`), and set `webarena_evaluator_model` and/or
 `visualwebarena_evaluator_model` to an available OpenAI-compatible model. The
-adapter remaps only the model argument; upstream evaluator prompts and score
-parsing remain unchanged. Leave the setting null to retain exact upstream
-behavior.
+adapter changes only the model argument; upstream prompts, generation options,
+score parsers, and reward composition remain unchanged. The effective judge
+model is included in `verifier_version`. A task whose retained metadata
+declares a model-backed evaluator is rejected before browser startup when its
+evaluator model is absent. This becomes a masked configuration error rather
+than a benchmark failure.
+
+`libvisualwebarena==0.0.15` constructs an OpenAI client when its evaluator
+module is imported, even for a rule-only task. For a task whose metadata proves
+that no model evaluator is reachable, the adapter supplies an explicit
+non-secret placeholder key only to satisfy that import. It never substitutes a
+placeholder for a fuzzy or unachievable-answer judge call.
 
 ## Isolation and scheduling boundary
 
@@ -70,9 +80,17 @@ external lock/replica manager. A fresh browser context is not a site reset, and
 state-changing suites must still use the benchmark's official reset procedure.
 
 Step `execution_ok` reports whether the browser action executed; evaluator
-score is returned separately as `benchmark_reward`. Browser/evaluator
-infrastructure failures are surfaced for masking rather than converted into a
-benchmark score of zero.
+score is returned separately as `benchmark_reward`. BrowserGym already catches
+action mapping/execution exceptions and reports them as `last_action_error`.
+An exception escaping `Env.step()` therefore remains an evaluator/runtime
+failure and is surfaced for masking rather than converted into a policy action
+failure or benchmark score of zero.
+
+Formal `evaluate()` output uses the native evaluator reward attached to the
+terminal observation (`score_semantics=terminal_native_evaluator_reward`). The
+largest per-step reward is retained as `best_observed_reward` metadata for
+diagnostics, but does not silently replace the official final score. RL callers
+can still consume every step's `benchmark_reward`.
 
 The HTTP error envelope includes `error_kind` and `retryable`. Capacity,
 session-loss, and session-conflict failures remain retryable. Invalid tasks and

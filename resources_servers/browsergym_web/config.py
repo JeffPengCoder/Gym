@@ -27,7 +27,10 @@ class BrowserGymWebResourcesServerConfig(BaseResourcesServerConfig):
     require_auth: bool = False
     auth_token_env: str = "BROWSERGYM_WEB_RESOURCES_TOKEN"
     site_pool_mode: Literal["unmanaged", "local_locks"] = "unmanaged"
+    webarena_evaluator_model: str | None = None
     visualwebarena_evaluator_model: str | None = None
+    evaluator_base_url: str | None = None
+    evaluator_api_key_env: str = "OPENAI_API_KEY"
     allowed_benchmarks: list[WebBenchmark] = Field(default_factory=lambda: list(WebBenchmark))
 
     @model_validator(mode="after")
@@ -43,3 +46,6 @@ class BrowserGymWebResourcesServerConfig(BaseResourcesServerConfig):
 
     def auth_token(self) -> str:
         return os.environ.get(self.auth_token_env, "").strip()
+
+    def evaluator_api_key(self) -> str:
+        return os.environ.get(self.evaluator_api_key_env, "").strip()

@@ -602,3 +602,38 @@ async def test_run_classifies_seed_precondition_as_terminal_masked_failure():
     assert result.artifact_session_id is None
     assert result.recording_artifacts == []
     agent._post_json.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_classifies_missing_evaluator_as_terminal_configuration_failure():
+    agent = _agent(seed_request_timeout_secs=1.0)
+    error = ClientResponseError(
+        request_info=MagicMock(),
+        history=(),
+        status=422,
+        message="evaluator is not configured",
+    )
+    error.response_content = json.dumps(
+        {
+            "detail": "configure webarena_evaluator_model",
+            "error_kind": "evaluator_configuration",
+            "retryable": False,
+        }
+    ).encode()
+    agent._post_json = AsyncMock(side_effect=error)
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": "Solve"},
+        web_task=WebTask(benchmark=WebBenchmark.WEBARENA, task_id="8"),
+    )
+
+    result = await agent.run(request, body)
+    dumped = result.model_dump()
+
+    assert result.mask_sample is True
+    assert result.failure_kind == "evaluator_configuration"
+    assert dumped["_ng_failure_class"] == "configuration_error"
+    assert dumped["_ng_failure_terminal"] is True
+    assert result.verifier_result.metadata["error_kind"] == "evaluator_configuration"
+    agent._post_json.assert_awaited_once()

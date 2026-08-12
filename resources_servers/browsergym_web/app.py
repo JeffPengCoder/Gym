@@ -13,6 +13,10 @@ from pydantic import PrivateAttr
 
 from nemo_gym.base_resources_server import SimpleResourcesServer
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.browsergym_web.backend import (
+    EvaluatorConfigurationError,
+    EvaluatorInfrastructureError,
+)
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
 from resources_servers.browsergym_web.models import (
     WebCloseResponse,
@@ -129,6 +133,24 @@ class BrowserGymWebResourcesServer(SimpleResourcesServer):
                 detail=str(exc),
                 error_kind="benchmark_precondition",
                 retryable=False,
+            )
+
+        @app.exception_handler(EvaluatorConfigurationError)
+        async def evaluator_configuration(_request, exc: EvaluatorConfigurationError):
+            return _error_response(
+                status_code=422,
+                detail=str(exc),
+                error_kind="evaluator_configuration",
+                retryable=False,
+            )
+
+        @app.exception_handler(EvaluatorInfrastructureError)
+        async def evaluator_infrastructure(_request, exc: EvaluatorInfrastructureError):
+            return _error_response(
+                status_code=502,
+                detail=str(exc),
+                error_kind="evaluator_infrastructure",
+                retryable=True,
             )
 
         @app.exception_handler(ValueError)

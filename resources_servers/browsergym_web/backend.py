@@ -7,12 +7,14 @@ from __future__ import annotations
 import importlib
 import json
 from collections import deque
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 from nemo_gym.web.models import (
     WebAction,
     WebArtifactRef,
+    WebBenchmark,
     WebObservation,
     WebObservationProfile,
     WebStepResult,
@@ -23,7 +25,20 @@ from nemo_gym.web.models import (
 from resources_servers.browsergym_web.artifacts import WebArtifactStore
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
 from resources_servers.browsergym_web.profiles import BrowserGymLaunchSpec, resolve_browsergym_profile
-from resources_servers.browsergym_web.visualwebarena_compat import configure_evaluator_model
+from resources_servers.browsergym_web.visualwebarena_compat import (
+    configure_evaluator_environment,
+    configure_evaluator_model,
+    configure_webarena_evaluator_model,
+    rule_only_evaluator_import_environment,
+)
+
+
+class EvaluatorConfigurationError(RuntimeError):
+    """A model-backed native evaluator is not configured for this task."""
+
+
+class EvaluatorInfrastructureError(RuntimeError):
+    """A native evaluator or post-action environment operation failed."""
 
 
 def _json_safe(value: Any) -> Any:
@@ -81,7 +96,8 @@ class BrowserGymBackend:
         self.spec: BrowserGymLaunchSpec | None = None
         self._observation: WebObservation | None = None
         self._step_index = 0
-        self._latest_score = 0.0
+        self._last_benchmark_reward = 0.0
+        self._best_observed_reward = 0.0
         self._terminated = False
         self._truncated = False
         self._evidence: deque[WebArtifactRef] = deque(maxlen=config.max_evidence_screenshots)
@@ -89,23 +105,34 @@ class BrowserGymBackend:
     def reset(self, task: WebTask) -> tuple[WebObservation, dict[str, Any]]:
         self.close()
         spec = resolve_browsergym_profile(task)
-        env = self._make_environment(spec)
-        try:
-            raw_observation, raw_info = env.reset(seed=task.seed)
-        except Exception:
-            env.close()
-            raise
-        if spec.module == "browsergym.visualwebarena":
-            # BrowserGym defers construction of the upstream task until
-            # env.reset(). Only then has VisualWebArena installed its legacy
-            # DATASET/site mapping and imported the evaluator modules.
+        evaluator_model = self._evaluator_model(task.benchmark)
+        needs_rule_only_import_environment = self._prepare_evaluator(task)
+        import_environment = (
+            rule_only_evaluator_import_environment(base_url=self.config.evaluator_base_url)
+            if needs_rule_only_import_environment
+            else nullcontext()
+        )
+        with import_environment:
+            env = self._make_environment(spec)
+            try:
+                raw_observation, raw_info = env.reset(seed=task.seed)
+            except Exception:
+                env.close()
+                raise
+        # BrowserGym defers construction of the upstream task until env.reset().
+        # Only then have the benchmark packages installed their legacy dataset
+        # mappings and imported the evaluator modules.
+        if spec.module == "browsergym.webarena":
+            configure_webarena_evaluator_model(self.config.webarena_evaluator_model)
+        elif spec.module == "browsergym.visualwebarena":
             configure_evaluator_model(self.config.visualwebarena_evaluator_model)
 
         self.env = env
         self.task = task
         self.spec = spec
         self._step_index = 0
-        self._latest_score = 0.0
+        self._last_benchmark_reward = 0.0
+        self._best_observed_reward = 0.0
         self._terminated = False
         self._truncated = False
         self._evidence.clear()
@@ -121,8 +148,8 @@ class BrowserGymBackend:
                 "verifier_version": self._verifier_version(),
             }
         )
-        if task.benchmark.value == "visualwebarena" and self.config.visualwebarena_evaluator_model:
-            info["evaluator_model"] = self.config.visualwebarena_evaluator_model
+        if evaluator_model:
+            info["evaluator_model"] = evaluator_model
         return self._observation, info
 
     def observe(self) -> WebObservation:
@@ -138,38 +165,26 @@ class BrowserGymBackend:
 
         try:
             raw_observation, reward, terminated, truncated, raw_info = self.env.step(action.script)
-        except ValueError as exc:
-            # BrowserGym's strict high-level action mapper raises ValueError for
-            # a syntactically valid but non-executable call (for example a bad
-            # argument shape or element reference).  This is an agent action
-            # failure, not a resource-server outage: return it in the next
-            # observation so the policy can correct itself instead of turning
-            # the whole rollout into an HTTP 400 infrastructure sidecar.
-            self._step_index += 1
-            error = f"{type(exc).__name__}: {exc}"
-            assert self._observation is not None
-            self._observation = self._observation.model_copy(
-                update={
-                    "last_action": action.script,
-                    "last_action_error": error,
-                }
-            )
-            return WebStepResult(
-                observation=self._observation,
-                execution_ok=False,
-                benchmark_reward=0.0,
-                terminated=False,
-                truncated=False,
-                info={"action_error": error},
-            )
+        except Exception as exc:
+            # BrowserGym catches action-mapping and action-execution errors
+            # inside Env.step() and exposes them through last_action_error. A
+            # exception escaping Env.step() therefore comes from validation or
+            # another post-action runtime boundary and must not be scored as a
+            # correctable policy action.
+            if isinstance(exc, EvaluatorInfrastructureError):
+                raise
+            raise EvaluatorInfrastructureError(f"{type(exc).__name__}: {exc}") from exc
         self._step_index += 1
-        self._latest_score = max(self._latest_score, float(reward or 0.0))
+        self._last_benchmark_reward = float(reward or 0.0)
+        self._best_observed_reward = max(self._best_observed_reward, self._last_benchmark_reward)
         self._terminated = bool(terminated)
         self._truncated = bool(truncated)
         self._observation = self._convert_observation(raw_observation)
         info = _json_safe(raw_info)
         if not isinstance(info, dict):
             info = {"value": info}
+        if self._observation.last_action_error:
+            info["action_error"] = self._observation.last_action_error
         return WebStepResult(
             observation=self._observation,
             execution_ok=not bool(self._observation.last_action_error),
@@ -202,7 +217,11 @@ class BrowserGymBackend:
             )
             self.step(action)
 
-        score = float(self._latest_score)
+        # The formal benchmark result is the native evaluator reward attached
+        # to the terminal observation. Per-step rewards remain available to RL
+        # consumers, and the best observed reward is retained only as audit
+        # metadata rather than silently replacing the official final score.
+        score = float(self._last_benchmark_reward)
         return WebVerifierResult(
             reward=score,
             raw_score=score,
@@ -214,6 +233,8 @@ class BrowserGymBackend:
                 "benchmark": self.task.benchmark.value,
                 "terminated": self._terminated,
                 "truncated": self._truncated,
+                "score_semantics": "terminal_native_evaluator_reward",
+                "best_observed_reward": self._best_observed_reward,
             },
         )
 
@@ -257,10 +278,44 @@ class BrowserGymBackend:
     def _verifier_version(self) -> str:
         if self.spec is None:
             raise RuntimeError("cannot identify verifier without an active task")
-        model = self.config.visualwebarena_evaluator_model
-        if self.spec.module == "browsergym.visualwebarena" and model:
+        model = self._evaluator_model(self.task.benchmark) if self.task is not None else None
+        if self.spec.module in {"browsergym.webarena", "browsergym.visualwebarena"} and model:
             return f"{self.spec.verifier_version}:judge={model}"
         return self.spec.verifier_version
+
+    def _prepare_evaluator(self, task: WebTask) -> bool:
+        model = self._evaluator_model(task.benchmark)
+        if not model:
+            if task.benchmark in {WebBenchmark.WEBARENA, WebBenchmark.VISUALWEBARENA} and _uses_model_evaluator(
+                task.original_metadata
+            ):
+                raise EvaluatorConfigurationError(
+                    f"{task.benchmark.value} task {task.task_id} requires a model-backed native evaluator; "
+                    f"configure {task.benchmark.value}_evaluator_model"
+                )
+            # libvisualwebarena 0.0.15 creates its OpenAI clients while
+            # importing the evaluator module, including for rule-only tasks.
+            # The caller temporarily satisfies that import only when no model
+            # evaluator is reachable. Model-evaluated tasks are rejected above.
+            return task.benchmark == WebBenchmark.VISUALWEBARENA
+
+        api_key = self.config.evaluator_api_key()
+        if not api_key:
+            raise EvaluatorConfigurationError(
+                f"{self.config.evaluator_api_key_env} must be set when {task.benchmark.value}_evaluator_model is configured"
+            )
+        configure_evaluator_environment(
+            api_key=api_key,
+            base_url=self.config.evaluator_base_url,
+        )
+        return False
+
+    def _evaluator_model(self, benchmark: WebBenchmark) -> str | None:
+        if benchmark == WebBenchmark.WEBARENA:
+            return self.config.webarena_evaluator_model
+        if benchmark == WebBenchmark.VISUALWEBARENA:
+            return self.config.visualwebarena_evaluator_model
+        return None
 
     def _convert_observation(self, raw: dict[str, Any]) -> WebObservation:
         if self.task is None or self.spec is None:
@@ -338,3 +393,13 @@ class BrowserGymBackend:
             elapsed_time=max(0.0, _first_number(raw.get("elapsed_time"))),
             metadata=metadata,
         )
+
+
+def _uses_model_evaluator(value: Any) -> bool:
+    """Detect upstream task metadata that can invoke a fuzzy/UA judge."""
+
+    if isinstance(value, dict):
+        return any(str(key).lower() == "fuzzy_match" or _uses_model_evaluator(item) for key, item in value.items())
+    if isinstance(value, (list, tuple, set)):
+        return any(_uses_model_evaluator(item) for item in value)
+    return False

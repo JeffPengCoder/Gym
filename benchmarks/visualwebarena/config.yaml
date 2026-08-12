@@ -10,6 +10,9 @@ visualwebarena_benchmark_resources_server:
   resources_servers:
     browsergym_web:
       allowed_benchmarks: [visualwebarena]
+      visualwebarena_evaluator_model: ${oc.select:visualwebarena_evaluator_model,null}
+      evaluator_base_url: ${oc.select:web_evaluator_base_url,null}
+      evaluator_api_key_env: ${oc.select:web_evaluator_api_key_env,OPENAI_API_KEY}
 
 visualwebarena_benchmark_agent:
   _inherit_from: web_agent
