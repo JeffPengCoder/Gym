@@ -17,6 +17,12 @@ a newer checkout inside an older accepted container: the parent CLI may keep
 running there, while each isolated server venv is resolved with the compatible
 managed interpreter. For offline runs, pre-seed uv's Python install directory
 and export `UV_PYTHON_INSTALL_DIR` before `gym env prefetch`.
+If the parent Ray cluster is still on a different 3.13 patch, the operator must
+either upgrade the whole cluster or explicitly set
+`RAY_DEFAULT_PYTHON_VERSION_MATCH_LEVEL=minor`; Ray otherwise requires an
+exact patch match. The relaxed mode is only valid within one Python minor and
+must be covered by a real server-registration smoke, not assumed from a
+successful resolver.
 
 ## Request and response contract
 
