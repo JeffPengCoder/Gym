@@ -41,6 +41,25 @@ Docker SSH setup below. Start the model first, verify the environment second,
 then prepare and run Gym. Neither the operator workstation nor a persistent
 interactive SSH session is part of runtime communication.
 
+### Chrome CDP port ownership
+
+OSWorld task setup, rather than a deployment script or the Gym adapter, owns
+the guest processes that expose Chrome DevTools. Canonical tasks launch Chrome
+with `--remote-debugging-port=1337` and then launch
+`socat tcp-listen:9222,fork tcp:localhost:1337`. `DesktopEnv.reset()` executes
+both commands from `verifier_metadata.osworld_task.config` for each fresh VM.
+
+The Docker image or OpenSandbox Pool must include `socat` and publish guest
+port 9222; Gym forwards that published HTTP/WebSocket endpoint to OSWorld. A
+user running canonical OSWorld inputs does not need to run either command
+manually. Authors of custom inputs must include the relay whenever their task
+setup starts Chrome CDP on port 1337. `prepare.py` checks this contract and
+fails early with the missing setup command instead of allowing a later 502.
+
+A standalone Sandbox API smoke test that bypasses `DesktopEnv.reset()` must
+start both Chrome and the relay before probing port 9222. Screenshot-only
+checks against the OSWorld service on port 5000 do not require this relay.
+
 ## Requirements
 
 - Linux x86_64 with Docker 20+ and access to the local Docker daemon.
