@@ -11,6 +11,13 @@ This directory owns the reusable runtime. Dataset preparation, benchmark
 configuration, model-specific overlays, serving recipes, and the full user
 guide live in the [OSWorld benchmark](../../benchmarks/osworld/README.md).
 
+The OSWorld agent and its vLLM transport use a managed Python interpreter at
+the repository's declared Python floor. This matters when Gym is loaded from
+a newer checkout inside an older accepted container: the parent CLI may keep
+running there, while each isolated server venv is resolved with the compatible
+managed interpreter. For offline runs, pre-seed uv's Python install directory
+and export `UV_PYTHON_INSTALL_DIR` before `gym env prefetch`.
+
 ## Request and response contract
 
 The rollout collector sends the complete upstream task under

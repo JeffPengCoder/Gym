@@ -28,6 +28,10 @@ OSWORLD_AGENT_UV_CONFIG = ROOT / "responses_api_agents/osworld_agent/uv.toml"
 OSWORLD_AGENT_PUBLIC_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/overrides.txt"
 OSWORLD_RESOURCES_PROJECT = ROOT / "resources_servers/osworld/pyproject.toml"
 VLLM_MODEL_OVERRIDES = ROOT / "responses_api_models/vllm_model/uv-overrides.txt"
+VLLM_MODEL_PYTHON = ROOT / "responses_api_models/vllm_model/uv-python-version.txt"
+VLLM_MODEL_MANAGED_PYTHON = ROOT / "responses_api_models/vllm_model/uv-managed-python.txt"
+OSWORLD_AGENT_PYTHON = ROOT / "responses_api_agents/osworld_agent/uv-python-version.txt"
+OSWORLD_AGENT_MANAGED_PYTHON = ROOT / "responses_api_agents/osworld_agent/uv-managed-python.txt"
 
 
 def _uv_config() -> dict:
@@ -72,3 +76,13 @@ def test_nemo_rl_servers_override_cross_process_runtime_versions() -> None:
     assert "opencv-python-headless==5.0.0.93" not in agent_overrides
     assert "numpy<2" in requirements
     assert "ray==2.55.1" in model_overrides
+
+
+def test_nemo_rl_servers_use_the_project_python_floor() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as f:
+        python_floor = tomllib.load(f)["project"]["requires-python"].removeprefix(">=")
+
+    assert OSWORLD_AGENT_PYTHON.read_text(encoding="utf-8").strip() == python_floor
+    assert VLLM_MODEL_PYTHON.read_text(encoding="utf-8").strip() == python_floor
+    assert OSWORLD_AGENT_MANAGED_PYTHON.read_text(encoding="utf-8").strip() == "true"
+    assert VLLM_MODEL_MANAGED_PYTHON.read_text(encoding="utf-8").strip() == "true"
