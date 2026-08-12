@@ -189,7 +189,7 @@ def test_opensandbox_backend_adds_pool_provider_config() -> None:
     )
 
 
-def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path) -> None:
+def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path, capsys) -> None:
     vm_path = tmp_path / "Ubuntu.qcow2"
     vm_path.write_bytes(b"qcow2-base")
     env_path = tmp_path / "env.yaml"
@@ -226,6 +226,15 @@ def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path) -> 
     agent = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
     assert agent["sandbox_provider"] == "osworld_sandbox"
     assert agent["vm_path"] == str(vm_path.resolve())
+
+    output = capsys.readouterr().out
+    managed_venv = tmp_path / "server-venvs/responses_api_agents/osworld_agent/.venv"
+    assert "the OSWorld runtime package install is an explicit opt-in" in output
+    assert "gym env prefetch" in output
+    assert "install_optional_runtime_deps.sh" in output
+    assert str(managed_venv) in output
+    assert output.index("gym env prefetch") < output.index("install_optional_runtime_deps.sh")
+    assert output.index("install_optional_runtime_deps.sh") < output.index("gym env start")
 
 
 def test_write_task_shards_are_disjoint_complete_and_manifested(tmp_path: Path) -> None:

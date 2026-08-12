@@ -22,11 +22,13 @@ import hashlib
 import json
 import os
 import re
+import shlex
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from benchmarks.osworld.assets import DEFAULT_SETUP_CACHE, ensure_osworld_assets
+from responses_api_agents.osworld_agent.runtime_dependencies import managed_agent_venv_path
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent
@@ -35,6 +37,9 @@ DEFAULT_CONFIG = BENCHMARK_DIR / "config.yaml"
 DEFAULT_INPUT = BENCHMARK_DIR / "data" / "example.jsonl"
 DEFAULT_OUTPUT = REPO_ROOT / "results" / "osworld" / "rollouts.jsonl"
 DEFAULT_ENV = BENCHMARK_DIR / "env.yaml"
+OSWORLD_RUNTIME_DEPS_INSTALLER = (
+    REPO_ROOT / "responses_api_agents" / "osworld_agent" / "install_optional_runtime_deps.sh"
+)
 
 BASE_AGENT_CONFIG = REPO_ROOT / "responses_api_agents" / "osworld_agent" / "configs" / "osworld_agent.yaml"
 OPENAI_MODEL_CONFIG = REPO_ROOT / "responses_api_models" / "openai_model" / "configs" / "openai_model.yaml"
@@ -599,8 +604,21 @@ def main() -> None:
             force=args.force_env,
         )
 
-    print("\nNext steps:")
-    print(f"  cd {args.env_file.expanduser().resolve().parent}")
+    agent_venv = managed_agent_venv_path(REPO_ROOT, args.server_venv_root)
+    env_dir = args.env_file.expanduser().resolve().parent
+    print("\nNext steps (the OSWorld runtime package install is an explicit opt-in):")
+    print(f"  cd {shlex.quote(str(env_dir))}")
+    print("  gym env prefetch")
+    print(
+        "  "
+        + shlex.join(
+            [
+                "bash",
+                str(OSWORLD_RUNTIME_DEPS_INSTALLER),
+                str(agent_venv),
+            ]
+        )
+    )
     print("  gym env start")
     print("  gym eval run --no-serve")
 

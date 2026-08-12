@@ -7,7 +7,7 @@ configuration entry point; host checks and lifecycle wrappers live here:
 ```text
 model host       -> probe_model_endpoint.py
 environment host -> check_environment.sh
-agent/control     -> prepare.py -> start_control.sh -> run_eval.sh
+agent/control     -> prepare.py -> prefetch/opt-in deps -> start_control.sh -> run_eval.sh
 abnormal recovery -> cleanup_run.sh -> cleanup_opensandbox_run.py
 ```
 
@@ -15,7 +15,7 @@ abnormal recovery -> cleanup_run.sh -> cleanup_opensandbox_run.py
 | --- | --- |
 | `probe_model_endpoint.py` | Require the configured model identity and optionally exercise the one- or three-image chat-completions request shape |
 | `check_environment.sh` | Validate local or SSH-reached Linux/Docker/KVM/qcow2 environment-host readiness |
-| `start_control.sh` | Preflight the agent/control build toolchain, then run `gym env start` |
+| `start_control.sh` | Preflight the build toolchain and explicitly prepared OSWorld agent venv, then run `gym env start` |
 | `run_eval.sh` | Supervisor-friendly wrapper around `gym eval run --no-serve` |
 | `cleanup_run.sh` | Recovery-only cleanup for stale processes or labeled Sandbox containers after abnormal termination |
 | `cleanup_opensandbox_run.py` | Read-only audit or opt-in reaping of OpenSandbox instances matching one exact run ID |
@@ -55,6 +55,13 @@ Both runtime wrappers require `OSWORLD_RUN_ID`. Set
 `NEMO_GYM_CONTROL_HOST` when the control services must advertise a non-loopback
 address. Their optional positional argument selects the root for logs and
 results; it defaults to the Gym repository root.
+
+`prepare.py` prints the exact `gym env prefetch` and
+`install_optional_runtime_deps.sh` commands for the configured managed agent
+venv. The install remains an explicit opt-in because these packages are
+excluded from Gym's shipped environments. `start_control.sh` validates their
+versions and imports and prints the same remediation if they are not ready; it
+does not install anything automatically.
 
 For a split-host Gym Docker deployment, run the wrappers on the agent/control
 host and point its normal Docker CLI at the OSWorld environment host. The
