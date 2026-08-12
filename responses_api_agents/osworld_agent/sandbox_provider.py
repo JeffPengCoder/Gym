@@ -138,9 +138,10 @@ class GymSandboxDesktopProvider:
         values["metadata"] = metadata
 
         if self._sandbox_provider_name == "opensandbox":
-            if values.get("image"):
+            if not values.get("image"):
                 raise ValueError(
-                    "OpenSandbox OSWorld Pool allocation must be image-less; the Pool owns the QEMU image"
+                    "OpenSandbox OSWorld Pool allocation requires sandbox_spec.image "
+                    "for SDK validation; the Pool still supplies the actual OSWorld VM"
                 )
             provider_options = dict(values.get("provider_options") or {})
             extensions = dict(provider_options.get("extensions") or {})
@@ -150,12 +151,14 @@ class GymSandboxDesktopProvider:
             values["provider_options"] = provider_options
             values.setdefault("ttl_s", 7200)
             values.setdefault("ready_timeout_s", self._ready_timeout_s)
-            # The reusable OSWorld profile also carries Docker/QEMU defaults.
-            # They are intentionally discarded because the server-side Pool
-            # owns the image, entrypoint, environment, and resources.
+            # The SDK requires an image argument even for Pool allocation, but
+            # poolRef supplies the actual prebuilt OSWorld VM. The reusable
+            # profile's entrypoint, environment, and resources remain Docker-
+            # specific and are intentionally discarded.
             pool_fields = {
                 key: values[key]
                 for key in (
+                    "image",
                     "ttl_s",
                     "ready_timeout_s",
                     "ports",
@@ -205,10 +208,7 @@ class GymSandboxDesktopProvider:
         return SandboxSpec(**values)
 
     def _resolve_service_endpoints(self, sandbox: Sandbox) -> tuple[str, dict[int, int]]:
-        endpoints = {
-            container_port: sandbox.endpoint(container_port)
-            for container_port in OSWORLD_SERVICE_PORTS
-        }
+        endpoints = {container_port: sandbox.endpoint(container_port) for container_port in OSWORLD_SERVICE_PORTS}
 
         # Preserve the zero-hop path for local Docker or a routed Pod network.
         try:
@@ -222,8 +222,7 @@ class GymSandboxDesktopProvider:
             hosts = {host for host, _ in direct.values()}
             if len(hosts) == 1:
                 return hosts.pop(), {
-                    container_port: endpoint_port
-                    for container_port, (_, endpoint_port) in direct.items()
+                    container_port: endpoint_port for container_port, (_, endpoint_port) in direct.items()
                 }
 
         # OpenSandbox's externally reachable endpoint is a path-based gateway
