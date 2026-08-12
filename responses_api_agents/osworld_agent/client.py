@@ -491,6 +491,12 @@ def _patch_setup_execute_contract() -> None:
 
             returncode = int(result["returncode"])
             command_text = " ".join(rendered_command) if isinstance(rendered_command, list) else rendered_command
+            if self.client_password:
+                # The rendered payload must contain the password for sudo -S,
+                # but diagnostics and raised errors are durable artifacts.
+                # Preserve the task placeholder there instead of leaking the
+                # guest credential.
+                command_text = command_text.replace(self.client_password, "{CLIENT_PASSWORD}")
             if returncode not in allowed:
                 command_output = f"{result.get('output', '')}\n{result.get('error', '')}"
                 if any(marker in command_output for marker in package_lock_markers) and package_lock_retries < 30:

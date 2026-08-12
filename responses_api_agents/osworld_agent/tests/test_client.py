@@ -1397,6 +1397,25 @@ def test_setup_retries_guest_package_manager_lock(monkeypatch, tmp_path: Path) -
     assert len(post_calls) == 2
 
 
+def test_setup_failure_redacts_rendered_client_password(monkeypatch, tmp_path: Path) -> None:
+    controller_class, _, post_calls = _install_fake_setup_module(
+        monkeypatch,
+        {"returncode": 1, "output": "", "error": "permission denied"},
+    )
+    osworld_client._patch_setup_execute_contract()
+    controller = controller_class(str(tmp_path))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        controller._execute_setup(
+            "echo {CLIENT_PASSWORD} | sudo -S mkdir /home/test1",
+            shell=True,
+        )
+
+    assert "{CLIENT_PASSWORD}" in str(exc_info.value)
+    assert controller.client_password not in str(exc_info.value)
+    assert controller.client_password in post_calls[0]["data"]
+
+
 def test_setup_on_nonzero_score_zero_is_a_valid_evaluator_outcome(monkeypatch, tmp_path: Path) -> None:
     controller_class, _, _ = _install_fake_setup_module(
         monkeypatch,
