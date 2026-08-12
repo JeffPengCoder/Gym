@@ -139,7 +139,9 @@ prefetches setup and evaluator files, and writes a private, gitignored
 settings. Hugging Face assets use the official client cache and `HF_TOKEN` when
 configured. It keeps an existing env file unless `--force-env` is supplied.
 Python component dependencies are installed by `gym env start` from the agent
-and model server project files.
+and model server project files, except for the OSWorld agent's explicitly
+opted-in runtime packages. `prepare.py` prints the exact prefetch and install
+commands for the selected managed-agent venv before its normal start commands.
 
 Asset preparation is idempotent: `gym env start` checks the same selected JSONL and
 shared cache at server startup without contacting the remote source for task
@@ -273,9 +275,10 @@ python3 prepare.py \
 ```
 
 The managed OSWorld agent's default `requirements.txt` respects Gym's global
-security and codec exclusions. After `prepare.py` writes `env.yaml`, pre-create
-its isolated environment and explicitly install the two codec-bearing runtime
-packages that OSWorld imports but Gym does not ship in packages or containers:
+security and codec exclusions. After `prepare.py` writes `env.yaml`, run the
+exact path-aware next steps that it prints. They pre-create the isolated agent
+environment and explicitly install the runtime packages that OSWorld imports
+but Gym does not ship in packages or containers:
 
 ```bash
 gym env prefetch
@@ -283,12 +286,19 @@ bash ../../responses_api_agents/osworld_agent/install_optional_runtime_deps.sh \
   /absolute/run/root/server-venvs/responses_api_agents/osworld_agent/.venv
 ```
 
-The script uses `--no-config` only for that named venv and installs
-cryptography, headless OpenCV, and the matching torchvision wheel. These are
-runtime imports for OSWorld's desktop stack, but repository policy excludes
-them from managed package and container resolution. `skip_venv_if_present:
-true` in the generated config then lets `gym env start` reuse the prepared
-environment.
+The script uses `--no-config` only for that named agent venv and installs
+cryptography, headless OpenCV, and the matching torchvision wheel. It is
+idempotent, but skips installation only when the required versions are both
+present and importable. It also reasserts the normal agent's `numpy<2`
+constraint because the OpenCV 4.8 wheel uses NumPy's 1.x ABI. These are runtime
+imports for OSWorld's desktop stack,
+but repository policy excludes them from managed package and container
+resolution. `skip_venv_if_present: true` in the generated config then lets
+`gym env start` reuse the prepared environment. `tools/start_control.sh` checks
+the same venv and exits before starting Gym with copyable remediation commands
+if the explicit step was skipped; it never installs the packages itself. The
+OSWorld agent entrypoint repeats the non-mutating check, so a direct
+`gym env start` fails early with the scoped installer command as well.
 
 OpenSandbox may return path-based gateway endpoints with required routing
 headers rather than directly routable Pod addresses. The adapter creates
