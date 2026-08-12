@@ -19,6 +19,7 @@ from responses_api_agents.osworld_agent.sandbox_provider import GymSandboxDeskto
 
 
 _FACTORY_LOCK = threading.RLock()
+_OPENSANDBOX_POOL_VM_PATH = "opensandbox-pool-managed"
 
 
 class _SandboxProviderInjectionMixin:
@@ -42,6 +43,14 @@ class _SandboxProviderInjectionMixin:
         sandbox_ready_poll_s: float = 2.0,
         **kwargs: Any,
     ) -> None:
+        sandbox_provider_name = str(next(iter(sandbox_provider), "")).lower().strip()
+        if sandbox_provider_name == "opensandbox" and not kwargs.get("path_to_vm"):
+            # OSWorld's docker-compatible constructor asks DockerVMManager for
+            # a local qcow2 whenever path_to_vm is absent. OpenSandbox Pool
+            # allocation owns the guest image server-side and ignores this
+            # value, so a descriptive sentinel avoids an unnecessary 11 GB
+            # image download in a cold worker.
+            kwargs["path_to_vm"] = _OPENSANDBOX_POOL_VM_PATH
         provider = GymSandboxDesktopProvider(
             sandbox_provider,
             sandbox_spec,
