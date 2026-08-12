@@ -10,7 +10,8 @@ constraint-dependencies = [
 
 # Mirror Gym's public resolver policy because an explicit config file does not
 # inherit the checkout's [tool.uv] table. The OSWorld opt-in installer uses
-# --no-config to add the runtime packages deliberately after env prefetch.
+# --no-config to add the runtime packages deliberately after env prefetch, but
+# still reads uv-torch-backend.txt so its torchvision wheel matches torch.
 override-dependencies = [
     "spacy>=3.8.13",
     "opencv-python-headless; sys_platform == 'never'",

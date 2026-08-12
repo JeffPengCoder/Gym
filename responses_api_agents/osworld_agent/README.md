@@ -251,7 +251,12 @@ gym eval run --no-serve
 
 The installer targets only the managed OSWorld agent venv. It does not modify
 the system Python, Gym's root venv, the model server, or the OSWorld VM. The
-managed environment excludes OSWorld's Azure, Aliyun, and Volcengine VM
+installer reads the same `uv-torch-backend.txt` marker as `gym env prefetch`,
+so `torch` and `torchvision` come from the same CPU/CUDA wheel family. A plain
+PyPI `torchvision` install is not equivalent: it can appear version-compatible
+with an existing CPU `torch` while failing to load native operators such as
+`torchvision::nms`. The managed environment excludes OSWorld's Azure, Aliyun,
+and Volcengine VM
 provisioning SDKs: this adapter supports direct Docker plus Gym Docker and
 OpenSandbox lifecycle, and none of those paths imports the excluded providers.
 The pinned OSWorld task/setup/evaluator code remains installed unchanged. The
