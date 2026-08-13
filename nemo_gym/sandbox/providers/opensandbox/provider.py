@@ -971,12 +971,9 @@ class OpenSandboxProvider:
         if not endpoint_url:
             raise RuntimeError(f"OpenSandbox returned an empty endpoint for sandbox {handle.sandbox_id!r} port {port}")
         if "://" not in endpoint_url:
-            domain = str(self._connection.domain or "")
-            # urlsplit("host.example:8080") treats the hostname as a scheme.
-            # Only read a scheme from a domain that actually contains ``://``;
-            # otherwise use ConnectionConfig.protocol just as the SDK does.
-            domain_scheme = urlsplit(domain).scheme if "://" in domain else ""
-            scheme = domain_scheme or self._connection.protocol or "http"
+            # Use the SDK handle's effective configuration so environment-
+            # resolved domains and protocols match the lifecycle request.
+            scheme = urlsplit(handle.raw.connection_config.get_base_url()).scheme or "http"
             endpoint_url = f"{scheme}://{endpoint_url.lstrip('/')}"
         headers = dict(handle.raw.connection_config.headers)
         # Match the SDK's service adapters: connection-wide headers apply to
