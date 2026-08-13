@@ -30,6 +30,7 @@ import re
 import sys
 import time
 from asyncio import Semaphore
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 import ray
@@ -971,6 +972,14 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
 
     def setup_webserver(self):
         """Idempotently fill a configured asset cache before accepting work."""
+
+        base_run_request_module = sys.modules[BaseRunRequest.__module__]
+        LOG.info(
+            "OSWORLD_GYM_RUNTIME_IDENTITY|app=%s|base_run_request=%s|rollout_purpose_field=%s",
+            Path(__file__).resolve(),
+            Path(base_run_request_module.__file__).resolve(),
+            "rollout_purpose" in BaseRunRequest.model_fields,
+        )
 
         if self.config.asset_input_jsonl and self.config.setup_cache_dir:
             from benchmarks.osworld.assets import ensure_osworld_assets

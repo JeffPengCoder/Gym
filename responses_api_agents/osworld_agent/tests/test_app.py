@@ -1038,6 +1038,47 @@ class TestApp:
         run_resp = client.post("/run", json={})
         assert run_resp.status_code != 404
 
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    def test_http_run_preserves_evaluation_rollout_purpose(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+    ) -> None:
+        """Exercise the real FastAPI/Pydantic boundary used by NeMo-RL."""
+        setup_server_client_mocks(
+            mock_load_from_global_config, mock_get_first_server_config_dict
+        )
+        mock_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": True}
+        agent = OSWorldAgent(config=make_config(), server_client=server_client)
+        request = make_run_request(
+            osworld_task=DEFAULT_OSWORLD_TASK,
+            temperature=0.6,
+            top_p=0.95,
+            max_output_tokens=768,
+            rollout_purpose="evaluation",
+        )
+        payload = {
+            **request.model_dump(mode="json"),
+            "_ng_task_index": 4,
+            "_ng_rollout_index": 0,
+        }
+
+        response = TestClient(agent.setup_webserver()).post("/run", json=payload)
+
+        assert response.status_code == 200
+        assert response.json()["rollout_purpose"] == "evaluation"
+        positional_args, _ = mock_remote.options.return_value.remote.call_args
+        assert positional_args[1]["rollout_purpose"] == "evaluation"
+
     @patch("benchmarks.osworld.assets.ensure_osworld_assets")
     def test_setup_webserver_idempotently_prefetches_configured_assets(self, mock_ensure) -> None:
         mock_ensure.return_value = SimpleNamespace(
