@@ -254,7 +254,6 @@ async def test_pool_create_uses_sdk_compatibility_image_and_proxy_auth(
         create={
             "request_timeout_s": 120,
             "timeout_s": 30,
-            "skip_health_check": True,
         },
         probe={"command": None},
     )
@@ -263,7 +262,10 @@ async def test_pool_create_uses_sdk_compatibility_image_and_proxy_auth(
             image="busybox:1.36",
             ttl_s=1800,
             metadata={"purpose": "osworld"},
-            provider_options={"extensions": {"poolRef": "osworld-kvm"}},
+            provider_options={
+                "skip_health_check": True,
+                "extensions": {"poolRef": "osworld-kvm"},
+            },
         )
     )
 
@@ -278,69 +280,23 @@ async def test_pool_create_uses_sdk_compatibility_image_and_proxy_auth(
     assert create_connection.kwargs["headers"] == {
         "OPEN-SANDBOX-API-KEY": "pool-api-key"  # pragma: allowlist secret
     }
-    assert FakeSandbox.connected_args == ("sandbox-1",)
-    assert FakeSandbox.connected_kwargs["skip_health_check"] is True
+    assert FakeSandbox.connected_args == ()
 
 
-async def test_pool_connect_cancellation_destroys_known_sdk_sandbox(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lifecycle: list[str] = []
-
-    class CancellingSandbox:
-        def __init__(self) -> None:
-            self.id = "pooled-cancelled-connect"
-
-        @classmethod
-        async def create(cls, **_kwargs: Any) -> "CancellingSandbox":
-            lifecycle.append("create")
-            return cls()
-
-        @classmethod
-        async def connect(cls, *_args: Any, **_kwargs: Any) -> "CancellingSandbox":
-            lifecycle.append("connect")
-            raise asyncio.CancelledError
-
-        async def kill(self) -> None:
-            lifecycle.append("kill")
-
-        async def close(self) -> None:
-            lifecycle.append("close")
-
-    monkeypatch.setattr(
-        opensandbox_provider,
-        "_require_opensandbox_sdk",
-        lambda: (CancellingSandbox, FakeConnectionConfig, object, FakePlatformSpec, FakeVolume),
-    )
-    provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"domain": "http://sandbox.example"},
-        create={"skip_health_check": True},
-        probe={"command": None},
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await provider._create_once(
-            SandboxSpec(
-                image="busybox:1.36",
-                ready_timeout_s=30,
-                provider_options={
-                    "extensions": {
-                        "poolRef": "osworld-kvm",
-                    }
-                },
-            )
+async def test_endpoint_normalizes_missing_scheme_and_merges_sdk_headers() -> None:
+    class FakeRaw:
+        connection_config = SimpleNamespace(
+            headers={
+                "OPEN-SANDBOX-API-KEY": "pool-api-key",  # pragma: allowlist secret
+                "X-Shared": "connection",
+            }
         )
 
-    assert lifecycle == ["create", "connect", "kill", "close"]
-
-
-async def test_endpoint_normalizes_missing_scheme_and_adds_proxy_auth() -> None:
-    class FakeRaw:
         async def get_endpoint(self, port: int) -> Any:
             assert port == 5000
             return SimpleNamespace(
                 endpoint="10.0.0.22:5000",
-                headers={"X-Route": "sandbox"},
+                headers={"X-Route": "sandbox", "X-Shared": "endpoint"},
             )
 
     provider = opensandbox_provider.OpenSandboxProvider(
@@ -363,13 +319,16 @@ async def test_endpoint_normalizes_missing_scheme_and_adds_proxy_auth() -> None:
 
     assert resolved.endpoint == "https://10.0.0.22:5000"
     assert resolved.headers == {
-        "X-Route": "sandbox",
         "OPEN-SANDBOX-API-KEY": "pool-api-key",  # pragma: allowlist secret
+        "X-Shared": "endpoint",
+        "X-Route": "sandbox",
     }
 
 
 async def test_endpoint_uses_configured_protocol_for_domain_without_scheme() -> None:
     class FakeRaw:
+        connection_config = SimpleNamespace(headers={})
+
         async def get_endpoint(self, _port: int) -> Any:
             return SimpleNamespace(endpoint="sandbox.example:5000", headers={})
 
@@ -395,6 +354,8 @@ async def test_endpoint_uses_configured_protocol_for_domain_without_scheme() -> 
 
 async def test_direct_endpoint_never_receives_management_api_key() -> None:
     class FakeRaw:
+        connection_config = SimpleNamespace(headers={})
+
         async def get_endpoint(self, _port: int) -> Any:
             return SimpleNamespace(endpoint="http://10.0.0.22:5000", headers={})
 
@@ -416,22 +377,6 @@ async def test_direct_endpoint_never_receives_management_api_key() -> None:
     )
 
     assert resolved.headers == {}
-
-
-async def test_endpoint_requires_sdk_get_endpoint() -> None:
-    provider = opensandbox_provider.OpenSandboxProvider(
-        operations={"retries": 0},
-        probe={"command": None},
-    )
-    with pytest.raises(NotImplementedError, match="opensandbox>=0.1.15"):
-        await provider.endpoint(
-            opensandbox_provider.SandboxHandle(
-                sandbox_id="sandbox-1",
-                provider_name="opensandbox",
-                raw=object(),
-            ),
-            5000,
-        )
 
 
 def test_provider_validation_and_retry_helpers() -> None:

@@ -134,7 +134,10 @@ def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatc
             "entrypoint": ["/run/entry.sh"],
             "env": {"KVM": "Y"},
             "resources": {"cpu": 4, "memory_mib": 16384},
-            "provider_options": {"extensions": {"poolRef": "osworld-kvm"}},
+            "provider_options": {
+                "skip_health_check": True,
+                "extensions": {"poolRef": "osworld-kvm"},
+            },
         },
     )
 
@@ -147,7 +150,10 @@ def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatc
     assert spec.image == "busybox:1.36"
     assert spec.ttl_s == 1800
     assert spec.ports == osworld_sandbox.OSWORLD_SERVICE_PORTS
-    assert spec.provider_options == {"extensions": {"poolRef": "osworld-kvm"}}
+    assert spec.provider_options == {
+        "skip_health_check": True,
+        "extensions": {"poolRef": "osworld-kvm"},
+    }
     assert spec.metadata["osworld-provider"] == "gym-opensandbox-sandbox"
     assert spec.metadata["run-id"] == "opensandbox-run"
     assert spec.entrypoint is None
