@@ -23,7 +23,7 @@ from typing import IO, Any
 
 from omegaconf import DictConfig
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -237,7 +237,18 @@ def run_command(
     # this generic helper doesn't bake a layout assumption in for its other callers.
     py_path_entries = [work_dir]
     if project_root is not None:
-        py_path_entries.append(f"{project_root.absolute()}")
+        absolute_project_root = f"{project_root.absolute()}"
+        py_path_entries.append(absolute_project_root)
+        # ``nemo_gym`` normalizes sys.path at import time so component discovery has one
+        # precedence contract. Merely prepending PYTHONPATH is therefore insufficient:
+        # an older editable Gym install can still win after that normalization. Mark the
+        # already-resolved component root as an explicit extra root too; extra roots are
+        # intentionally highest priority in both discovery and Python imports.
+        existing_extra_roots = custom_env.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME)
+        extra_roots = [absolute_project_root]
+        if existing_extra_roots:
+            extra_roots.append(existing_extra_roots)
+        custom_env[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] = os.pathsep.join(extra_roots)
     existing_py_path = custom_env.get("PYTHONPATH")
     if existing_py_path:
         py_path_entries.append(existing_py_path)
