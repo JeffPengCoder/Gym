@@ -286,10 +286,11 @@ async def test_pool_create_uses_sdk_compatibility_image_and_proxy_auth(
 async def test_endpoint_normalizes_missing_scheme_and_merges_sdk_headers() -> None:
     class FakeRaw:
         connection_config = SimpleNamespace(
+            get_base_url=lambda: "https://sandbox.example/v1",
             headers={
                 "OPEN-SANDBOX-API-KEY": "pool-api-key",  # pragma: allowlist secret
                 "X-Shared": "connection",
-            }
+            },
         )
 
         async def get_endpoint(self, port: int) -> Any:
@@ -325,18 +326,17 @@ async def test_endpoint_normalizes_missing_scheme_and_merges_sdk_headers() -> No
     }
 
 
-async def test_endpoint_uses_configured_protocol_for_domain_without_scheme() -> None:
+async def test_endpoint_uses_effective_sdk_scheme_when_provider_input_is_unset() -> None:
     class FakeRaw:
-        connection_config = SimpleNamespace(headers={})
+        connection_config = SimpleNamespace(
+            get_base_url=lambda: "https://gateway.example/v1",
+            headers={},
+        )
 
         async def get_endpoint(self, _port: int) -> Any:
             return SimpleNamespace(endpoint="sandbox.example:5000", headers={})
 
     provider = opensandbox_provider.OpenSandboxProvider(
-        connection={
-            "domain": "gateway.example:8080/",
-            "protocol": "https",
-        },
         operations={"retries": 0},
         probe={"command": None},
     )
