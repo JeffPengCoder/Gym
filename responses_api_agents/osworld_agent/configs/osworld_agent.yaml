@@ -13,6 +13,18 @@ osworld_simple_agent:
       provider_name: docker
       container_image: docker://happysixd/osworld-docker@sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9
       sandbox_provider: null      # named nemo_gym.sandbox config; when set, Sandbox owns VM container lifecycle
+      # OSWorld pool admission is normally seconds. Bound this workload's VM
+      # create phase so a transient control-plane outage cannot consume the
+      # complete 30-minute rollout budget before any model action occurs.
+      sandbox_provider_overrides:
+        opensandbox:
+          create:
+            request_timeout_s: 180
+            timeout_s: 180
+            connect_attempt_timeout_s: 30
+            retries: 1
+            retry_delay_s: 5.0
+            retry_max_delay_s: 10.0
       sandbox_spec:
         image: docker://happysixd/osworld-docker@sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9
         ttl_s: null
@@ -67,7 +79,8 @@ osworld_simple_agent:
       agent_kwargs: {}            # extra kwargs merged into the runner's native mm_agent constructor.
       mem_limit_mb: 0           # upstream Docker owns QEMU/container limits; nonzero only emits a warning
       step_timeout: 60          # per-action subprocess timeout
-      task_timeout: 1800        # cooperative deadline checked between steps and by Pointer model calls
+      task_timeout: 1800        # end-to-end attempt deadline: VM create/setup + agent steps + evaluation
+      task_cancel_grace_s: 30.0 # graceful env.close()/sandbox release before force-cancelling the Ray worker
       docker_port_lock_timeout: 300.0  # infrastructure-only wait for concurrent Docker VM port allocation
       evaluator_disable_gpu: true  # keep EasyOCR from reserving rollout GPU memory
       reward_mode: binary          # raw preserves OSWorld partial scores; binary keeps the historical Gym training convention

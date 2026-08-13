@@ -13,9 +13,10 @@ import json
 import os
 from types import SimpleNamespace
 from typing import Any, Dict, Literal, Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
+import ray
 from fastapi.testclient import TestClient
 
 from nemo_gym.config_types import ModelServerRef
@@ -29,6 +30,7 @@ from responses_api_agents.osworld_agent.app import (
     _append_model_io,
     _build_messages_model_fn,
     _build_response,
+    _apply_sandbox_provider_overrides,
     _log_context_headers,
     _model_io_images,
     _normalize_chat_message,
@@ -596,6 +598,29 @@ def make_config(**overrides: Any) -> OSWorldAgentConfig:
     )
     base.update(overrides)
     return OSWorldAgentConfig(**base)
+
+
+def test_sandbox_provider_overrides_merge_only_selected_provider() -> None:
+    provider = {
+        "opensandbox": {
+            "connection": {"domain": "sandbox.internal"},
+            "create": {"timeout_s": 1500, "retries": 10},
+        }
+    }
+    overrides = {
+        "opensandbox": {"create": {"timeout_s": 180, "retries": 1}},
+        "docker": {"create": {"start_timeout_s": 60}},
+    }
+
+    resolved = _apply_sandbox_provider_overrides(provider, overrides)
+
+    assert resolved == {
+        "opensandbox": {
+            "connection": {"domain": "sandbox.internal"},
+            "create": {"timeout_s": 180, "retries": 1},
+        }
+    }
+    assert provider["opensandbox"]["create"] == {"timeout_s": 1500, "retries": 10}
 
 
 def make_run_request(
@@ -1213,6 +1238,47 @@ class TestApp:
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
+    async def test_run_applies_osworld_scoped_opensandbox_create_budget(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        global_config = mock_load_from_global_config.return_value.global_config_dict
+        global_config["sandbox"] = {
+            "opensandbox": {
+                "connection": {"domain": "sandbox.internal"},
+                "create": {"timeout_s": 1500, "retries": 10},
+            }
+        }
+        mock_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+        agent = OSWorldAgent(
+            config=make_config(
+                sandbox_provider="sandbox",
+                sandbox_provider_overrides={
+                    "opensandbox": {"create": {"timeout_s": 180, "retries": 1}}
+                },
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        runner_kwargs = mock_remote.options.return_value.remote.call_args.args[1]
+        assert runner_kwargs["sandbox_provider_config"] == {
+            "opensandbox": {
+                "connection": {"domain": "sandbox.internal"},
+                "create": {"timeout_s": 180, "retries": 1},
+            }
+        }
+
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
     async def test_proxy_required_task_runs_directly_when_proxy_is_disabled(
         self,
         mock_to_thread,
@@ -1376,6 +1442,69 @@ class TestApp:
         assert response.reward == 0.0
         assert "RuntimeError" in response.verifier_metadata["osworld_error"]
         assert "docker daemon unreachable" in response.verifier_metadata["osworld_error"]
+
+    @patch("responses_api_agents.osworld_agent.app.ray.cancel")
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_run_end_to_end_timeout_cancels_ray_task_and_masks_sample(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        mock_ray_cancel,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        future = MagicMock()
+        mock_remote.options.return_value.remote.return_value = future
+        mock_to_thread.side_effect = [ray.exceptions.GetTimeoutError("deadline"), RuntimeError("cancelled")]
+
+        agent = OSWorldAgent(
+            config=make_config(task_timeout=12),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        response = await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        mock_ray_cancel.assert_called_once_with(future, force=False)
+        assert response.reward == 0.0
+        assert response.mask_sample is True
+        assert response.verifier_metadata["osworld_termination_reason"] == "task_timeout"
+        assert response.verifier_metadata["osworld_error"] == (
+            "task_timeout exceeded (12s) during end-to-end rollout"
+        )
+
+    @patch("responses_api_agents.osworld_agent.app.ray.cancel")
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_run_end_to_end_timeout_force_cancels_after_cleanup_grace(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        mock_ray_cancel,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        future = MagicMock()
+        mock_remote.options.return_value.remote.return_value = future
+        mock_to_thread.side_effect = [
+            ray.exceptions.GetTimeoutError("deadline"),
+            ray.exceptions.GetTimeoutError("cleanup grace"),
+        ]
+
+        agent = OSWorldAgent(
+            config=make_config(task_timeout=12, task_cancel_grace_s=3),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        response = await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        assert mock_ray_cancel.call_args_list == [call(future, force=False), call(future, force=True)]
+        assert response.mask_sample is True
+        assert response.verifier_metadata["osworld_termination_reason"] == "task_timeout"
 
     @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
