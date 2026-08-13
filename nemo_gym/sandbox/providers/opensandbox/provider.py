@@ -984,12 +984,14 @@ class OpenSandboxProvider:
             domain_scheme = urlsplit(domain).scheme if "://" in domain else ""
             scheme = domain_scheme or self._connection.protocol or "http"
             endpoint_url = f"{scheme}://{endpoint_url.lstrip('/')}"
-        headers = dict(getattr(resolved, "headers", None) or {})
-        if self._connection.use_server_proxy and self._connection.api_key:
-            # Proxy mode terminates at the trusted OpenSandbox gateway. Direct
-            # endpoints terminate in untrusted workloads and must never receive
-            # the management API key.
-            headers.setdefault("OPEN-SANDBOX-API-KEY", str(self._connection.api_key))
+        connection_config = getattr(handle.raw, "connection_config", None)
+        headers = dict(getattr(connection_config, "headers", None) or {})
+        # Match the SDK's service adapters: connection-wide headers apply to
+        # every request, while endpoint-specific routing or auth headers win.
+        # The upstream proxy-auth fix adds the management API key to
+        # ConnectionConfig.headers only in server-proxy mode, so direct
+        # sandbox endpoints never receive it.
+        headers.update(getattr(resolved, "headers", None) or {})
         return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
@@ -1061,7 +1063,7 @@ class OpenSandboxProvider:
             if self._create.skip_health_check:
                 handle = await self._connect_after_create(created_handle, spec)
             await self._verify_created_handle(handle)
-        except BaseException:
+        except Exception:
             await self._cleanup_failed_create_handle(created_handle)
             raise
         return handle

@@ -404,6 +404,7 @@ def write_env(
                     "        ttl_s: 14400",
                     "        ready_timeout_s: 1200",
                     "        provider_options:",
+                    "          skip_health_check: true",
                     "          extensions:",
                     "            poolRef: ${oc.env:OPENSANDBOX_POOL_REF,osworld-kvm}",
                 ]
