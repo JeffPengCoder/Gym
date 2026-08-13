@@ -959,21 +959,15 @@ class OpenSandboxProvider:
     ) -> SandboxEndpoint:
         """Resolve one client-reachable direct or server-proxied service URL."""
 
-        get_endpoint = getattr(handle.raw, "get_endpoint", None)
-        if get_endpoint is None:
-            raise NotImplementedError(
-                "The installed opensandbox SDK does not expose Sandbox.get_endpoint; "
-                "sandbox service endpoints require opensandbox>=0.1.15"
-            )
         resolved = await self._await_sdk_operation(
-            lambda: get_endpoint(port),
+            lambda: handle.raw.get_endpoint(port),
             operation="get_endpoint",
             sandbox_id=handle.sandbox_id,
             timeout_s=(
                 float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None
             ),
         )
-        endpoint_url = str(getattr(resolved, "endpoint", "") or "")
+        endpoint_url = str(resolved.endpoint or "")
         if not endpoint_url:
             raise RuntimeError(f"OpenSandbox returned an empty endpoint for sandbox {handle.sandbox_id!r} port {port}")
         if "://" not in endpoint_url:
@@ -984,12 +978,13 @@ class OpenSandboxProvider:
             domain_scheme = urlsplit(domain).scheme if "://" in domain else ""
             scheme = domain_scheme or self._connection.protocol or "http"
             endpoint_url = f"{scheme}://{endpoint_url.lstrip('/')}"
-        headers = dict(getattr(resolved, "headers", None) or {})
-        if self._connection.use_server_proxy and self._connection.api_key:
-            # Proxy mode terminates at the trusted OpenSandbox gateway. Direct
-            # endpoints terminate in untrusted workloads and must never receive
-            # the management API key.
-            headers.setdefault("OPEN-SANDBOX-API-KEY", str(self._connection.api_key))
+        headers = dict(handle.raw.connection_config.headers)
+        # Match the SDK's service adapters: connection-wide headers apply to
+        # every request, while endpoint-specific routing or auth headers win.
+        # The upstream proxy-auth fix adds the management API key to
+        # ConnectionConfig.headers only in server-proxy mode, so direct
+        # sandbox endpoints never receive it.
+        headers.update(resolved.headers)
         return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
@@ -1061,7 +1056,7 @@ class OpenSandboxProvider:
             if self._create.skip_health_check:
                 handle = await self._connect_after_create(created_handle, spec)
             await self._verify_created_handle(handle)
-        except BaseException:
+        except Exception:
             await self._cleanup_failed_create_handle(created_handle)
             raise
         return handle

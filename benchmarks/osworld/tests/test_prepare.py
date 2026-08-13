@@ -348,6 +348,7 @@ def test_write_env_configures_sdk_compatibility_image_for_opensandbox_pool(tmp_p
     assert agent["sandbox_require_kvm"] is False
     assert agent["sandbox_spec"]["image"] == ("${oc.env:OPENSANDBOX_COMPAT_IMAGE,busybox:1.36}")
     assert agent["sandbox_spec"]["ttl_s"] == 14400
+    assert agent["sandbox_spec"]["provider_options"]["skip_health_check"] is True
     assert agent["sandbox_spec"]["provider_options"]["extensions"]["poolRef"] == (
         "${oc.env:OPENSANDBOX_POOL_REF,osworld-kvm}"
     )
@@ -383,6 +384,7 @@ def test_opensandbox_env_composes_with_strict_inherited_sandbox_spec(tmp_path: P
     agent = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
     assert agent["sandbox_spec"]["image"] == "busybox:1.36"
     assert agent["sandbox_spec"]["ttl_s"] == 14400
+    assert agent["sandbox_spec"]["provider_options"]["skip_health_check"] is True
     assert agent["sandbox_spec"]["provider_options"]["extensions"]["poolRef"] == "osworld-kvm"
 
 
