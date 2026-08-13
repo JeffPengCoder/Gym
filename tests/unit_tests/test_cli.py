@@ -280,6 +280,42 @@ class TestRunHelperDryRunSpinup:
         runner._processes = processes
         return runner
 
+    def test_server_process_uses_resolved_component_root(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        server_dir = tmp_path / "responses_api_agents" / "example"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("nemo-gym\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+
+        run = MagicMock(return_value=MagicMock())
+        config = OmegaConf.create(
+            {
+                "example": {
+                    "responses_api_agents": {
+                        "example": {
+                            "entrypoint": "app.py",
+                            "host": "127.0.0.1",
+                            "port": 5001,
+                        }
+                    }
+                },
+                "dry_run": True,
+            }
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", run)
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *_: "setup")
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", MagicMock(return_value=config))
+        monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", MagicMock())
+        monkeypatch.setattr(
+            HeadServer,
+            "run_webserver",
+            MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
+        )
+
+        runner = RunHelper()
+        runner.start(MagicMock())
+
+        assert run.call_args.kwargs["project_root"] == tmp_path
+
     def _process(self, returncodes: list) -> MagicMock:
         process = MagicMock()
         process.poll.side_effect = returncodes
