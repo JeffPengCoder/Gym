@@ -1023,13 +1023,16 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 try:
                     await raise_for_status(res)
                 except Exception:
-                    if is_global_aiohttp_client_request_debug_enabled():
-                        print(
-                            "[rollout_collection] /run failed "
-                            f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                            flush=True,
-                        )
+                    # This summary is payload-free and safe to emit even when
+                    # global HTTP debugging is disabled.  In particular it
+                    # proves whether scheduler intent survived the Ray actor
+                    # and reached the exact row submitted to /run.
+                    print(
+                        "[rollout_collection] /run failed "
+                        f"status={getattr(res, 'status', None)} "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                        flush=True,
+                    )
                     raise
                 return row, await get_response_json(res)
 

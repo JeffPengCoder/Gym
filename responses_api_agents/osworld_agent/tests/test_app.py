@@ -1050,6 +1050,7 @@ class TestApp:
         mock_load_from_global_config,
     ) -> None:
         """Exercise the real FastAPI/Pydantic boundary used by NeMo-RL."""
+        assert "rollout_purpose" in OSWorldRunRequest.__annotations__
         setup_server_client_mocks(
             mock_load_from_global_config, mock_get_first_server_config_dict
         )

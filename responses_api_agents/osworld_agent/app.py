@@ -368,6 +368,12 @@ class OSWorldRunRequest(BaseRunRequest):
     """Per-task request. ``verifier_metadata`` holds the OSWorld task spec."""
 
     model_config = ConfigDict(extra="allow")
+    # Declare the scheduler contract at this HTTP boundary as well as on the
+    # shared base class.  Long-lived distributed Gym processes can otherwise
+    # combine a refreshed OSWorld agent module with an older imported
+    # BaseRunRequest; Pydantic then treats this top-level field as model_extra
+    # and body.rollout_purpose silently becomes None.
+    rollout_purpose: Optional[Literal["training", "evaluation"]] = None
 
 
 class OSWorldAgentResponse(NeMoGymResponse):
@@ -974,11 +980,28 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
         """Idempotently fill a configured asset cache before accepting work."""
 
         base_run_request_module = sys.modules[BaseRunRequest.__module__]
+        osworld_request_has_purpose = "rollout_purpose" in OSWorldRunRequest.model_fields
+        if not osworld_request_has_purpose:
+            raise RuntimeError(
+                "OSWorldRunRequest is missing its scheduler-owned rollout_purpose field"
+            )
+        runtime_identity = (
+            "OSWORLD_GYM_RUNTIME_IDENTITY|"
+            f"app={Path(__file__).resolve()}|"
+            f"base_run_request={Path(base_run_request_module.__file__).resolve()}|"
+            f"base_rollout_purpose_field={'rollout_purpose' in BaseRunRequest.model_fields}|"
+            f"osworld_rollout_purpose_field={osworld_request_has_purpose}"
+        )
+        # Ray's server logging profile filters INFO records in production.
+        # stdout is captured reliably and contains paths/schema only, no task
+        # payload or credentials.
+        print(runtime_identity, flush=True)
         LOG.info(
-            "OSWORLD_GYM_RUNTIME_IDENTITY|app=%s|base_run_request=%s|rollout_purpose_field=%s",
+            "OSWORLD_GYM_RUNTIME_IDENTITY|app=%s|base_run_request=%s|base_rollout_purpose_field=%s|osworld_rollout_purpose_field=%s",
             Path(__file__).resolve(),
             Path(base_run_request_module.__file__).resolve(),
             "rollout_purpose" in BaseRunRequest.model_fields,
+            osworld_request_has_purpose,
         )
 
         if self.config.asset_input_jsonl and self.config.setup_cache_dir:
