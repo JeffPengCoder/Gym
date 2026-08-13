@@ -51,3 +51,12 @@ def test_convert_writes_agent_ref_for_direct_run_examples_contract(
     assert row["responses_create_params"]["input"][0]["content"] == (
         "Change the setting."
     )
+    provenance = json.loads(
+        output.with_suffix(".jsonl.manifest.json").read_text(encoding="utf-8")
+    )
+    assert provenance["rows"] == 1
+    assert provenance["osworld_commit"] is None
+    assert provenance["output"] == str(output.resolve())
+    assert len(provenance["manifest_sha256"]) == 64
+    assert len(provenance["output_sha256"]) == 64
+    assert len(provenance["task_ids_sha256"]) == 64

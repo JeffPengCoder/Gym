@@ -40,13 +40,23 @@ Or generate ALL four standard manifests at once:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import pathlib
+import subprocess
 import sys
 
 
 MANIFESTS = ("test_all", "test_small", "test_infeasible", "test_nogdrive")
 DEFAULT_AGENT_NAME = "osworld_simple_agent"
+
+
+def _sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def convert(
@@ -98,9 +108,37 @@ def convert(
             per_domain[domain] = per_domain.get(domain, 0) + 1
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w") as f:
+    with out_path.open("w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    source_commit = None
+    git_dir = osworld_root / ".git"
+    if git_dir.exists():
+        result = subprocess.run(
+            ["git", "-C", str(osworld_root), "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            source_commit = result.stdout.strip()
+    provenance = {
+        "schema_version": 1,
+        "osworld_root": str(osworld_root.resolve()),
+        "osworld_commit": source_commit,
+        "manifest": str(manifest_path.resolve()),
+        "manifest_sha256": _sha256(manifest_path),
+        "output": str(out_path.resolve()),
+        "output_sha256": _sha256(out_path),
+        "rows": len(rows),
+        "task_ids_sha256": hashlib.sha256(
+            "\n".join(str(row["verifier_metadata"]["task_id"]) for row in rows).encode()
+        ).hexdigest(),
+    }
+    out_path.with_suffix(out_path.suffix + ".manifest.json").write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return len(rows), per_domain
 
 

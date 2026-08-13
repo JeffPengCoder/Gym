@@ -27,6 +27,8 @@ OSWORLD_AGENT_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/uv-override
 OSWORLD_AGENT_UV_CONFIG = ROOT / "responses_api_agents/osworld_agent/uv.toml"
 OSWORLD_AGENT_PUBLIC_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/overrides.txt"
 OSWORLD_RESOURCES_PROJECT = ROOT / "resources_servers/osworld/pyproject.toml"
+OSWORLD_AGENT_README = ROOT / "responses_api_agents/osworld_agent/README.md"
+OSWORLD_BENCHMARK_README = ROOT / "benchmarks/osworld/README.md"
 VLLM_MODEL_OVERRIDES = ROOT / "responses_api_models/vllm_model/uv-overrides.txt"
 VLLM_MODEL_PYTHON = ROOT / "responses_api_models/vllm_model/uv-python-version.txt"
 VLLM_MODEL_MANAGED_PYTHON = ROOT / "responses_api_models/vllm_model/uv-managed-python.txt"
@@ -73,6 +75,11 @@ def test_osworld_runtime_consumers_share_one_pinned_revision() -> None:
     assert agent_match, "The OSWorld agent must pin an immutable OSWorld archive revision"
     assert resources_match, "The OSWorld Resources Server must pin an immutable OSWorld archive revision"
     assert agent_match.group(1) == resources_match.group(1)
+    revision = agent_match.group(1)
+    assert f"commit `{revision}`" in OSWORLD_AGENT_README.read_text(encoding="utf-8")
+    benchmark_readme = OSWORLD_BENCHMARK_README.read_text(encoding="utf-8")
+    assert f"pinned to `{revision}`" in benchmark_readme
+    assert f"git checkout {revision}" in benchmark_readme
 
 
 def test_nemo_rl_servers_override_cross_process_runtime_versions() -> None:

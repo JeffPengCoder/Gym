@@ -10,7 +10,7 @@ dependencies = [
     # This immutable revision supplies OSWorld's runtime dependencies. During
     # development of a newer remote_docker provider, put that OSWorld checkout
     # first on PYTHONPATH; replace this revision after the OSWorld change lands.
-    "osworld @ https://github.com/JeffPengCoder/OSWorld/archive/6cc00cc53f1d4c11a6dac559f53296347e41a452.tar.gz",
+    "osworld @ https://github.com/JeffPengCoder/OSWorld/archive/4858905d1ddfecc1cee979742d0f113a6d19728e.tar.gz",
     "requests-toolbelt~=1.0.0",
     # Support deployment-scoped SOCKS routing to remote Docker-published
     # OSWorld service endpoints without proxying Ray or model traffic.

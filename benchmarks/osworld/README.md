@@ -397,8 +397,22 @@ create a shard file or manifest. Any positive shard count works; two is only
 the deployment example below.
 
 The repository includes ready-to-use example and small inputs under `data/`.
-Larger inputs passed with `--input` must use the same JSONL schema; no
-untracked conversion helper is part of the public workflow.
+Generate larger canonical inputs from the exact pinned OSWorld checkout with
+`tools/convert_osworld_tasks.py`; do not silently reuse a historical JSONL
+after the OSWorld revision changes. The converter writes
+`<output>.manifest.json` with the OSWorld commit (when the source is a Git
+checkout), source/output hashes, row count, and task-ID digest. A production
+run should fail admission if that recorded commit does not match the runtime
+OSWorld pin.
+
+For example:
+
+```bash
+python3 benchmarks/osworld/tools/convert_osworld_tasks.py \
+  --osworld-root /absolute/path/to/JeffPengCoder-OSWorld \
+  --manifest test_all \
+  --output /absolute/path/to/test_all.jsonl
+```
 
 ### Split agent and OSWorld environment hosts
 
@@ -609,7 +623,7 @@ overlay.
 | --- | --- |
 | Gym OSWorld benchmark | No manual checkout. The agent package installs the exact SHA from `responses_api_agents/osworld_agent/requirements.txt`. |
 | Direct OSWorld, plain Docker/VMware, no proxy-required tasks | Upstream xlang OSWorld main is sufficient; this adapter's pre-fix baseline was `83e8534451ba8b3ab6477448ef3f0a8e563f05be`. |
-| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `6cc00cc53f1d4c11a6dac559f53296347e41a452` or a documented successor. |
+| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `4858905d1ddfecc1cee979742d0f113a6d19728e` or a documented successor. |
 | Direct OSWorld with proxy-required tasks | The same `nv-gym` pinned SHA; set `PROXY_CONFIG_FILE` and construct `DesktopEnv(enable_proxy=True)`. |
 | Direct OSWorld with both features | The same `nv-gym` pinned SHA provides both independent capabilities. |
 
@@ -618,7 +632,7 @@ For a direct integration of the tested version:
 ```bash
 git clone https://github.com/JeffPengCoder/OSWorld.git
 cd OSWorld
-git checkout 6cc00cc53f1d4c11a6dac559f53296347e41a452
+git checkout 4858905d1ddfecc1cee979742d0f113a6d19728e
 ```
 
 Use an immutable SHA in a lockfile or deployment manifest. The `nv-gym`
@@ -634,6 +648,17 @@ It also prepares the canonical restricted-home fixture through OSWorld's
 trusted setup controller with `sudo`, while the evaluated desktop agent
 continues to run as the ordinary guest user. This keeps strict setup return-
 code validation without silently evaluating against a broken initial state.
+
+It also keeps the canonical VS Code theme fixture portable to the OpenSandbox
+guest image, which has `python3` but not `jq`. The fixture uses Python only for
+the prior `jq` fallback, preserves unrelated settings, and still establishes
+the same `Red` baseline before the evaluated agent starts.
+
+The same revision feeds the regular guest password to the Chrome-history
+ownership repair, restricts `update-desktop-database` to the user's
+applications directory, and removes the contradictory setup-time `su` from
+the missing-Charles infeasible task. These are fixture-initialization repairs;
+they do not grant passwordless sudo or change the evaluated agent's policy.
 
 It also guards dynamic `tinyproxy` installation against PackageKit holding
 APT locks after VM boot. PackageKit is stopped and runtime-masked only during

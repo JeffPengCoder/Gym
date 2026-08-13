@@ -109,12 +109,17 @@ service endpoints, status, and cleanup.
 
 This agent intentionally installs the immutable
 [`JeffPengCoder/OSWorld`](https://github.com/JeffPengCoder/OSWorld) fork at
-commit `6cc00cc53f1d4c11a6dac559f53296347e41a452`, as declared in
+commit `4858905d1ddfecc1cee979742d0f113a6d19728e`, as declared in
 [`requirements.txt`](requirements.txt). That revision starts from upstream
 OSWorld `83e85344` and includes the `nv-gym` provider overlay, proxy-runtime
 repair, VLC gateway-auth fallback, and the privileged-setup fix used by the
-canonical restricted-home fixture. It is therefore a runtime dependency of
-this branch, not an interchangeable link to upstream OSWorld `main`.
+canonical restricted-home fixture. It also removes the canonical VS Code
+theme fixture's undeclared `jq` dependency, feeds the normal guest password to
+the Chrome-history ownership repair, scopes desktop-database updates to the
+user directory, and lets the missing-Charles infeasible task reach the agent
+instead of executing the impossible operation during setup. It is therefore a
+runtime dependency of this branch, not an interchangeable link to upstream
+OSWorld `main`.
 
 The dependency is consumed as a commit-addressed source archive so uv does not
 initialize optional OSWorld submodules. Gym does not mutate the installed
