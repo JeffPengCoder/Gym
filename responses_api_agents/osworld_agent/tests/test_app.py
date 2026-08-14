@@ -13,9 +13,10 @@ import json
 import os
 from types import SimpleNamespace
 from typing import Any, Dict, Literal, Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
+import ray
 from fastapi.testclient import TestClient
 
 from nemo_gym.config_types import ModelServerRef
@@ -27,12 +28,14 @@ from responses_api_agents.osworld_agent.app import (
     OSWorldRunRequest,
     OSWorldVerifyResponse,
     _append_model_io,
+    _apply_sandbox_provider_overrides,
     _build_messages_model_fn,
     _build_response,
     _log_context_headers,
     _model_io_images,
     _normalize_chat_message,
     _resolve_policy_model_name,
+    _resolve_run_rollout_purpose,
     _validate_runner_runtime,
 )
 
@@ -188,9 +191,7 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(
 
 @patch("openai.DefaultHttpxClient")
 @patch("openai.OpenAI")
-def test_messages_model_fn_forwards_explicit_nemo_rl_rollout_purpose(
-    mock_openai, mock_http_client
-) -> None:
+def test_messages_model_fn_forwards_explicit_nemo_rl_rollout_purpose(mock_openai, mock_http_client) -> None:
     message = SimpleNamespace(content="done", tool_calls=[], model_extra={})
     client = mock_openai.return_value
     client.chat.completions.create.return_value = SimpleNamespace(
@@ -215,9 +216,7 @@ def test_messages_model_fn_forwards_explicit_nemo_rl_rollout_purpose(
     )
 
     sent = client.chat.completions.create.call_args.kwargs
-    assert json.loads(sent["metadata"]["extra_body"]) == {
-        "nemo_rl_rollout_purpose": "evaluation"
-    }
+    assert json.loads(sent["metadata"]["extra_body"]) == {"nemo_rl_rollout_purpose": "evaluation"}
 
 
 def test_omni_runtime_model_overrides_stale_global_provenance(monkeypatch, caplog) -> None:
@@ -408,8 +407,7 @@ def test_normalize_chat_message_recovers_action_click_after_think_wrapper() -> N
 
     assert normalized["reasoning_content"] == "Close the unexpected tab."
     assert normalized["content"] == (
-        "## Action:\nExecute the generated click action.\n"
-        "## Code:\n```python\npyautogui.click(0.17, 0.042)\n```"
+        "## Action:\nExecute the generated click action.\n## Code:\n```python\npyautogui.click(0.17, 0.042)\n```"
     )
     assert normalized["raw_content"] == raw_content
     assert normalized["generation_token_ids"] == [20, 21]
@@ -598,6 +596,29 @@ def make_config(**overrides: Any) -> OSWorldAgentConfig:
     return OSWorldAgentConfig(**base)
 
 
+def test_sandbox_provider_overrides_merge_only_selected_provider() -> None:
+    provider = {
+        "opensandbox": {
+            "connection": {"domain": "sandbox.internal"},
+            "create": {"timeout_s": 1500, "retries": 10},
+        }
+    }
+    overrides = {
+        "opensandbox": {"create": {"timeout_s": 180, "retries": 1}},
+        "docker": {"create": {"start_timeout_s": 60}},
+    }
+
+    resolved = _apply_sandbox_provider_overrides(provider, overrides)
+
+    assert resolved == {
+        "opensandbox": {
+            "connection": {"domain": "sandbox.internal"},
+            "create": {"timeout_s": 180, "retries": 1},
+        }
+    }
+    assert provider["opensandbox"]["create"] == {"timeout_s": 1500, "retries": 10}
+
+
 def make_run_request(
     osworld_task: Optional[Dict[str, Any]] = None,
     *,
@@ -622,6 +643,21 @@ def make_run_request(
         verifier_metadata=metadata,
         rollout_purpose=rollout_purpose,
     )
+
+
+def test_resolve_run_rollout_purpose_accepts_metadata_carrier() -> None:
+    request = make_run_request(rollout_purpose=None)
+    request.responses_create_params.metadata = {"nemo_rl_rollout_purpose": "evaluation"}
+
+    assert _resolve_run_rollout_purpose(request) == "evaluation"
+
+
+def test_resolve_run_rollout_purpose_rejects_carrier_conflict() -> None:
+    request = make_run_request(rollout_purpose="training")
+    request.responses_create_params.metadata = {"nemo_rl_rollout_purpose": "evaluation"}
+
+    with pytest.raises(ValueError, match="carriers disagree"):
+        _resolve_run_rollout_purpose(request)
 
 
 def test_build_response_always_emits_semantic_trajectory() -> None:
@@ -1013,6 +1049,50 @@ class TestApp:
         run_resp = client.post("/run", json={})
         assert run_resp.status_code != 404
 
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    def test_http_run_recovers_evaluation_rollout_purpose_from_metadata(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+    ) -> None:
+        """Exercise the real FastAPI/Pydantic boundary used by NeMo-RL."""
+        assert "rollout_purpose" in OSWorldRunRequest.__annotations__
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        mock_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": True}
+        agent = OSWorldAgent(config=make_config(), server_client=server_client)
+        request = make_run_request(
+            osworld_task=DEFAULT_OSWORLD_TASK,
+            temperature=0.6,
+            top_p=0.95,
+            max_output_tokens=768,
+            rollout_purpose="evaluation",
+        )
+        payload = {
+            **request.model_dump(mode="json"),
+            "_ng_task_index": 4,
+            "_ng_rollout_index": 0,
+        }
+        # Reproduce a generic /run boundary that keeps the standard
+        # responses_create_params model but discards a top-level extension.
+        payload.pop("rollout_purpose")
+        payload["responses_create_params"]["metadata"] = {"nemo_rl_rollout_purpose": "evaluation"}
+
+        response = TestClient(agent.setup_webserver()).post("/run", json=payload)
+
+        assert response.status_code == 200
+        assert response.json()["rollout_purpose"] == "evaluation"
+        positional_args, _ = mock_remote.options.return_value.remote.call_args
+        assert positional_args[1]["rollout_purpose"] == "evaluation"
+
     @patch("benchmarks.osworld.assets.ensure_osworld_assets")
     def test_setup_webserver_idempotently_prefetches_configured_assets(self, mock_ensure) -> None:
         mock_ensure.return_value = SimpleNamespace(
@@ -1213,6 +1293,45 @@ class TestApp:
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
+    async def test_run_applies_osworld_scoped_opensandbox_create_budget(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        global_config = mock_load_from_global_config.return_value.global_config_dict
+        global_config["sandbox"] = {
+            "opensandbox": {
+                "connection": {"domain": "sandbox.internal"},
+                "create": {"timeout_s": 1500, "retries": 10},
+            }
+        }
+        mock_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+        agent = OSWorldAgent(
+            config=make_config(
+                sandbox_provider="sandbox",
+                sandbox_provider_overrides={"opensandbox": {"create": {"timeout_s": 180, "retries": 1}}},
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        runner_kwargs = mock_remote.options.return_value.remote.call_args.args[1]
+        assert runner_kwargs["sandbox_provider_config"] == {
+            "opensandbox": {
+                "connection": {"domain": "sandbox.internal"},
+                "create": {"timeout_s": 180, "retries": 1},
+            }
+        }
+
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
     async def test_proxy_required_task_runs_directly_when_proxy_is_disabled(
         self,
         mock_to_thread,
@@ -1376,6 +1495,67 @@ class TestApp:
         assert response.reward == 0.0
         assert "RuntimeError" in response.verifier_metadata["osworld_error"]
         assert "docker daemon unreachable" in response.verifier_metadata["osworld_error"]
+
+    @patch("responses_api_agents.osworld_agent.app.ray.cancel")
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_run_end_to_end_timeout_cancels_ray_task_and_masks_sample(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        mock_ray_cancel,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        future = MagicMock()
+        mock_remote.options.return_value.remote.return_value = future
+        mock_to_thread.side_effect = [ray.exceptions.GetTimeoutError("deadline"), RuntimeError("cancelled")]
+
+        agent = OSWorldAgent(
+            config=make_config(task_timeout=12),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        response = await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        mock_ray_cancel.assert_called_once_with(future, force=False)
+        assert response.reward == 0.0
+        assert response.mask_sample is True
+        assert response.verifier_metadata["osworld_termination_reason"] == "task_timeout"
+        assert response.verifier_metadata["osworld_error"] == ("task_timeout exceeded (12s) during end-to-end rollout")
+
+    @patch("responses_api_agents.osworld_agent.app.ray.cancel")
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_run_end_to_end_timeout_force_cancels_after_cleanup_grace(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        mock_ray_cancel,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        future = MagicMock()
+        mock_remote.options.return_value.remote.return_value = future
+        mock_to_thread.side_effect = [
+            ray.exceptions.GetTimeoutError("deadline"),
+            ray.exceptions.GetTimeoutError("cleanup grace"),
+        ]
+
+        agent = OSWorldAgent(
+            config=make_config(task_timeout=12, task_cancel_grace_s=3),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        response = await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        assert mock_ray_cancel.call_args_list == [call(future, force=False), call(future, force=True)]
+        assert response.mask_sample is True
+        assert response.verifier_metadata["osworld_termination_reason"] == "task_timeout"
 
     @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")

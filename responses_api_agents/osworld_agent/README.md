@@ -196,13 +196,19 @@ Environment and execution:
 - `sandbox_provider` selects a named Gym Sandbox provider configuration;
   `sandbox_spec` supplies the provider-neutral image/resources/entrypoint, and
   `sandbox_vm_path` selects the read-only OSWorld qcow2 base.
+  `sandbox_provider_overrides` applies an OSWorld-only recursive delta to the
+  selected provider after named configuration resolution. For example, the
+  default OpenSandbox delta bounds VM admission retries without shortening the
+  shared provider budget used by other Gym workloads.
 - `sandbox_require_kvm`, `sandbox_ready_timeout_s`, and
   `sandbox_ready_poll_s` control the OSWorld Sandbox startup gate.
 - `concurrency` limits simultaneous `/run` requests.
 - `max_steps`, `sleep_after_execution`, `step_timeout`, and `task_timeout`
-  bound rollout work. `task_timeout` is checked between steps and applied to
-  Pointer model requests; deployment orchestration must bound other lifecycle
-  operations such as environment reset and evaluation.
+  bound rollout work. `task_timeout` is the end-to-end Ray attempt deadline,
+  covering sandbox creation, environment setup, agent steps, and evaluation;
+  it is also checked cooperatively between child steps and applied to Pointer
+  model requests. `task_cancel_grace_s` bounds sandbox cleanup before the
+  parent force-cancels a worker that remains stuck.
 - `cache_dir` is OSWorld's mutable per-run cache; `setup_cache_dir` points to
   the read-only cache populated by benchmark preparation.
 
