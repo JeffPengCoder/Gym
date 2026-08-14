@@ -2,11 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.metadata
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from responses_api_agents.osworld_agent import runtime_dependencies
+
+
+def _write_executable(path: Path, source: str) -> None:
+    path.write_text(source, encoding="utf-8")
+    path.chmod(0o755)
 
 
 def test_managed_agent_venv_matches_gym_layout(tmp_path: Path) -> None:
@@ -107,3 +114,42 @@ def test_runtime_dependency_startup_error_has_copyable_scoped_installer(monkeypa
     assert "this agent venv" in message
     assert "torchvision==0.26.0" in message
     assert f"bash '{installer.resolve()}' '{agent_venv.resolve()}'" in message
+
+
+def test_optional_runtime_installer_matches_agent_torch_backend(tmp_path: Path) -> None:
+    agent_dir = Path(runtime_dependencies.__file__).resolve().parent
+    installer = agent_dir / "install_optional_runtime_deps.sh"
+    backend = (agent_dir / "uv-torch-backend.txt").read_text(encoding="utf-8").strip()
+    venv = tmp_path / "managed venv"
+    fake_bin = tmp_path / "fake-bin"
+    ready = tmp_path / "runtime-ready"
+    uv_argv = tmp_path / "uv-argv"
+    (venv / "bin").mkdir(parents=True)
+    fake_bin.mkdir()
+    _write_executable(
+        venv / "bin/python",
+        '#!/usr/bin/env bash\n[[ -f "${FAKE_RUNTIME_READY}" ]]\n',
+    )
+    _write_executable(
+        fake_bin / "uv",
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "${FAKE_UV_ARGV}"\ntouch "${FAKE_RUNTIME_READY}"\n',
+    )
+    env = os.environ | {
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_RUNTIME_READY": str(ready),
+        "FAKE_UV_ARGV": str(uv_argv),
+    }
+
+    result = subprocess.run(
+        ["bash", str(installer), str(venv)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    argv = uv_argv.read_text(encoding="utf-8").splitlines()
+    assert argv[:5] == ["pip", "install", "--no-config", "--torch-backend", backend]
+    assert argv[5:7] == ["--python", str(venv / "bin/python")]
+    assert "torchvision==0.26.0" in argv

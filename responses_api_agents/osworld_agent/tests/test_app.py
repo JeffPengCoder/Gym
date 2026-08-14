@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,6 +28,7 @@ from responses_api_agents.osworld_agent.app import (
     OSWorldVerifyResponse,
     _append_model_io,
     _build_messages_model_fn,
+    _build_response,
     _log_context_headers,
     _model_io_images,
     _normalize_chat_message,
@@ -132,8 +133,11 @@ def test_log_context_headers_do_not_change_model_payload() -> None:
     }
 
 
+@patch("openai.DefaultHttpxClient")
 @patch("openai.OpenAI")
-def test_messages_model_fn_propagates_task_context_in_headers_and_logs(mock_openai, monkeypatch, tmp_path) -> None:
+def test_messages_model_fn_propagates_task_context_in_headers_and_logs(
+    mock_openai, mock_http_client, monkeypatch, tmp_path
+) -> None:
     log_path = tmp_path / "model-io-agent.jsonl"
     monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(log_path))
     message = SimpleNamespace(content="done", tool_calls=[], model_extra={})
@@ -158,6 +162,12 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(mock_open
 
     call(messages, payload)
 
+    mock_http_client.assert_called_once_with(trust_env=False)
+    mock_openai.assert_called_once_with(
+        base_url="http://policy/v1",
+        api_key="test-key",  # pragma: allowlist secret
+        http_client=mock_http_client.return_value,
+    )
     sent = client.chat.completions.create.call_args.kwargs
     assert sent["messages"] == messages
     assert "_osworld_log_context" not in sent
@@ -173,6 +183,40 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(mock_open
         "messages": messages,
         "max_tokens": 32,
         "temperature": 0.6,
+    }
+
+
+@patch("openai.DefaultHttpxClient")
+@patch("openai.OpenAI")
+def test_messages_model_fn_forwards_explicit_nemo_rl_rollout_purpose(
+    mock_openai, mock_http_client
+) -> None:
+    message = SimpleNamespace(content="done", tool_calls=[], model_extra={})
+    client = mock_openai.return_value
+    client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason="stop")]
+    )
+    call = _build_messages_model_fn(
+        base_url="http://policy/v1",
+        model_name="policy",
+        api_key="test-key",  # pragma: allowlist secret
+        rollout_purpose="evaluation",
+    )
+    messages = [{"role": "user", "content": "inspect"}]
+
+    call(
+        messages,
+        {
+            "model": "policy",
+            "messages": messages,
+            "max_tokens": 64,
+            "temperature": 0.6,
+        },
+    )
+
+    sent = client.chat.completions.create.call_args.kwargs
+    assert json.loads(sent["metadata"]["extra_body"]) == {
+        "nemo_rl_rollout_purpose": "evaluation"
     }
 
 
@@ -223,6 +267,28 @@ def test_normalize_chat_message_preserves_reasoning_and_native_tool_calls() -> N
     assert "<tool_call>" in normalized["content"]
     assert '"name": "computer_use"' in normalized["content"]
     assert '"coordinate": [500, 250]' in normalized["content"]
+
+
+def test_normalize_chat_message_preserves_training_metadata_from_model_extra() -> None:
+    raw_content = (
+        "<think>Inspect the screenshot.</think>## Action:\nClick.\n## Code:\n```python\npyautogui.click(1, 2)\n```"
+    )
+    message = SimpleNamespace(
+        content=raw_content,
+        tool_calls=[],
+        model_extra={
+            "prompt_token_ids": [10, 11],
+            "generation_token_ids": [20, 21],
+            "generation_log_probs": [-0.1, -0.2],
+        },
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["raw_content"] == raw_content
+    assert normalized["prompt_token_ids"] == [10, 11]
+    assert normalized["generation_token_ids"] == [20, 21]
+    assert normalized["generation_log_probs"] == [-0.1, -0.2]
 
 
 def test_normalize_chat_message_recovers_vllm_wrapped_reasoning() -> None:
@@ -298,6 +364,106 @@ def test_normalize_chat_message_recovers_serialized_text_parts() -> None:
     assert normalized["content"].startswith("## Action:\nClick the first target.")
     assert "pyautogui.click(1, 2)" in normalized["content"]
     assert "computer.terminate" not in normalized["content"]
+
+
+def test_normalize_chat_message_recovers_serialized_click_part() -> None:
+    parts = [
+        {"type": "click", "x": 0.984, "y": 0.129},
+        {
+            "type": "text",
+            "text": "## Action:\nClose the Chrome update notification.\n",
+        },
+    ]
+    message = SimpleNamespace(content=repr(parts), tool_calls=[], model_extra={})
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["content"] == (
+        "## Action:\nClose the Chrome update notification.\n## Code:\n```python\npyautogui.click(0.984, 0.129)\n```"
+    )
+    assert "normalization_error" not in normalized
+
+
+def test_normalize_chat_message_recovers_action_click_after_think_wrapper() -> None:
+    parts = [
+        {
+            "type": "action",
+            "action": "click",
+            "target": "close_tab",
+            "input": {"x": 0.17, "y": 0.042},
+        }
+    ]
+    raw_content = "<think>Close the unexpected tab.</think>\n" + repr(parts)
+    message = SimpleNamespace(
+        content=raw_content,
+        tool_calls=[],
+        model_extra={
+            "prompt_token_ids": [10, 11],
+            "generation_token_ids": [20, 21],
+            "generation_log_probs": [-0.1, -0.2],
+        },
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["reasoning_content"] == "Close the unexpected tab."
+    assert normalized["content"] == (
+        "## Action:\nExecute the generated click action.\n"
+        "## Code:\n```python\npyautogui.click(0.17, 0.042)\n```"
+    )
+    assert normalized["raw_content"] == raw_content
+    assert normalized["generation_token_ids"] == [20, 21]
+    assert "normalization_error" not in normalized
+
+
+def test_structured_normalization_failure_preserves_exact_generation_evidence() -> None:
+    raw_content = [{"type": "unsupported-native-action", "value": 7}]
+    message = SimpleNamespace(
+        content=raw_content,
+        tool_calls=[],
+        model_extra={
+            "prompt_token_ids": [10, 11],
+            "generation_token_ids": [20, 21],
+            "generation_log_probs": [-0.1, -0.2],
+            "routed_experts": "route-evidence",
+        },
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["content"] == repr(raw_content)
+    assert normalized["raw_content"] == raw_content
+    assert normalized["normalization_error"]["type"] == "ValueError"
+    assert normalized["prompt_token_ids"] == [10, 11]
+    assert normalized["generation_token_ids"] == [20, 21]
+    assert normalized["generation_log_probs"] == [-0.1, -0.2]
+    assert normalized["routed_experts"] == "route-evidence"
+
+
+def test_post_think_normalization_failure_preserves_exact_generation_evidence() -> None:
+    parts = [{"type": "unsupported-native-action", "value": 7}]
+    raw_content = "<think>Inspect the screenshot.</think>\n" + repr(parts)
+    message = SimpleNamespace(
+        content=raw_content,
+        tool_calls=[],
+        model_extra={
+            "prompt_token_ids": [10, 11],
+            "generation_token_ids": [20, 21],
+            "generation_log_probs": [-0.1, -0.2],
+            "routed_experts": "route-evidence",
+        },
+    )
+
+    normalized = _normalize_chat_message(message, structured=True)
+
+    assert normalized["reasoning_content"] == "Inspect the screenshot."
+    assert normalized["content"] == repr(parts)
+    assert normalized["raw_content"] == raw_content
+    assert normalized["normalization_error"]["type"] == "ValueError"
+    assert normalized["prompt_token_ids"] == [10, 11]
+    assert normalized["generation_token_ids"] == [20, 21]
+    assert normalized["generation_log_probs"] == [-0.1, -0.2]
+    assert normalized["routed_experts"] == "route-evidence"
 
 
 def test_normalize_chat_message_recovers_nested_serialized_text_parts() -> None:
@@ -438,6 +604,8 @@ def make_run_request(
     extra_metadata: Optional[Dict[str, Any]] = None,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
+    max_output_tokens: Optional[int] = None,
+    rollout_purpose: Optional[Literal["training", "evaluation"]] = None,
 ) -> OSWorldRunRequest:
     metadata: Dict[str, Any] = {"task_id": "test-task-001", "domain": "chrome"}
     if osworld_task is not None:
@@ -446,10 +614,302 @@ def make_run_request(
         metadata.update(extra_metadata)
     return OSWorldRunRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-            input=[], temperature=temperature, top_p=top_p
+            input=[],
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_output_tokens,
         ),
         verifier_metadata=metadata,
+        rollout_purpose=rollout_purpose,
     )
+
+
+def test_build_response_always_emits_semantic_trajectory() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    response = _build_response(request, DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9)
+
+    contract = response.response.trajectory_contract
+    assert contract is not None
+    assert contract["schema_version"] == 2
+    assert contract["mode"] == "osworld_semantic_trajectory"
+    assert contract["identity_source"] == "derived"
+    assert contract["capabilities"]["semantic_trajectory"] is True
+    assert contract["capabilities"]["exact_model_call_evidence"] is False
+    assert response.response.context_compaction_contract is None
+    assert len(response.response.trajectory_transitions or []) == 2
+
+
+def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
+    request = OSWorldRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        verifier_metadata={"task_id": "task-001", "domain": "chrome"},
+        context_compaction_contract_version=2,
+        context_compaction_rollout_id="rollout-test-001",
+        context_compaction_group_id="group-test-001",
+        context_compaction_task_id="task-001",
+        context_compaction_rollout_index=0,
+        context_compaction_attempt_index=0,
+    )
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "steps": [
+            {
+                "step": 0,
+                "actions": ["pyautogui.click(10, 20)"],
+                "reward": 0.0,
+                "done": False,
+                "info": {
+                    "agent": {
+                        "model_calls": [
+                            {
+                                "parse_attempt": 1,
+                                "prompt_messages": [
+                                    {"role": "system", "content": "system"},
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "image_url",
+                                                "image_url": {"url": "data:image/png;base64,Zmlyc3Q="},
+                                            }
+                                        ],
+                                    },
+                                ],
+                                "response": {
+                                    "raw_content": "first action",
+                                    "prompt_token_ids": [10, 11],
+                                    "generation_token_ids": [20, 21],
+                                    "generation_log_probs": [-0.1, -0.2],
+                                },
+                                "accepted": True,
+                                "parse_error": None,
+                                "parsed_actions": ["pyautogui.click(10, 20)"],
+                            }
+                        ]
+                    }
+                },
+            },
+            {
+                "step": 1,
+                "actions": ["DONE"],
+                "reward": 1.0,
+                "done": True,
+                "info": {
+                    "agent": {
+                        "model_calls": [
+                            {
+                                "parse_attempt": 1,
+                                "prompt_messages": [
+                                    {"role": "system", "content": "rewritten system"},
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "image_url",
+                                                "image_url": {"url": "data:image/png;base64,c2Vjb25k"},
+                                            }
+                                        ],
+                                    },
+                                ],
+                                "response": {
+                                    "raw_content": "finish",
+                                    # Deliberately not prefixed by turn 1's prompt + completion.
+                                    "prompt_token_ids": [99, 100],
+                                    "generation_token_ids": [101],
+                                    "generation_log_probs": [-0.3],
+                                },
+                                "accepted": True,
+                                "parse_error": None,
+                                "parsed_actions": ["DONE"],
+                            }
+                        ]
+                    }
+                },
+            },
+        ],
+    }
+
+    response = _build_response(
+        request,
+        result,
+        "test-policy",
+        1.0,
+        0.9,
+        max_trajectory_length=3,
+        max_output_tokens=512,
+    )
+
+    trace_response = response.response
+    output = [item.model_dump(exclude_none=True) for item in trace_response.output]
+    assert [item["role"] for item in output] == ["assistant", "assistant"]
+    assert output[0]["generation_token_ids"] == [20, 21]
+    assert output[1]["prompt_token_ids"] == [99, 100]
+    contract = trace_response.context_compaction_contract
+    assert contract is not None
+    assert contract["schema_version"] == 2
+    assert contract["mode"] == "exact_trace_authority"
+    assert contract["rollout_id"] == "rollout-test-001"
+    assert contract["group_id"] == "group-test-001"
+    assert contract["task_id"] == "task-001"
+    assert contract["rollout_index"] == 0
+    assert contract["attempt_index"] == 0
+    assert contract["identity_source"] == "caller"
+    evidence = trace_response.completion_evidence
+    assert evidence is not None
+    assert [item["segment_index"] for item in evidence] == [0, 1]
+    assert [item["expected_append_compatible"] for item in evidence] == [False, False]
+    assert evidence[1]["compaction_event_id"] is not None
+    assert len(trace_response.boundary_events or []) == 1
+    assert len(trace_response.media_assets or {}) == 2
+    model_calls = trace_response.trajectory_model_calls or []
+    assert len(model_calls) == 2
+    assert model_calls[0]["state"]["prompt_messages"][1]["content"][0] == {
+        "type": "input_image",
+        "media_id": model_calls[0]["state"]["media_ids"][0],
+        "detail": "high",
+    }
+    assert model_calls[0]["action"] == {
+        "raw_completion": "first action",
+        "parsed_actions": ["pyautogui.click(10, 20)"],
+    }
+    assert model_calls[0]["generation_evidence"]["generation_log_probs"] == [
+        -0.1,
+        -0.2,
+    ]
+    first_media_id = model_calls[0]["state"]["media_ids"][0]
+    assert (trace_response.media_assets or {})[first_media_id]["source_part"][
+        "image_url"
+    ] == "data:image/png;base64,Zmlyc3Q="
+    assert response.verifier_metadata["osworld_steps"][0]["info"]["agent"] == {"model_call_count": 1}
+    assert [item["action"]["parsed_actions"] for item in trace_response.trajectory_transitions or []] == [
+        ["pyautogui.click(10, 20)"],
+        ["DONE"],
+    ]
+
+
+def test_build_exact_trace_response_derives_identity_for_benchmarking() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "steps": [
+            {
+                "step": 0,
+                "model_text": "action",
+                "actions": ["DONE"],
+                "reward": 1.0,
+                "done": True,
+                "info": {
+                    "agent": {
+                        "model_calls": [
+                            {
+                                "parse_attempt": 1,
+                                "prompt_messages": [{"role": "user", "content": "inspect"}],
+                                "response": {
+                                    "raw_content": "action",
+                                    "prompt_token_ids": [1],
+                                    "generation_token_ids": [2],
+                                    "generation_log_probs": [-0.1],
+                                },
+                                "accepted": True,
+                                "parse_error": None,
+                                "parsed_actions": ["DONE"],
+                            }
+                        ]
+                    }
+                },
+            }
+        ],
+    }
+
+    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+
+    trajectory_contract = response.response.trajectory_contract
+    exact_contract = response.response.context_compaction_contract
+    assert trajectory_contract is not None
+    assert exact_contract is not None
+    assert trajectory_contract["identity_source"] == "derived"
+    assert trajectory_contract["training_eligibility"]["status"] == "ineligible"
+    assert exact_contract["identity_source"] == "derived"
+    assert exact_contract["rollout_id"] == trajectory_contract["rollout_id"]
+
+
+def test_build_response_accepts_generic_caller_trajectory_identity() -> None:
+    request = OSWorldRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        verifier_metadata={"task_id": "task-001", "domain": "chrome"},
+        trajectory_identity={
+            "schema_version": 1,
+            "rollout_id": "rollout-generic-001",
+            "group_id": "group-generic-001",
+            "task_id": "task-001",
+            "rollout_index": 2,
+            "attempt_index": 0,
+        },
+    )
+
+    response = _build_response(request, DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9)
+
+    contract = response.response.trajectory_contract
+    assert contract is not None
+    assert contract["identity_source"] == "caller"
+    assert contract["rollout_id"] == "rollout-generic-001"
+    assert contract["rollout_index"] == 2
+
+
+def test_build_response_rejects_partial_caller_identity() -> None:
+    request = OSWorldRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        verifier_metadata={"task_id": "task-001"},
+        context_compaction_contract_version=2,
+    )
+
+    with pytest.raises(ValueError, match="identity is incomplete"):
+        _build_response(request, DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9)
+
+
+def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    calls = []
+    for attempt, token_id, accepted in ((1, 20, False), (2, 21, True)):
+        calls.append(
+            {
+                "parse_attempt": attempt,
+                "prompt_messages": [{"role": "user", "content": f"attempt {attempt}"}],
+                "response": {
+                    "raw_content": f"sample {attempt}",
+                    "prompt_token_ids": [10, attempt],
+                    "generation_token_ids": [token_id],
+                    "generation_log_probs": [-0.1 * attempt],
+                },
+                "accepted": accepted,
+                "parse_error": None if accepted else "invalid Python",
+                "parsed_actions": ["DONE"] if accepted else [],
+            }
+        )
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "steps": [
+            {
+                "step": 0,
+                "model_text": "sample 2",
+                "actions": ["DONE"],
+                "reward": 1.0,
+                "done": True,
+                "info": {"agent": {"model_calls": calls}},
+            }
+        ],
+    }
+
+    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+
+    assert len(response.response.output) == 2
+    assert [item["accepted"] for item in response.response.completion_evidence or []] == [
+        False,
+        True,
+    ]
+    [transition] = response.response.trajectory_transitions or []
+    assert len(transition["state"]["model_call_ids"]) == 2
+    assert transition["action"]["accepted_model_call_id"] == transition["state"]["model_call_ids"][1]
 
 
 def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict):
@@ -465,6 +925,13 @@ def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_serve
 class TestApp:
     def test_sanity(self) -> None:
         OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+
+    def test_removed_training_switches_fail_loudly(self) -> None:
+        with pytest.raises(ValueError, match="trajectory evidence is now automatic"):
+            OSWorldAgent(
+                config=make_config(training_mode=True),
+                server_client=MagicMock(spec=ServerClient),
+            )
 
     @patch("responses_api_agents.osworld_agent.app.load_attr")
     def test_startup_validates_runner_in_agent_runtime(self, mock_load_attr) -> None:
@@ -599,8 +1066,23 @@ class TestApp:
 
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {"observability_enabled": True}
-        agent = OSWorldAgent(config=make_config(), server_client=server_client)
-        request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK, temperature=0.7, top_p=0.95)
+        agent = OSWorldAgent(
+            config=make_config(
+                agent_kwargs={"parse_retries": 5},
+                agent_kwargs_by_rollout_purpose={
+                    "training": {"parse_retries": 1},
+                    "evaluation": {"parse_retries": 5},
+                },
+            ),
+            server_client=server_client,
+        )
+        request = make_run_request(
+            osworld_task=DEFAULT_OSWORLD_TASK,
+            temperature=0.7,
+            top_p=0.95,
+            max_output_tokens=4096,
+            rollout_purpose="evaluation",
+        )
         request = OSWorldRunRequest.model_validate(
             {
                 **request.model_dump(),
@@ -626,6 +1108,7 @@ class TestApp:
         # Per-request overrides win over the agent default.
         assert response.response.temperature == 0.7
         assert response.response.top_p == 0.95
+        assert response.rollout_purpose == "evaluation"
         # Ray remote was dispatched exactly once with our task spec.
         mock_remote.options.assert_called_once()
         mock_remote.options.return_value.remote.assert_called_once()
@@ -636,13 +1119,50 @@ class TestApp:
         assert positional_args[1]["docker_port_lock_timeout"] == 300.0
         assert positional_args[1]["enable_proxy"] is False
         assert positional_args[1]["proxy_config_file"] is None
+        assert positional_args[1]["max_tokens"] == 4096
+        assert positional_args[1]["rollout_purpose"] == "evaluation"
+        assert positional_args[1]["agent_kwargs"]["parse_retries"] == 5
         assert positional_args[1]["log_context"] == {
             "run_id": "run-001",
             "adapter": "gym",
+            "rollout_purpose": "evaluation",
             "task_id": "test-task-001",
             "domain": "chrome",
             "task_attempt": 1,
         }
+        runtime_env = mock_remote.options.call_args.kwargs["runtime_env"]
+        assert runtime_env["py_executable"]
+        assert runtime_env["env_vars"]["RUN_TAG"] == "run-001"
+
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_run_forwards_rollout_diagnostic_paths_to_ray_child(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        monkeypatch,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", "/workspace/output/r6f/osworld-model-io.jsonl")
+        monkeypatch.setenv("OSWORLD_TASK_ARTIFACT_ROOT", "/workspace/output/r6f/osworld-tasks")
+        monkeypatch.setenv("OSWORLD_VM_EXEC_LOG", "/workspace/output/r6f/osworld-vm-exec.jsonl")
+        mock_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        runtime_env = mock_remote.options.call_args.kwargs["runtime_env"]
+        expected_env = {
+            "OSWORLD_MODEL_IO_LOG": "/workspace/output/r6f/osworld-model-io.jsonl",
+            "OSWORLD_TASK_ARTIFACT_ROOT": "/workspace/output/r6f/osworld-tasks",
+            "OSWORLD_VM_EXEC_LOG": "/workspace/output/r6f/osworld-vm-exec.jsonl",
+        }
+        assert {name: runtime_env["env_vars"][name] for name in expected_env} == expected_env
 
     @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
@@ -718,6 +1238,70 @@ class TestApp:
         assert response.verifier_metadata["osworld_proxy_enabled"] is False
         assert response.verifier_metadata["osworld_proxy_configured"] is False
 
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    async def test_proxy_required_task_is_masked_in_explicit_strict_mode(self, mock_remote) -> None:
+        task = {**DEFAULT_OSWORLD_TASK, "proxy": True}
+        agent = OSWorldAgent(
+            config=make_config(enable_proxy=False, allow_direct_proxy_tasks=False),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = await agent.run(make_run_request(osworld_task=task))
+
+        assert response.mask_sample is True
+        assert response.verifier_metadata["osworld_termination_reason"] == "proxy_required_but_disabled"
+        assert response.verifier_metadata["osworld_proxy_required"] is True
+        assert response.verifier_metadata["osworld_proxy_enabled"] is False
+        mock_remote.options.assert_not_called()
+
+    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
+    @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    @patch("asyncio.to_thread")
+    async def test_proxy_required_task_can_run_directly_when_explicitly_allowed(
+        self,
+        mock_to_thread,
+        mock_remote,
+        mock_get_first_server_config_dict,
+        mock_load_from_global_config,
+        monkeypatch,
+    ) -> None:
+        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        monkeypatch.setenv("OSWORLD_ALLOW_DIRECT_PROXY_TASKS", "1")
+        monkeypatch.setenv("PROXY_CONFIG_FILE", "/unused/proxy.json")
+        mock_remote.options.return_value.remote.return_value = MagicMock()
+        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+        task = {**DEFAULT_OSWORLD_TASK, "proxy": True}
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+
+        response = await agent.run(make_run_request(osworld_task=task))
+
+        positional_args, _ = mock_remote.options.return_value.remote.call_args
+        assert positional_args[1]["enable_proxy"] is False
+        assert positional_args[1]["allow_direct_proxy_tasks"] is True
+        assert positional_args[1]["proxy_config_file"] is None
+        assert response.mask_sample is False
+        assert response.verifier_metadata["osworld_proxy_required"] is True
+        assert response.verifier_metadata["osworld_proxy_enabled"] is False
+
+    @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
+    async def test_direct_proxy_mode_rejects_remote_resources_before_ray(self, mock_remote) -> None:
+        task = {**DEFAULT_OSWORLD_TASK, "proxy": True}
+        agent = OSWorldAgent(
+            config=make_config(
+                allow_direct_proxy_tasks=True,
+                resources_server={"type": "resources_servers", "name": "osworld_resources"},
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        response = await agent.run(make_run_request(osworld_task=task))
+
+        assert response.mask_sample is True
+        assert response.verifier_metadata["osworld_termination_reason"] == "proxy_configuration_error"
+        assert "remote Resources Server" in response.verifier_metadata["osworld_error"]
+        mock_remote.options.assert_not_called()
+
     @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
@@ -753,6 +1337,15 @@ class TestApp:
 
     async def test_invalid_proxy_env_value_is_masked(self, monkeypatch) -> None:
         monkeypatch.setenv("OSWORLD_ENABLE_PROXY", "sometimes")
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+
+        response = await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
+
+        assert response.mask_sample is True
+        assert response.verifier_metadata["osworld_termination_reason"] == "proxy_configuration_error"
+
+    async def test_invalid_direct_proxy_env_value_is_masked(self, monkeypatch) -> None:
+        monkeypatch.setenv("OSWORLD_ALLOW_DIRECT_PROXY_TASKS", "sometimes")
         agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
 
         response = await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
