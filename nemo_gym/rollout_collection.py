@@ -70,7 +70,6 @@ _failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
-    is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
 )
 from nemo_gym.server_utils import (
@@ -508,11 +507,23 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    responses_create_params = row.get("responses_create_params") or {}
+    metadata = (
+        responses_create_params.get("metadata")
+        if isinstance(responses_create_params, dict)
+        else {}
+    )
+    metadata_purpose = (
+        metadata.get("nemo_rl_rollout_purpose")
+        if isinstance(metadata, dict)
+        else None
+    )
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
         "rollout_purpose": row.get("rollout_purpose"),
+        "metadata_rollout_purpose": metadata_purpose,
     }
     return {k: v for k, v in summary.items() if v is not None}
 
@@ -1019,6 +1030,11 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
+                print(
+                    "[rollout_collection] /run dispatch "
+                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                    flush=True,
+                )
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 try:
                     await raise_for_status(res)

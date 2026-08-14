@@ -376,6 +376,42 @@ class OSWorldRunRequest(BaseRunRequest):
     rollout_purpose: Optional[Literal["training", "evaluation"]] = None
 
 
+_ROLLOUT_PURPOSE_METADATA_KEY = "nemo_rl_rollout_purpose"
+
+
+def _resolve_run_rollout_purpose(
+    body: OSWorldRunRequest,
+) -> Optional[Literal["training", "evaluation"]]:
+    """Resolve and cross-check the scheduler purpose at the agent boundary.
+
+    NeMo-RL sends the purpose both as the top-level control field and inside
+    responses metadata. The latter survives generic /run schemas which know
+    only standard Responses API fields. Standalone benchmark callers may omit
+    both carriers.
+    """
+
+    top_level = body.rollout_purpose
+    metadata = body.responses_create_params.metadata or {}
+    metadata_purpose = metadata.get(_ROLLOUT_PURPOSE_METADATA_KEY)
+    if metadata_purpose is not None and metadata_purpose not in {
+        "training",
+        "evaluation",
+    }:
+        raise ValueError(
+            f"invalid {_ROLLOUT_PURPOSE_METADATA_KEY}: {metadata_purpose!r}"
+        )
+    if (
+        top_level is not None
+        and metadata_purpose is not None
+        and top_level != metadata_purpose
+    ):
+        raise ValueError(
+            "rollout purpose carriers disagree: "
+            f"top_level={top_level!r}, metadata={metadata_purpose!r}"
+        )
+    return top_level or metadata_purpose
+
+
 class OSWorldAgentResponse(NeMoGymResponse):
     """OSWorld response plus universal trajectory and optional exact evidence."""
 
@@ -542,6 +578,14 @@ def _build_messages_model_fn(
                     separators=(",", ":"),
                 )
             }
+        print(
+            "OSWORLD_MODEL_PURPOSE|"
+            f"purpose={rollout_purpose}|"
+            f"temperature={create_kwargs.get('temperature')}|"
+            f"top_p={create_kwargs.get('top_p')}|"
+            f"carrier={'metadata' if rollout_purpose is not None else 'none'}",
+            flush=True,
+        )
         model_io_enabled = bool(os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip())
         current_call = 0
         started_ns = 0
@@ -904,6 +948,11 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     top_p = runner_kwargs.pop("top_p")
     rollout_purpose = runner_kwargs.pop("rollout_purpose", None)
     log_context = _normalize_log_context(runner_kwargs.pop("log_context", None))
+    print(
+        "OSWORLD_CHILD_PURPOSE|"
+        f"purpose={rollout_purpose}|temperature={temperature}|top_p={top_p}",
+        flush=True,
+    )
     model_fn = _build_model_fn(
         base_url=base_url,
         model_name=model_name,
@@ -1065,6 +1114,19 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
 
     async def run(self, body: OSWorldRunRequest = Body()) -> OSWorldVerifyResponse:
         async with self.sem:
+            top_level_rollout_purpose = body.rollout_purpose
+            resolved_rollout_purpose = _resolve_run_rollout_purpose(body)
+            # Normalize once so every downstream consumer and the response use
+            # the same checked value even if the generic HTTP boundary retained
+            # only the metadata carrier.
+            body.rollout_purpose = resolved_rollout_purpose
+            print(
+                "OSWORLD_RUN_PURPOSE|"
+                f"top_level={top_level_rollout_purpose or 'none'}|"
+                f"metadata={(body.responses_create_params.metadata or {}).get(_ROLLOUT_PURPOSE_METADATA_KEY, 'none')}|"
+                f"resolved={resolved_rollout_purpose or 'none'}",
+                flush=True,
+            )
             # The OSWorld task spec lives in verifier_metadata. Allow falling
             # back to model_extra so simple JSONL files can put it at the top
             # level — useful when hand-authoring examples.

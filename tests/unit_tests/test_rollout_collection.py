@@ -92,11 +92,16 @@ class TestRolloutCollection:
             TASK_INDEX_KEY_NAME: 12,
             ROLLOUT_INDEX_KEY_NAME: 3,
             "env_specific_metadata": "do not include",
-            "responses_create_params": {"input": "large prompt", "tools": ["large schema"]},
+            "responses_create_params": {
+                "input": "large prompt",
+                "tools": ["large schema"],
+                "metadata": {"nemo_rl_rollout_purpose": "evaluation"},
+            },
         }
 
         assert _rollout_request_debug_summary(row) == {
             "agent_name": "my_agent",
+            "metadata_rollout_purpose": "evaluation",
             TASK_INDEX_KEY_NAME: 12,
             ROLLOUT_INDEX_KEY_NAME: 3,
         }
@@ -293,12 +298,10 @@ class TestRolloutCollection:
             sanitized = _rollout_for_wandb(malformed_result)
             assert b"secret" not in orjson.dumps(sanitized)
 
-    @pytest.mark.parametrize("request_debug_enabled", [True, False])
     async def test_run_examples_always_logs_payload_free_failed_run_summary(
         self,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
-        request_debug_enabled: bool,
     ) -> None:
         row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
@@ -321,12 +324,6 @@ class TestRolloutCollection:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
-        monkeypatch.setattr(
-            nemo_gym.rollout_collection,
-            "is_global_aiohttp_client_request_debug_enabled",
-            lambda: request_debug_enabled,
-        )
-
         with pytest.raises(RuntimeError, match="boom"):
             await next(RolloutCollectionHelper().run_examples([row]))
 

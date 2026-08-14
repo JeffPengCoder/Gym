@@ -28,13 +28,14 @@ from responses_api_agents.osworld_agent.app import (
     OSWorldRunRequest,
     OSWorldVerifyResponse,
     _append_model_io,
+    _apply_sandbox_provider_overrides,
     _build_messages_model_fn,
     _build_response,
-    _apply_sandbox_provider_overrides,
     _log_context_headers,
     _model_io_images,
     _normalize_chat_message,
     _resolve_policy_model_name,
+    _resolve_run_rollout_purpose,
     _validate_runner_runtime,
 )
 
@@ -649,6 +650,25 @@ def make_run_request(
     )
 
 
+def test_resolve_run_rollout_purpose_accepts_metadata_carrier() -> None:
+    request = make_run_request(rollout_purpose=None)
+    request.responses_create_params.metadata = {
+        "nemo_rl_rollout_purpose": "evaluation"
+    }
+
+    assert _resolve_run_rollout_purpose(request) == "evaluation"
+
+
+def test_resolve_run_rollout_purpose_rejects_carrier_conflict() -> None:
+    request = make_run_request(rollout_purpose="training")
+    request.responses_create_params.metadata = {
+        "nemo_rl_rollout_purpose": "evaluation"
+    }
+
+    with pytest.raises(ValueError, match="carriers disagree"):
+        _resolve_run_rollout_purpose(request)
+
+
 def test_build_response_always_emits_semantic_trajectory() -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
     response = _build_response(request, DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9)
@@ -1042,7 +1062,7 @@ class TestApp:
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
-    def test_http_run_preserves_evaluation_rollout_purpose(
+    def test_http_run_recovers_evaluation_rollout_purpose_from_metadata(
         self,
         mock_to_thread,
         mock_remote,
@@ -1071,6 +1091,12 @@ class TestApp:
             **request.model_dump(mode="json"),
             "_ng_task_index": 4,
             "_ng_rollout_index": 0,
+        }
+        # Reproduce a generic /run boundary that keeps the standard
+        # responses_create_params model but discards a top-level extension.
+        payload.pop("rollout_purpose")
+        payload["responses_create_params"]["metadata"] = {
+            "nemo_rl_rollout_purpose": "evaluation"
         }
 
         response = TestClient(agent.setup_webserver()).post("/run", json=payload)
