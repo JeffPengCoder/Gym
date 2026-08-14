@@ -508,16 +508,8 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
     responses_create_params = row.get("responses_create_params") or {}
-    metadata = (
-        responses_create_params.get("metadata")
-        if isinstance(responses_create_params, dict)
-        else {}
-    )
-    metadata_purpose = (
-        metadata.get("nemo_rl_rollout_purpose")
-        if isinstance(metadata, dict)
-        else None
-    )
+    metadata = responses_create_params.get("metadata") if isinstance(responses_create_params, dict) else {}
+    metadata_purpose = metadata.get("nemo_rl_rollout_purpose") if isinstance(metadata, dict) else None
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),

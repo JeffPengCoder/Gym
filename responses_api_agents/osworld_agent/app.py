@@ -397,18 +397,9 @@ def _resolve_run_rollout_purpose(
         "training",
         "evaluation",
     }:
-        raise ValueError(
-            f"invalid {_ROLLOUT_PURPOSE_METADATA_KEY}: {metadata_purpose!r}"
-        )
-    if (
-        top_level is not None
-        and metadata_purpose is not None
-        and top_level != metadata_purpose
-    ):
-        raise ValueError(
-            "rollout purpose carriers disagree: "
-            f"top_level={top_level!r}, metadata={metadata_purpose!r}"
-        )
+        raise ValueError(f"invalid {_ROLLOUT_PURPOSE_METADATA_KEY}: {metadata_purpose!r}")
+    if top_level is not None and metadata_purpose is not None and top_level != metadata_purpose:
+        raise ValueError(f"rollout purpose carriers disagree: top_level={top_level!r}, metadata={metadata_purpose!r}")
     return top_level or metadata_purpose
 
 
@@ -949,9 +940,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     rollout_purpose = runner_kwargs.pop("rollout_purpose", None)
     log_context = _normalize_log_context(runner_kwargs.pop("log_context", None))
     print(
-        "OSWORLD_CHILD_PURPOSE|"
-        f"purpose={rollout_purpose}|temperature={temperature}|top_p={top_p}",
-        flush=True,
+        f"OSWORLD_CHILD_PURPOSE|purpose={rollout_purpose}|temperature={temperature}|top_p={top_p}", flush=True
     )
     model_fn = _build_model_fn(
         base_url=base_url,

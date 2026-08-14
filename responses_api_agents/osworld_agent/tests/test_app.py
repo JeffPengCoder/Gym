@@ -191,9 +191,7 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(
 
 @patch("openai.DefaultHttpxClient")
 @patch("openai.OpenAI")
-def test_messages_model_fn_forwards_explicit_nemo_rl_rollout_purpose(
-    mock_openai, mock_http_client
-) -> None:
+def test_messages_model_fn_forwards_explicit_nemo_rl_rollout_purpose(mock_openai, mock_http_client) -> None:
     message = SimpleNamespace(content="done", tool_calls=[], model_extra={})
     client = mock_openai.return_value
     client.chat.completions.create.return_value = SimpleNamespace(
@@ -218,9 +216,7 @@ def test_messages_model_fn_forwards_explicit_nemo_rl_rollout_purpose(
     )
 
     sent = client.chat.completions.create.call_args.kwargs
-    assert json.loads(sent["metadata"]["extra_body"]) == {
-        "nemo_rl_rollout_purpose": "evaluation"
-    }
+    assert json.loads(sent["metadata"]["extra_body"]) == {"nemo_rl_rollout_purpose": "evaluation"}
 
 
 def test_omni_runtime_model_overrides_stale_global_provenance(monkeypatch, caplog) -> None:
@@ -652,18 +648,14 @@ def make_run_request(
 
 def test_resolve_run_rollout_purpose_accepts_metadata_carrier() -> None:
     request = make_run_request(rollout_purpose=None)
-    request.responses_create_params.metadata = {
-        "nemo_rl_rollout_purpose": "evaluation"
-    }
+    request.responses_create_params.metadata = {"nemo_rl_rollout_purpose": "evaluation"}
 
     assert _resolve_run_rollout_purpose(request) == "evaluation"
 
 
 def test_resolve_run_rollout_purpose_rejects_carrier_conflict() -> None:
     request = make_run_request(rollout_purpose="training")
-    request.responses_create_params.metadata = {
-        "nemo_rl_rollout_purpose": "evaluation"
-    }
+    request.responses_create_params.metadata = {"nemo_rl_rollout_purpose": "evaluation"}
 
     with pytest.raises(ValueError, match="carriers disagree"):
         _resolve_run_rollout_purpose(request)
@@ -1095,9 +1087,7 @@ class TestApp:
         # Reproduce a generic /run boundary that keeps the standard
         # responses_create_params model but discards a top-level extension.
         payload.pop("rollout_purpose")
-        payload["responses_create_params"]["metadata"] = {
-            "nemo_rl_rollout_purpose": "evaluation"
-        }
+        payload["responses_create_params"]["metadata"] = {"nemo_rl_rollout_purpose": "evaluation"}
 
         response = TestClient(agent.setup_webserver()).post("/run", json=payload)
 
