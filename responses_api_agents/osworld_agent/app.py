@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import copy
 import hashlib
 import json
 import logging
@@ -29,6 +30,7 @@ import re
 import sys
 import time
 from asyncio import Semaphore
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 import ray
@@ -89,6 +91,36 @@ _ROLLOUT_DIAGNOSTIC_ENV_VARS = (
     "OSWORLD_VM_EXEC_LOG",
     "RUN_TAG",
 )
+
+
+def _merge_mapping(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:
+    """Recursively merge a provider override without mutating shared config."""
+
+    merged = copy.deepcopy(dict(base))
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            merged[key] = _merge_mapping(current, value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _apply_sandbox_provider_overrides(
+    provider_config: Mapping[str, Any],
+    overrides_by_provider: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Apply only the override matching the selected single provider."""
+
+    if len(provider_config) != 1:
+        raise ValueError("Resolved sandbox provider config must contain exactly one provider")
+    provider_name, provider_options = next(iter(provider_config.items()))
+    override = overrides_by_provider.get(provider_name)
+    if override is None:
+        return copy.deepcopy(dict(provider_config))
+    if not isinstance(provider_options, Mapping) or not isinstance(override, Mapping):
+        raise TypeError(f"Sandbox provider override for {provider_name!r} must merge two mappings")
+    return {provider_name: _merge_mapping(provider_options, override)}
 
 
 def _normalize_log_context(context: Mapping[str, Any] | None) -> Dict[str, Any]:
@@ -260,6 +292,10 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     provider_name: str = "docker"
     container_image: str = "docker://happysixd/osworld-docker:latest"  # OSWorld upstream's recommended VM image
     sandbox_provider: Optional[str | Dict[str, Any]] = None
+    # Workload-scoped deltas applied after resolving a named provider. This lets
+    # OSWorld bound OpenSandbox VM admission without changing the shared
+    # provider profile used by long-startup workloads.
+    sandbox_provider_overrides: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
     vm_path: Optional[str] = None
     sandbox_vm_path: Optional[str] = None
@@ -292,7 +328,12 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     top_p: Optional[float] = 0.9  # set to null in yaml when running a reasoning model that rejects top_p
     mem_limit_mb: int = 0  # the upstream Docker provider owns QEMU/container limits
     step_timeout: int = 60  # per-action subprocess timeout (forwarded to provider; advisory in client.py)
-    task_timeout: int = 1800  # cooperative rollout deadline; Pointer model calls share it
+    # End-to-end wall-clock deadline from Ray dispatch through VM creation,
+    # desktop setup, agent steps, and evaluation.  The child also
+    # receives this value as a cooperative deadline so model/step boundaries
+    # can stop cleanly before the parent has to cancel the Ray task.
+    task_timeout: int = 1800
+    task_cancel_grace_s: float = Field(default=30.0, gt=0)
     docker_port_lock_timeout: float = Field(default=300.0, gt=0)  # concurrent Docker VM port allocation
     evaluator_disable_gpu: bool = True
     reward_mode: Literal["binary", "raw"] = "binary"
@@ -307,9 +348,9 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # explicitly configured purpose-specific delta here. Gym never infers a
     # purpose from trajectory/token evidence because all rollout modes emit
     # the same semantic contract.
-    agent_kwargs_by_rollout_purpose: Dict[
-        Literal["training", "evaluation"], Dict[str, Any]
-    ] = Field(default_factory=dict)
+    agent_kwargs_by_rollout_purpose: Dict[Literal["training", "evaluation"], Dict[str, Any]] = Field(
+        default_factory=dict
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -327,6 +368,37 @@ class OSWorldRunRequest(BaseRunRequest):
     """Per-task request. ``verifier_metadata`` holds the OSWorld task spec."""
 
     model_config = ConfigDict(extra="allow")
+    # Keep this scheduler contract at the OSWorld HTTP boundary. Adding it to
+    # BaseRunRequest changes every Gym server's serialized request shape, while
+    # the metadata carrier below already survives generic /run schemas.
+    rollout_purpose: Optional[Literal["training", "evaluation"]] = None
+
+
+_ROLLOUT_PURPOSE_METADATA_KEY = "nemo_rl_rollout_purpose"
+
+
+def _resolve_run_rollout_purpose(
+    body: OSWorldRunRequest,
+) -> Optional[Literal["training", "evaluation"]]:
+    """Resolve and cross-check the scheduler purpose at the agent boundary.
+
+    NeMo-RL sends the purpose both as the top-level control field and inside
+    responses metadata. The latter survives generic /run schemas which know
+    only standard Responses API fields. Standalone benchmark callers may omit
+    both carriers.
+    """
+
+    top_level = body.rollout_purpose
+    metadata = body.responses_create_params.metadata or {}
+    metadata_purpose = metadata.get(_ROLLOUT_PURPOSE_METADATA_KEY)
+    if metadata_purpose is not None and metadata_purpose not in {
+        "training",
+        "evaluation",
+    }:
+        raise ValueError(f"invalid {_ROLLOUT_PURPOSE_METADATA_KEY}: {metadata_purpose!r}")
+    if top_level is not None and metadata_purpose is not None and top_level != metadata_purpose:
+        raise ValueError(f"rollout purpose carriers disagree: top_level={top_level!r}, metadata={metadata_purpose!r}")
+    return top_level or metadata_purpose
 
 
 class OSWorldAgentResponse(NeMoGymResponse):
@@ -495,6 +567,14 @@ def _build_messages_model_fn(
                     separators=(",", ":"),
                 )
             }
+        print(
+            "OSWORLD_MODEL_PURPOSE|"
+            f"purpose={rollout_purpose}|"
+            f"temperature={create_kwargs.get('temperature')}|"
+            f"top_p={create_kwargs.get('top_p')}|"
+            f"carrier={'metadata' if rollout_purpose is not None else 'none'}",
+            flush=True,
+        )
         model_io_enabled = bool(os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip())
         current_call = 0
         started_ns = 0
@@ -857,6 +937,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     top_p = runner_kwargs.pop("top_p")
     rollout_purpose = runner_kwargs.pop("rollout_purpose", None)
     log_context = _normalize_log_context(runner_kwargs.pop("log_context", None))
+    print(f"OSWORLD_CHILD_PURPOSE|purpose={rollout_purpose}|temperature={temperature}|top_p={top_p}", flush=True)
     model_fn = _build_model_fn(
         base_url=base_url,
         model_name=model_name,
@@ -932,6 +1013,29 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
     def setup_webserver(self):
         """Idempotently fill a configured asset cache before accepting work."""
 
+        base_run_request_module = sys.modules[BaseRunRequest.__module__]
+        osworld_request_has_purpose = "rollout_purpose" in OSWorldRunRequest.model_fields
+        if not osworld_request_has_purpose:
+            raise RuntimeError("OSWorldRunRequest is missing its scheduler-owned rollout_purpose field")
+        runtime_identity = (
+            "OSWORLD_GYM_RUNTIME_IDENTITY|"
+            f"app={Path(__file__).resolve()}|"
+            f"base_run_request={Path(base_run_request_module.__file__).resolve()}|"
+            f"base_rollout_purpose_field={'rollout_purpose' in BaseRunRequest.model_fields}|"
+            f"osworld_rollout_purpose_field={osworld_request_has_purpose}"
+        )
+        # Ray's server logging profile filters INFO records in production.
+        # stdout is captured reliably and contains paths/schema only, no task
+        # payload or credentials.
+        print(runtime_identity, flush=True)
+        LOG.info(
+            "OSWORLD_GYM_RUNTIME_IDENTITY|app=%s|base_run_request=%s|base_rollout_purpose_field=%s|osworld_rollout_purpose_field=%s",
+            Path(__file__).resolve(),
+            Path(base_run_request_module.__file__).resolve(),
+            "rollout_purpose" in BaseRunRequest.model_fields,
+            osworld_request_has_purpose,
+        )
+
         if self.config.asset_input_jsonl and self.config.setup_cache_dir:
             from benchmarks.osworld.assets import ensure_osworld_assets
 
@@ -993,6 +1097,19 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
 
     async def run(self, body: OSWorldRunRequest = Body()) -> OSWorldVerifyResponse:
         async with self.sem:
+            top_level_rollout_purpose = body.rollout_purpose
+            resolved_rollout_purpose = _resolve_run_rollout_purpose(body)
+            # Normalize once so every downstream consumer and the response use
+            # the same checked value even if the generic HTTP boundary retained
+            # only the metadata carrier.
+            body.rollout_purpose = resolved_rollout_purpose
+            print(
+                "OSWORLD_RUN_PURPOSE|"
+                f"top_level={top_level_rollout_purpose or 'none'}|"
+                f"metadata={(body.responses_create_params.metadata or {}).get(_ROLLOUT_PURPOSE_METADATA_KEY, 'none')}|"
+                f"resolved={resolved_rollout_purpose or 'none'}",
+                flush=True,
+            )
             # The OSWorld task spec lives in verifier_metadata. Allow falling
             # back to model_extra so simple JSONL files can put it at the top
             # level — useful when hand-authoring examples.
@@ -1070,6 +1187,10 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     self.config.sandbox_provider,
                     global_config_dict,
                 )
+                sandbox_provider_config = _apply_sandbox_provider_overrides(
+                    sandbox_provider_config,
+                    self.config.sandbox_provider_overrides,
+                )
                 default_metadata = resolve_provider_metadata(
                     self.config.sandbox_provider,
                     global_config_dict,
@@ -1122,9 +1243,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             effective_agent_kwargs = dict(self.config.agent_kwargs)
             if body.rollout_purpose is not None:
                 effective_agent_kwargs.update(
-                    self.config.agent_kwargs_by_rollout_purpose.get(
-                        body.rollout_purpose, {}
-                    )
+                    self.config.agent_kwargs_by_rollout_purpose.get(body.rollout_purpose, {})
                 )
 
             runner_kwargs: Dict[str, Any] = {
@@ -1180,6 +1299,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "log_context": log_context,
             }
 
+            future = None
             try:
                 # Child Ray tasks do not reliably inherit the NemoGym actor's
                 # runtime environment. Forward diagnostic paths explicitly so
@@ -1191,7 +1311,49 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 future = _run_osworld_task_remote.options(
                     runtime_env=runtime_env,
                 ).remote(task_config, runner_kwargs)
-                result_dict: Dict[str, Any] = await asyncio.to_thread(ray.get, future)
+                # ``run_osworld_task`` checks task_timeout only after DesktopEnv
+                # has been constructed.  A wedged sandbox create therefore used
+                # to leave ``ray.get`` waiting indefinitely.  Keep the child-side
+                # cooperative checks, but also bound the complete attempt here so
+                # VM setup failures cannot stall a benchmark or an RL batch.
+                result_dict: Dict[str, Any] = await asyncio.to_thread(
+                    ray.get,
+                    future,
+                    timeout=float(self.config.task_timeout),
+                )
+            except ray.exceptions.GetTimeoutError:
+                if future is not None:
+                    try:
+                        # A cooperative cancellation raises KeyboardInterrupt in
+                        # the child, which still executes run_osworld_task's
+                        # ``finally`` and closes an allocated sandbox.  Bound
+                        # that cleanup separately, then force-cancel only if the
+                        # worker remains stuck in a transport/native call.
+                        ray.cancel(future, force=False)
+                        try:
+                            await asyncio.to_thread(
+                                ray.get,
+                                future,
+                                timeout=float(self.config.task_cancel_grace_s),
+                            )
+                        except ray.exceptions.GetTimeoutError:
+                            ray.cancel(future, force=True)
+                        except Exception:  # noqa: BLE001
+                            # Cancellation normally surfaces as RayTaskError or
+                            # TaskCancelledError after child cleanup completes.
+                            pass
+                    except Exception:  # noqa: BLE001
+                        LOG.exception("Failed to cancel timed-out OSWorld Ray task")
+                error = f"task_timeout exceeded ({self.config.task_timeout}s) during end-to-end rollout"
+                LOG.error("OSWorld rollout timed out: %s", error)
+                return _empty_response(
+                    body,
+                    error=error,
+                    termination_reason="task_timeout",
+                    proxy_required=requires_proxy,
+                    proxy_enabled=enable_proxy,
+                    proxy_configured=bool(proxy_config_file),
+                )
             except Exception as exc:  # noqa: BLE001
                 LOG.exception("OSWorld rollout failed")
                 return _empty_response(body, error=f"{type(exc).__name__}: {exc}")

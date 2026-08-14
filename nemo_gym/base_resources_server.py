@@ -14,7 +14,7 @@
 # limitations under the License.
 from abc import abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -87,10 +87,6 @@ class BaseResourcesServer(BaseServer):
 
 class BaseRunRequest(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    # The rollout scheduler, not the environment, owns whether a result will
-    # participate in optimization. Standalone benchmark clients may omit this
-    # field; NeMo-RL stamps it for training and training-time validation.
-    rollout_purpose: Optional[Literal["training", "evaluation"]] = None
 
 
 class BaseVerifyRequest(BaseRunRequest):

@@ -50,13 +50,12 @@ class TestBaseMultiRewardVerifyResponse:
 
 
 class TestBaseResourcesServer:
-    def test_run_request_carries_scheduler_owned_rollout_purpose(self) -> None:
+    def test_run_request_does_not_emit_environment_specific_control_fields(self) -> None:
         request = BaseRunRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
-            rollout_purpose="evaluation",
         )
 
-        assert request.model_dump()["rollout_purpose"] == "evaluation"
+        assert set(request.model_dump()) == {"responses_create_params"}
 
     def test_sanity(self) -> None:
         _resources_server().setup_webserver()
