@@ -48,18 +48,12 @@ def _validate_component_working_dir(
 ) -> None:
     """Reject a server resolved outside scheduler-approved component roots."""
 
-    configured_roots = environment.get(
-        NEMO_GYM_ALLOWED_COMPONENT_ROOTS_ENV_VAR_NAME, ""
-    )
+    configured_roots = environment.get(NEMO_GYM_ALLOWED_COMPONENT_ROOTS_ENV_VAR_NAME, "")
     if not configured_roots:
         return
 
     working_dir = working_dir_path.resolve()
-    allowed_roots = [
-        Path(value).resolve()
-        for value in configured_roots.split(os.pathsep)
-        if value
-    ]
+    allowed_roots = [Path(value).resolve() for value in configured_roots.split(os.pathsep) if value]
     if not any(working_dir.is_relative_to(root) for root in allowed_roots):
         raise RuntimeError(
             "Gym component path is outside scheduler-approved roots; refusing "

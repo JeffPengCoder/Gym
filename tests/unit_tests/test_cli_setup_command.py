@@ -376,9 +376,7 @@ class TestCLISetupCommandRunCommand:
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
 
-    def test_scheduler_component_root_gate_accepts_pinned_tree(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_scheduler_component_root_gate_accepts_pinned_tree(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
         Popen_mock, _ = self._setup(monkeypatch)
         allowed_root = tmp_path / "paired-gym"
         server_dir = allowed_root / "responses_api_agents" / "agent"
@@ -391,13 +389,9 @@ class TestCLISetupCommandRunCommand:
 
         run_command(command="my command", working_dir_path=server_dir, server_name="agent")
 
-        assert Popen_mock.call_args.kwargs["env"]["NEMO_GYM_ALLOWED_COMPONENT_ROOTS"] == str(
-            allowed_root
-        )
+        assert Popen_mock.call_args.kwargs["env"]["NEMO_GYM_ALLOWED_COMPONENT_ROOTS"] == str(allowed_root)
 
-    def test_scheduler_component_root_gate_rejects_stale_tree(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_scheduler_component_root_gate_rejects_stale_tree(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
         Popen_mock, _ = self._setup(monkeypatch)
         allowed_root = tmp_path / "paired-gym"
         stale_server_dir = tmp_path / "image-gym" / "responses_api_agents" / "agent"

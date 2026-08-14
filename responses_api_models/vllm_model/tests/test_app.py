@@ -3336,9 +3336,7 @@ class TestVLLMConverter:
         assert captured_kwargs["chat_template_kwargs"]["new_param"] == "new"
 
     def test_metadata_extra_body_override(self, monkeypatch: MonkeyPatch):
-        assert Path(vllm_model_app.__file__).resolve() == (
-            Path(__file__).resolve().parents[1] / "app.py"
-        )
+        assert Path(vllm_model_app.__file__).resolve() == (Path(__file__).resolve().parents[1] / "app.py")
         marker_calls: list[dict[str, Any]] = []
         monkeypatch.setattr(
             vllm_model_app,
