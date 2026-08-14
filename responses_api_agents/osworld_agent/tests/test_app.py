@@ -38,6 +38,7 @@ from responses_api_agents.osworld_agent.app import (
     _resolve_run_rollout_purpose,
     _validate_runner_runtime,
 )
+from responses_api_agents.osworld_agent.trajectory import resolve_trajectory_identity
 
 
 DEFAULT_OSWORLD_TASK: Dict[str, Any] = {
@@ -118,6 +119,10 @@ def test_log_context_headers_do_not_change_model_payload() -> None:
     context = {
         "run_id": "run-001",
         "adapter": "gym",
+        "rollout_id": "rollout-001",
+        "group_id": "group-001",
+        "rollout_index": 4,
+        "attempt_index": 2,
         "task_id": "task-001",
         "domain": "chrome",
         "task_attempt": 2,
@@ -128,6 +133,10 @@ def test_log_context_headers_do_not_change_model_payload() -> None:
     assert _log_context_headers(context) == {
         "x-nemo-gym-log-run-id": "run-001",
         "x-nemo-gym-log-adapter": "gym",
+        "x-nemo-gym-log-rollout-id": "rollout-001",
+        "x-nemo-gym-log-group-id": "group-001",
+        "x-nemo-gym-log-rollout-index": "4",
+        "x-nemo-gym-log-attempt-index": "2",
         "x-nemo-gym-log-task-id": "task-001",
         "x-nemo-gym-log-domain": "chrome",
         "x-nemo-gym-log-task-attempt": "2",
@@ -151,7 +160,15 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(
         base_url="http://policy/v1",
         model_name="policy",
         api_key="test-key",  # pragma: allowlist secret
-        log_context={"run_id": "run-001", "adapter": "gym", "task_id": "task-001"},
+        log_context={
+            "run_id": "run-001",
+            "adapter": "gym",
+            "rollout_id": "rollout-001",
+            "group_id": "group-001",
+            "rollout_index": 4,
+            "attempt_index": 2,
+            "task_id": "task-001",
+        },
     )
     messages = [{"role": "user", "content": [{"type": "text", "text": "inspect"}]}]
     payload = {
@@ -175,10 +192,14 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(
     assert sent["messages"] == messages
     assert "_osworld_log_context" not in sent
     assert sent["extra_headers"]["x-nemo-gym-log-task-id"] == "task-001"
+    assert sent["extra_headers"]["x-nemo-gym-log-rollout-id"] == "rollout-001"
+    assert sent["extra_headers"]["x-nemo-gym-log-group-id"] == "group-001"
     assert sent["extra_headers"]["x-nemo-gym-log-step"] == "4"
     rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert [row["event"] for row in rows] == ["model_request", "model_response"]
     assert all(row["task_id"] == "task-001" for row in rows)
+    assert all(row["rollout_id"] == "rollout-001" for row in rows)
+    assert all(row["group_id"] == "group-001" for row in rows)
     assert all(row["step"] == 4 for row in rows)
     assert all(row["parse_attempt"] == 2 for row in rows)
     assert rows[0]["openai_request"] == {
@@ -1168,6 +1189,14 @@ class TestApp:
                 **request.model_dump(),
                 "_ng_task_index": 4,
                 "_ng_rollout_index": 0,
+                "trajectory_identity": {
+                    "schema_version": 1,
+                    "rollout_id": "rollout-eval-001",
+                    "group_id": "group-eval-001",
+                    "task_id": "test-task-001",
+                    "rollout_index": 0,
+                    "attempt_index": 0,
+                },
             }
         )
 
@@ -1206,6 +1235,10 @@ class TestApp:
             "run_id": "run-001",
             "adapter": "gym",
             "rollout_purpose": "evaluation",
+            "rollout_id": "rollout-eval-001",
+            "group_id": "group-eval-001",
+            "rollout_index": 0,
+            "attempt_index": 0,
             "task_id": "test-task-001",
             "domain": "chrome",
             "task_attempt": 1,
@@ -1213,6 +1246,43 @@ class TestApp:
         runtime_env = mock_remote.options.call_args.kwargs["runtime_env"]
         assert runtime_env["py_executable"]
         assert runtime_env["env_vars"]["RUN_TAG"] == "run-001"
+
+    def test_derived_run_identity_is_stable_for_standalone_benchmark(self) -> None:
+        identity_a = resolve_trajectory_identity(
+            request_extra={"_ng_rollout_index": 2, "_ng_attempt_index": 1},
+            verifier_metadata={"task_id": "task-standalone"},
+            model_name="policy-model",
+        )
+        identity_b = resolve_trajectory_identity(
+            request_extra={"_ng_rollout_index": 2, "_ng_attempt_index": 1},
+            verifier_metadata={"task_id": "task-standalone"},
+            model_name="policy-model",
+        )
+
+        assert identity_a == identity_b
+        assert identity_a["identity_source"] == "derived"
+        assert identity_a["rollout_index"] == 2
+        assert identity_a["attempt_index"] == 1
+
+    def test_caller_run_identity_rejects_task_mismatch(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match="trajectory_identity.task_id must match verifier_metadata task_id",
+        ):
+            resolve_trajectory_identity(
+                request_extra={
+                    "trajectory_identity": {
+                        "schema_version": 1,
+                        "rollout_id": "rollout-001",
+                        "group_id": "group-001",
+                        "task_id": "wrong-task",
+                        "rollout_index": 0,
+                        "attempt_index": 0,
+                    }
+                },
+                verifier_metadata={"task_id": "actual-task"},
+                model_name="policy-model",
+            )
 
     @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")

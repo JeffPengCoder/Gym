@@ -65,12 +65,28 @@ def _nonnegative_int(value: Any, *, fallback: int, field: str) -> int:
     return value
 
 
-def _trajectory_identity(
+def resolve_trajectory_identity(
     *,
     request_extra: Mapping[str, Any],
     verifier_metadata: Mapping[str, Any],
     model_name: str,
 ) -> dict[str, Any]:
+    """Resolve the one logical identity shared by logs and trace evidence.
+
+    Training callers own the identity and stamp it before Gym dispatch.
+    Standalone benchmark callers may omit it, in which case Gym derives a
+    stable but training-ineligible identity.  Resolve this before launching the
+    OSWorld child so every service boundary can log the same values later used
+    by :func:`build_trajectory_envelope`.
+    """
+
+    metadata_task = verifier_metadata.get("osworld_task")
+    metadata_task_id = verifier_metadata.get("task_id")
+    if not metadata_task_id and isinstance(metadata_task, Mapping):
+        metadata_task_id = metadata_task.get("id")
+    if metadata_task_id is not None and (not isinstance(metadata_task_id, str) or not metadata_task_id):
+        raise ValueError("verifier_metadata task_id must be a non-empty string")
+
     generic_identity = request_extra.get("trajectory_identity")
     caller_values = {field: request_extra.get(field) for field in _CALLER_IDENTITY_FIELDS}
     legacy_identity_present = request_extra.get("context_compaction_contract_version") is not None or any(
@@ -108,6 +124,8 @@ def _trajectory_identity(
         ):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{field} must be a non-empty string")
+        if metadata_task_id is not None and task_id != metadata_task_id:
+            raise ValueError("trajectory_identity.task_id must match verifier_metadata task_id")
         identity_source = "caller"
     elif legacy_identity_present:
         if request_extra.get("context_compaction_contract_version") != 2:
@@ -137,12 +155,11 @@ def _trajectory_identity(
         ):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{field} must be a non-empty string")
+        if metadata_task_id is not None and task_id != metadata_task_id:
+            raise ValueError("context_compaction_task_id must match verifier_metadata task_id")
         identity_source = "caller"
     else:
-        task = verifier_metadata.get("osworld_task")
-        task_id = verifier_metadata.get("task_id")
-        if not task_id and isinstance(task, Mapping):
-            task_id = task.get("id")
+        task_id = metadata_task_id
         if not isinstance(task_id, str) or not task_id:
             task_id = "unknown-task"
         rollout_index = _nonnegative_int(
@@ -408,7 +425,7 @@ def build_trajectory_envelope(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Build the universal semantic trajectory and evidence capability report."""
 
-    identity = _trajectory_identity(
+    identity = resolve_trajectory_identity(
         request_extra=request_extra,
         verifier_metadata=verifier_metadata,
         model_name=model_name,
