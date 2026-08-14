@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from pathlib import Path
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +21,7 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.server_utils
+import responses_api_models.vllm_model.app as vllm_model_app
 from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
@@ -3314,6 +3316,13 @@ class TestVLLMConverter:
         assert captured_kwargs["chat_template_kwargs"]["new_param"] == "new"
 
     def test_metadata_extra_body_override(self, monkeypatch: MonkeyPatch):
+        assert Path(vllm_model_app.__file__).resolve() == (Path(__file__).resolve().parents[1] / "app.py")
+        marker_calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            vllm_model_app,
+            "_emit_vllm_proxy_purpose_marker",
+            lambda **values: marker_calls.append(values),
+        )
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -3365,7 +3374,15 @@ class TestVLLMConverter:
                     content="hello",
                 )
             ],
-            metadata={"extra_body": json.dumps({"min_tokens": 20, "new_param": "value"})},
+            metadata={
+                "extra_body": json.dumps(
+                    {
+                        "min_tokens": 20,
+                        "new_param": "value",
+                        "nemo_rl_rollout_purpose": "evaluation",
+                    }
+                )
+            },
         )
 
         client = TestClient(app)
@@ -3378,6 +3395,15 @@ class TestVLLMConverter:
         assert captured_kwargs["guided_json"] == '{"type": "object"}'
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
+        assert captured_kwargs["nemo_rl_rollout_purpose"] == "evaluation"
+        assert marker_calls == [
+            {
+                "metadata_rollout_purpose": "evaluation",
+                "forwarded_rollout_purpose": "evaluation",
+                "temperature": None,
+                "top_p": None,
+            }
+        ]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
