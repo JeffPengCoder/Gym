@@ -383,6 +383,72 @@ def test_nemotron_automatically_records_exact_calls_with_bounded_images() -> Non
     assert all(call["accepted"] for call in model_call_infos)
 
 
+def test_nemotron_snapshot_window_accumulates_from_three_to_ten_then_compacts() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=20,
+        max_image_history_length=3,
+        max_live_images=10,
+        parse_retries=1,
+    )
+    payloads: List[Dict[str, Any]] = []
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        index = len(payloads)
+        payloads.append(payload)
+        return {
+            "content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(0.5, 0.5)\n```",
+            "reasoning_content": f"Thought {index + 1}",
+            "raw_content": f"raw completion {index + 1}",
+            "prompt_token_ids": [10, index],
+            "generation_token_ids": [20 + index],
+            "generation_log_probs": [-0.1],
+        }
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    model_calls = []
+    for index in range(12):
+        _, actions, info = agent.predict(
+            "Complete the task.",
+            {"screenshot": f"png-{index + 1}".encode()},
+        )
+        assert actions == ["pyautogui.click(960, 540)"]
+        model_calls.append(info["model_calls"][0])
+
+    image_counts = [
+        sum(
+            part.get("type") == "image_url"
+            for message in payload["messages"]
+            for part in message.get("content", [])
+            if isinstance(part, dict)
+        )
+        for payload in payloads
+    ]
+    assert image_counts == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 3, 4]
+    assert model_calls[9]["snapshot_compaction_triggered"] is False
+    assert model_calls[10]["snapshot_compaction_triggered"] is True
+    assert model_calls[10]["snapshot_window_start"] == 8
+    assert model_calls[10]["prompt_snapshot_count"] == 3
+    assert model_calls[11]["snapshot_compaction_triggered"] is False
+    assert model_calls[11]["prompt_snapshot_count"] == 4
+    assert "cG5nLTE=" not in str(payloads[10]["messages"])
+    assert "cG5nLTk=" in str(payloads[10]["messages"])
+    assert "# Previous History Actions" in str(payloads[10]["messages"])
+
+    agent.reset()
+    assert agent.compacted_before == 0
+
+
+def test_nemotron_snapshot_window_rejects_high_water_below_low_water() -> None:
+    with pytest.raises(ValueError, match="max_live_images"):
+        NemotronV3NanoOmniAgent(
+            model="policy-under-test",
+            max_steps=3,
+            max_image_history_length=3,
+            max_live_images=2,
+        )
+
+
 def test_nemotron_default_prompt_views_may_rewrite_between_calls() -> None:
     agent = NemotronV3NanoOmniAgent(
         model="policy-under-test",

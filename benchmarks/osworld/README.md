@@ -221,6 +221,15 @@ to one image per request, use the same class and set
 `agent_kwargs.max_image_history_length: 1`; no alternate agent class is
 required.
 
+Longer training rollouts can opt into a low/high-water snapshot window without
+changing standalone benchmark defaults. Set
+`agent_kwargs.max_image_history_length: 3` and
+`agent_kwargs.max_live_images: 10` to accumulate 1 through 10 live screenshots,
+then compact the old prefix into text and fall back to 3 live screenshots. The
+window grows again until the next high-water crossing: `1, 2, ..., 10, 3, 4,
+..., 10, 3`. Each exact model-call record includes the resulting snapshot count,
+window start, min/max settings, and whether that call triggered compaction.
+
 Nano Omni history contains Thought and Action only; previously executed Code is
 not repeated. This prompt contract is implemented directly by the standard
 `NemotronV3NanoOmniAgent`, so deployments must not stage a Python subclass or

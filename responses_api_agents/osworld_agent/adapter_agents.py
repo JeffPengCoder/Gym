@@ -446,6 +446,7 @@ class NemotronV3NanoOmniAgent:
         model: str,
         max_steps: int,
         max_image_history_length: int = 3,
+        max_live_images: int | None = None,
         platform: str = "ubuntu",
         max_tokens: int = 16384,
         top_p: float | None = 0.95,
@@ -481,7 +482,10 @@ class NemotronV3NanoOmniAgent:
         self.observation_type = observation_type
         self.coordinate_type = coordinate_type
         self.screen_size = screen_size
-        self.max_image_history_length = max(1, max_image_history_length)
+        self.max_image_history_length = max(1, int(max_image_history_length))
+        self.max_live_images = self.max_image_history_length if max_live_images is None else int(max_live_images)
+        if self.max_live_images < self.max_image_history_length:
+            raise ValueError("max_live_images must be greater than or equal to max_image_history_length")
         self.max_steps = max_steps
         self.client_password = client_password
         self.thinking = thinking
@@ -513,6 +517,14 @@ class NemotronV3NanoOmniAgent:
         self.observations: List[Dict[str, Any]] = []
         self.actions: List[str] = []
         self.cots: List[Dict[str, Any]] = []
+        self.compacted_before = 0
+        self.snapshot_window: Dict[str, Any] = {
+            "prompt_snapshot_count": 0,
+            "snapshot_window_start": 0,
+            "snapshot_compaction_triggered": False,
+            "snapshot_window_min": self.max_image_history_length,
+            "snapshot_window_max": self.max_live_images,
+        }
 
     def call_llm(self, payload: Dict[str, Any], _model: str | None = None) -> Any:
         """Injected by ``client.run_osworld_task`` before the first prediction."""
@@ -589,8 +601,29 @@ class NemotronV3NanoOmniAgent:
     def _messages(self, instruction: str, obs: Dict[str, Any]) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
         instruction_prompt = INSTRUCTION_TEMPLATE.format(instruction=instruction)
-        image_history = min(len(self.actions), self.max_image_history_length - 1)
-        image_window_start = len(self.actions) - image_history
+        action_count = len(self.actions)
+        image_window_start = max(0, min(self.compacted_before, action_count))
+        live_images = (action_count + 1) - image_window_start
+        compacted = False
+        if live_images > self.max_live_images:
+            # Keep history append-only between compaction boundaries. Once the
+            # high-water mark is crossed, fold the old prefix into text and
+            # retain the configured low-water number of snapshots.
+            self.compacted_before = max(
+                0,
+                (action_count + 1) - self.max_image_history_length,
+            )
+            image_window_start = max(0, min(self.compacted_before, action_count))
+            compacted = True
+
+        image_history = action_count - image_window_start
+        self.snapshot_window = {
+            "prompt_snapshot_count": image_history + 1,
+            "snapshot_window_start": image_window_start,
+            "snapshot_compaction_triggered": compacted,
+            "snapshot_window_min": self.max_image_history_length,
+            "snapshot_window_max": self.max_live_images,
+        }
 
         text_history = ""
         if image_window_start > 0:
@@ -672,6 +705,7 @@ class NemotronV3NanoOmniAgent:
                     "parse_feedback_injected": request_messages is not messages,
                     "pre_done_checklist_injected": self.pre_done_checklist,
                     "repeated_action_warning_injected": repeated_action_warning,
+                    **self.snapshot_window,
                 }
             )
             retry_temperature = (
@@ -695,6 +729,7 @@ class NemotronV3NanoOmniAgent:
                 "accepted": False,
                 "parse_error": None,
                 "parsed_actions": [],
+                **self.snapshot_window,
             }
             try:
                 response = self.call_llm(payload, self.model)
