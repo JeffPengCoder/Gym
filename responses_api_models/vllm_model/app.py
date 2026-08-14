@@ -56,6 +56,10 @@ LOG = logging.getLogger("nemo_gym.vllm_model")
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
     "adapter": "x-nemo-gym-log-adapter",
+    "rollout_id": "x-nemo-gym-log-rollout-id",
+    "group_id": "x-nemo-gym-log-group-id",
+    "rollout_index": "x-nemo-gym-log-rollout-index",
+    "attempt_index": "x-nemo-gym-log-attempt-index",
     "task_id": "x-nemo-gym-log-task-id",
     "domain": "x-nemo-gym-log-domain",
     "task_attempt": "x-nemo-gym-log-task-attempt",
@@ -90,7 +94,13 @@ def _transport_log_context(request: Request) -> Dict[str, Any]:
         value = request.headers.get(header)
         if not value:
             continue
-        if field in {"task_attempt", "step", "parse_attempt"}:
+        if field in {
+            "rollout_index",
+            "attempt_index",
+            "task_attempt",
+            "step",
+            "parse_attempt",
+        }:
             try:
                 context[field] = int(value)
             except ValueError:

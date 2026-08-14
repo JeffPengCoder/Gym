@@ -62,7 +62,10 @@ from responses_api_agents.osworld_agent.proxy import (
     task_requires_proxy,
 )
 from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NAME, load_attr, resolve_runner_spec
-from responses_api_agents.osworld_agent.trajectory import build_trajectory_envelope
+from responses_api_agents.osworld_agent.trajectory import (
+    build_trajectory_envelope,
+    resolve_trajectory_identity,
+)
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent")
@@ -74,6 +77,10 @@ _OSWORLD_LOG_CONTEXT_FIELDS = (
     "run_id",
     "adapter",
     "rollout_purpose",
+    "rollout_id",
+    "group_id",
+    "rollout_index",
+    "attempt_index",
     "task_id",
     "domain",
     "task_attempt",
@@ -133,7 +140,13 @@ def _normalize_log_context(context: Mapping[str, Any] | None) -> Dict[str, Any]:
         value = context.get(field)
         if value is None or value == "":
             continue
-        if field in {"task_attempt", "step", "parse_attempt"}:
+        if field in {
+            "rollout_index",
+            "attempt_index",
+            "task_attempt",
+            "step",
+            "parse_attempt",
+        }:
             try:
                 normalized[field] = int(value)
             except (TypeError, ValueError):
@@ -1225,6 +1238,21 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 else self.config.max_tokens
             )
             extra = body.model_extra or {}
+            trajectory_identity = resolve_trajectory_identity(
+                request_extra=extra,
+                verifier_metadata=metadata,
+                model_name=policy_model_name,
+            )
+            print(
+                "OSWORLD_RUN_IDENTITY|"
+                f"rollout_id={trajectory_identity['rollout_id']}|"
+                f"group_id={trajectory_identity['group_id']}|"
+                f"task_id={trajectory_identity['task_id']}|"
+                f"rollout_index={trajectory_identity['rollout_index']}|"
+                f"attempt_index={trajectory_identity['attempt_index']}|"
+                f"source={trajectory_identity['identity_source']}",
+                flush=True,
+            )
             try:
                 task_attempt = int(extra.get("_ng_rollout_index", 0)) + 1
             except (TypeError, ValueError):
@@ -1234,7 +1262,11 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     "run_id": os.environ.get("OSWORLD_RUN_ID") or os.environ.get("RUN_TAG"),
                     "adapter": "gym",
                     "rollout_purpose": body.rollout_purpose,
-                    "task_id": metadata.get("task_id") or task_config.get("id") or task_config.get("task_id"),
+                    "rollout_id": trajectory_identity["rollout_id"],
+                    "group_id": trajectory_identity["group_id"],
+                    "rollout_index": trajectory_identity["rollout_index"],
+                    "attempt_index": trajectory_identity["attempt_index"],
+                    "task_id": trajectory_identity["task_id"],
                     "domain": metadata.get("domain") or task_config.get("domain") or task_config.get("snapshot"),
                     "task_attempt": task_attempt,
                 }

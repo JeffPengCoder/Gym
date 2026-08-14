@@ -102,6 +102,10 @@ def test_transport_log_context_reads_generic_headers_without_body_fields() -> No
     request.headers = {
         "x-nemo-gym-log-run-id": "run-001",
         "x-nemo-gym-log-adapter": "gym",
+        "x-nemo-gym-log-rollout-id": "rollout-001",
+        "x-nemo-gym-log-group-id": "group-001",
+        "x-nemo-gym-log-rollout-index": "4",
+        "x-nemo-gym-log-attempt-index": "2",
         "x-nemo-gym-log-task-id": "task-001",
         "x-nemo-gym-log-domain": "chrome",
         "x-nemo-gym-log-task-attempt": "2",
@@ -112,6 +116,10 @@ def test_transport_log_context_reads_generic_headers_without_body_fields() -> No
     assert _transport_log_context(request) == {
         "run_id": "run-001",
         "adapter": "gym",
+        "rollout_id": "rollout-001",
+        "group_id": "group-001",
+        "rollout_index": 4,
+        "attempt_index": 2,
         "task_id": "task-001",
         "domain": "chrome",
         "task_attempt": 2,
