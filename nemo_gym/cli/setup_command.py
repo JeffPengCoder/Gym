@@ -37,6 +37,44 @@ from nemo_gym.global_config import (
 )
 
 
+NEMO_GYM_ALLOWED_COMPONENT_ROOTS_ENV_VAR_NAME = "NEMO_GYM_ALLOWED_COMPONENT_ROOTS"
+
+
+def _validate_component_working_dir(
+    working_dir_path: Path,
+    *,
+    server_name: str,
+    environment: dict[str, str],
+) -> None:
+    """Reject a server resolved outside scheduler-approved component roots."""
+
+    configured_roots = environment.get(
+        NEMO_GYM_ALLOWED_COMPONENT_ROOTS_ENV_VAR_NAME, ""
+    )
+    if not configured_roots:
+        return
+
+    working_dir = working_dir_path.resolve()
+    allowed_roots = [
+        Path(value).resolve()
+        for value in configured_roots.split(os.pathsep)
+        if value
+    ]
+    if not any(working_dir.is_relative_to(root) for root in allowed_roots):
+        raise RuntimeError(
+            "Gym component path is outside scheduler-approved roots; refusing "
+            "to start a potentially stale server. "
+            f"server={server_name or working_dir_path.name}, "
+            f"working_dir={working_dir}, allowed_roots={allowed_roots}"
+        )
+    print(
+        "NEMO_GYM_COMPONENT_PATH_GATE|"
+        f"server={server_name or working_dir_path.name}|"
+        f"working_dir={working_dir}|allowed_roots={configured_roots}",
+        flush=True,
+    )
+
+
 def _get_nemo_gym_install_flags() -> str:
     """
     Build uv pip install flags for nemo-gym in sub-venvs.
@@ -231,6 +269,11 @@ def run_command(
 
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
+    _validate_component_working_dir(
+        working_dir_path,
+        server_name=server_name,
+        environment=custom_env,
+    )
     # The server dir on PYTHONPATH lets `import app` work. When a caller passes `project_root` (the
     # dir containing resources_servers/, responses_api_agents/, ...), it's added so generated
     # `resources_servers.<name>.app`-style imports resolve from outside a repo checkout — opt-in, so
