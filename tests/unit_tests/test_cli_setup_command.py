@@ -54,6 +54,63 @@ class TestCLISetupCommandSetupEnvCommand:
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
+    def test_server_local_uv_settings(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        overrides_path = server_dir / "uv-overrides.txt"
+        overrides_path.write_text("torch==2.11.0\n")
+        uv_config_path = server_dir / "uv.toml"
+        uv_config_path.write_text('required-version = ">=0.11.25"\n')
+        (server_dir / "uv-torch-backend.txt").write_text("cpu\n")
+        (server_dir / "uv-python-version.txt").write_text("3.12\n")
+        (server_dir / "uv-managed-python.txt").write_text("true\n")
+
+        actual_command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict(tmp_path),
+            prefix="osworld agent",
+        )
+
+        assert f"--overrides {overrides_path}" in actual_command
+        assert "--torch-backend cpu" in actual_command
+        assert "--managed-python --python 3.12" in actual_command
+        assert actual_command.count(f"--config-file {uv_config_path}") == 2
+        pip_install_index = actual_command.index("uv pip install")
+        assert actual_command.index("--config-file", pip_install_index) < actual_command.index("--overrides")
+        assert actual_command.index("--overrides") < actual_command.index("-r requirements.txt")
+
+    def test_rejects_empty_server_python_version(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        (server_dir / "uv-python-version.txt").write_text("\n")
+
+        with raises(RuntimeError, match="Empty Python version"):
+            setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="osworld agent",
+            )
+
+    def test_rejects_invalid_managed_python_setting(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        (server_dir / "uv-managed-python.txt").write_text("yes\n")
+
+        with raises(RuntimeError, match="Expected 'true'"):
+            setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="osworld agent",
+            )
+
+    def test_rejects_invalid_server_torch_backend(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        (server_dir / "uv-torch-backend.txt").write_text("cuda-whatever\n")
+
+        with raises(RuntimeError, match="Invalid Torch backend"):
+            setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="osworld agent",
+            )
+
     def test_requirements_uses_server_local_overrides(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
         (server_dir / "overrides.txt").write_text("dependency==2\n")
@@ -334,12 +391,32 @@ class TestCLISetupCommandRunCommand:
             "my command",
             executable="/bin/bash",
             shell=True,
-            env={"PYTHONPATH": "/root/resources_servers/my_server:/root", "UV_CACHE_DIR": "default uv cache dir"},
+            env={
+                "NEMO_GYM_EXTRA_ROOTS": "/root",
+                "PYTHONPATH": "/root/resources_servers/my_server:/root",
+                "UV_CACHE_DIR": "default uv cache dir",
+            },
             stdout="stdout",
             stderr="stderr",
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
+
+    def test_project_root_precedes_existing_extra_roots(self, monkeypatch: MonkeyPatch) -> None:
+        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
+        monkeypatch.setattr(
+            nemo_gym.cli.setup_command,
+            "environ",
+            {"NEMO_GYM_EXTRA_ROOTS": "/plugin-a:/plugin-b"},
+        )
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/root/resources_servers/my_server"),
+            project_root=Path("/root"),
+        )
+
+        assert Popen_mock.call_args.kwargs["env"]["NEMO_GYM_EXTRA_ROOTS"] == "/root:/plugin-a:/plugin-b"
 
     def test_custom_uv_cache_dir(self, monkeypatch: MonkeyPatch) -> None:
         Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)

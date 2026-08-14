@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib.metadata
 import os
+import shlex
 from os import environ
 from pathlib import Path
 from subprocess import Popen
@@ -22,7 +23,7 @@ from typing import IO, Any
 
 from omegaconf import DictConfig
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.global_config import (
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -114,7 +115,30 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     venv_path = get_venv_path(dir_path, global_config_dict)
 
-    uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} {venv_path}"
+    python_request = str(global_config_dict[PYTHON_VERSION_KEY_NAME])
+    python_request_arg = python_request
+    python_venv_flags = ""
+    python_version_path = dir_path / "uv-python-version.txt"
+    if python_version_path.exists():
+        python_request = python_version_path.read_text(encoding="utf-8").strip()
+        if not python_request:
+            raise RuntimeError(f"Empty Python version in {python_version_path}")
+        python_request_arg = shlex.quote(python_request)
+    managed_python_path = dir_path / "uv-managed-python.txt"
+    if managed_python_path.exists():
+        managed_python = managed_python_path.read_text(encoding="utf-8").strip().lower()
+        if managed_python != "true":
+            raise RuntimeError(f"Expected 'true' in {managed_python_path}, got {managed_python!r}")
+        python_venv_flags = "--managed-python "
+
+    # `uv pip --project` has no effect. A server-local uv.toml passed via
+    # --config-file is the supported way to keep an enclosing workspace (for
+    # example /opt/nemo-rl) from contributing unrelated resolver policy.
+    uv_config_path = dir_path / "uv.toml"
+    uv_config_flag = f"--config-file {shlex.quote(str(uv_config_path.resolve()))} " if uv_config_path.exists() else ""
+    uv_venv_cmd = (
+        f"uv venv {uv_config_flag}--seed --allow-existing {python_venv_flags}--python {python_request_arg} {venv_path}"
+    )
 
     venv_python_fpath = venv_path / "bin/python"
     venv_activate_fpath = venv_path / "bin/activate"
@@ -129,6 +153,21 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
+    # A server is a separate process with its own venv. Allow it to select its
+    # Python, dependency metadata, and Torch backend without leaking those
+    # choices into sibling server venvs through process-wide UV_* variables.
+    server_uv_flags = uv_config_flag
+    overrides_path = dir_path / "uv-overrides.txt"
+    if overrides_path.exists():
+        server_uv_flags += f"--overrides {shlex.quote(str(overrides_path.resolve()))} "
+    torch_backend_path = dir_path / "uv-torch-backend.txt"
+    if torch_backend_path.exists():
+        torch_backend = torch_backend_path.read_text(encoding="utf-8").strip()
+        valid_torch_backends = {"auto", "cpu", "cu126", "cu128", "cu129", "cu130", "xpu"}
+        if torch_backend not in valid_torch_backends:
+            raise RuntimeError(f"Invalid Torch backend in {torch_backend_path}: {torch_backend!r}")
+        server_uv_flags += f"--torch-backend {torch_backend} "
+
     is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
 
     if should_skip_venv_setup:
@@ -142,23 +181,21 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
         elif has_pyproject_toml:
             if is_editable_install:
-                install_cmd = (
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
-                )
+                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 install_cmd = (
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}nemo-gym{version_spec} && """
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}nemo-gym{version_spec} && """
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
             has_overrides_txt = (dir_path / "overrides.txt").exists()
             override_flag = "--override overrides.txt " if has_overrides_txt else ""
             if is_editable_install:
-                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}{override_flag}-r requirements.txt {" ".join(head_server_deps)}"""
+                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{override_flag}-r requirements.txt {" ".join(head_server_deps)}"""
             else:
                 # install nemo-gym from pypi instead of relative path in requirements.txt
                 # with support for pre-releases, custom indexes, and version pinning
@@ -166,7 +203,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 install_cmd = (
                     f"""(echo 'nemo-gym{version_spec}' && grep -v -F '../..' requirements.txt) | """
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}{override_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{override_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
                 )
         else:
             raise RuntimeError(
@@ -200,7 +237,18 @@ def run_command(
     # this generic helper doesn't bake a layout assumption in for its other callers.
     py_path_entries = [work_dir]
     if project_root is not None:
-        py_path_entries.append(f"{project_root.absolute()}")
+        absolute_project_root = f"{project_root.absolute()}"
+        py_path_entries.append(absolute_project_root)
+        # ``nemo_gym`` normalizes sys.path at import time so component discovery has one
+        # precedence contract. Merely prepending PYTHONPATH is therefore insufficient:
+        # an older editable Gym install can still win after that normalization. Mark the
+        # already-resolved component root as an explicit extra root too; extra roots are
+        # intentionally highest priority in both discovery and Python imports.
+        existing_extra_roots = custom_env.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME)
+        extra_roots = [absolute_project_root]
+        if existing_extra_roots:
+            extra_roots.append(existing_extra_roots)
+        custom_env[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] = os.pathsep.join(extra_roots)
     existing_py_path = custom_env.get("PYTHONPATH")
     if existing_py_path:
         py_path_entries.append(existing_py_path)

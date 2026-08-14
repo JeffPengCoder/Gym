@@ -9,6 +9,10 @@ and ``tau2``): ``/run`` is the single entrypoint that takes a Gym JSONL row,
 runs the full OSWorld rollout against the Gym policy model, and returns a
 ``BaseVerifyResponse`` with the final reward.
 
+For a decoupled deployment, the optional Gym-native
+``resources_servers/osworld/`` owns the live DesktopEnv and its inline
+evaluator. The agent keeps the same rollout loop and talks to that server via
+the DesktopEnv-compatible HTTP client.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -28,7 +33,7 @@ from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 import ray
 from fastapi import Body
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -38,7 +43,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -48,12 +53,14 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
 )
+from responses_api_agents.osworld_agent.exact_trace import build_exact_trace_envelope
 from responses_api_agents.osworld_agent.proxy import (
     inspect_proxy_config_file,
     parse_env_bool,
     task_requires_proxy,
 )
 from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NAME, load_attr, resolve_runner_spec
+from responses_api_agents.osworld_agent.trajectory import build_trajectory_envelope
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent")
@@ -64,6 +71,7 @@ POINTER_ANTHROPIC_VALIDATION_SENTINEL = "__nemo_gym_anthropic_key_deferred__"
 _OSWORLD_LOG_CONTEXT_FIELDS = (
     "run_id",
     "adapter",
+    "rollout_purpose",
     "task_id",
     "domain",
     "task_attempt",
@@ -73,6 +81,14 @@ _OSWORLD_LOG_CONTEXT_FIELDS = (
 _MODEL_LOG_CONTEXT_HEADERS = {
     field: f"x-nemo-gym-log-{field.replace('_', '-')}" for field in _OSWORLD_LOG_CONTEXT_FIELDS
 }
+_ROLLOUT_DIAGNOSTIC_ENV_VARS = (
+    "NEMO_GYM_RESPONSE_LOGGING",
+    "OSWORLD_MODEL_IO_LOG",
+    "OSWORLD_RUN_ID",
+    "OSWORLD_TASK_ARTIFACT_ROOT",
+    "OSWORLD_VM_EXEC_LOG",
+    "RUN_TAG",
+)
 
 
 def _normalize_log_context(context: Mapping[str, Any] | None) -> Dict[str, Any]:
@@ -239,6 +255,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     """
 
     model_server: ModelServerRef
+    resources_server: Optional[ResourcesServerRef] = None
     concurrency: int = 4
     provider_name: str = "docker"
     container_image: str = "docker://happysixd/osworld-docker:latest"  # OSWorld upstream's recommended VM image
@@ -255,7 +272,15 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     require_a11y_tree: bool = False
     client_password: str = "password"
     enable_proxy: bool = False
+    # Preserve the upstream benchmark behavior by default. Training/deployment
+    # profiles can set this to false to mask proxy-tagged tasks when no proxy
+    # is configured.
+    allow_direct_proxy_tasks: bool = True
     proxy_config_file: Optional[str] = None
+    resources_server_token_env: str = "OSWORLD_RESOURCES_TOKEN"
+    resources_request_timeout: float = Field(default=900.0, gt=0)
+    resources_connect_timeout: float = Field(default=10.0, gt=0)
+    resources_request_retries: int = Field(default=3, ge=1)
     max_steps: int = 15
     max_trajectory_length: int = 3
     sleep_after_execution: float = 0.5
@@ -267,7 +292,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     top_p: Optional[float] = 0.9  # set to null in yaml when running a reasoning model that rejects top_p
     mem_limit_mb: int = 0  # the upstream Docker provider owns QEMU/container limits
     step_timeout: int = 60  # per-action subprocess timeout (forwarded to provider; advisory in client.py)
-    task_timeout: int = 1800  # whole-rollout wall-clock cap; trips mask_sample=True
+    task_timeout: int = 1800  # cooperative rollout deadline; Pointer model calls share it
     docker_port_lock_timeout: float = Field(default=300.0, gt=0)  # concurrent Docker VM port allocation
     evaluator_disable_gpu: bool = True
     reward_mode: Literal["binary", "raw"] = "binary"
@@ -277,6 +302,25 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     env_class_path: Optional[str] = None
     agent_class_path: Optional[str] = None
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
+    # A NeMo-RL scheduler may stamp the request purpose. Keep the default
+    # agent kwargs as the standalone benchmark behavior and apply only the
+    # explicitly configured purpose-specific delta here. Gym never infers a
+    # purpose from trajectory/token evidence because all rollout modes emit
+    # the same semantic contract.
+    agent_kwargs_by_rollout_purpose: Dict[
+        Literal["training", "evaluation"], Dict[str, Any]
+    ] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_training_switches(cls, value: Any) -> Any:
+        """Fail loudly instead of silently accepting obsolete export modes."""
+
+        if isinstance(value, Mapping):
+            removed = sorted(field for field in ("training_mode", "training_turn_strategy") if field in value)
+            if removed:
+                raise ValueError("OSWorld trajectory evidence is now automatic; remove: " + ", ".join(removed))
+        return value
 
 
 class OSWorldRunRequest(BaseRunRequest):
@@ -285,11 +329,48 @@ class OSWorldRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
 
+class OSWorldAgentResponse(NeMoGymResponse):
+    """OSWorld response plus universal trajectory and optional exact evidence."""
+
+    model_config = ConfigDict(extra="allow")
+
+    media_assets: Optional[Dict[str, Dict[str, Any]]] = None
+    completion_evidence: Optional[List[Dict[str, Any]]] = None
+    final_policy_decision: Optional[Dict[str, Any]] = None
+    lineage_deltas: Optional[List[Dict[str, Any]]] = None
+    chunk_records: Optional[List[Dict[str, Any]]] = None
+    boundary_events: Optional[List[Dict[str, Any]]] = None
+    guard_records: Optional[List[Dict[str, Any]]] = None
+    trajectory_contract: Optional[Dict[str, Any]] = None
+    trajectory_transitions: Optional[List[Dict[str, Any]]] = None
+    trajectory_model_calls: Optional[List[Dict[str, Any]]] = None
+    model_call_summaries: Optional[List[Dict[str, Any]]] = None
+    context_compaction_contract: Optional[Dict[str, Any]] = None
+
+
 class OSWorldVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+    response: OSWorldAgentResponse
     # NeMo-RL trainer drops the gradient when reward is unreliable. Set true on
     # timeout / max_steps exhaustion (no DONE/FAIL) / evaluator throw.
     mask_sample: bool = False
+
+
+def _build_policy_openai_client(*, base_url: str, api_key: str):
+    """Build a client for the Gym-managed, internal policy endpoint.
+
+    The process may need an environment proxy for unrelated services such as
+    W&B, but agent-to-policy traffic must remain inside the cluster. Disabling
+    ``trust_env`` also prevents httpx from eagerly constructing an unused
+    SOCKS transport when the target is covered by ``NO_PROXY``.
+    """
+    from openai import DefaultHttpxClient, OpenAI  # noqa: PLC0415
+
+    return OpenAI(
+        base_url=base_url,
+        api_key=api_key or "dummy",
+        http_client=DefaultHttpxClient(trust_env=False),
+    )
 
 
 # Imported lazily by ``_run_osworld_task_remote`` so this module imports
@@ -310,9 +391,7 @@ def _build_model_fn(
     completions / responses API, so an OpenAI-compatible client over its
     ``host:port/v1`` URL is the right shape.
     """
-    from openai import OpenAI  # noqa: PLC0415  (lazy — heavy import)
-
-    client = OpenAI(base_url=base_url, api_key=api_key or "dummy")
+    client = _build_policy_openai_client(base_url=base_url, api_key=api_key)
 
     def _call(system_prompt: str, instruction: str, observation_history: List[Dict[str, Any]]) -> str:
         # Build chat-style messages: system → (prev screenshots) → current screenshot+task.
@@ -382,6 +461,7 @@ def _build_messages_model_fn(
     model_name: str,
     api_key: str,
     log_context: Optional[Mapping[str, Any]] = None,
+    rollout_purpose: Optional[Literal["training", "evaluation"]] = None,
 ):
     """Return a sync model caller for native OSWorld agents.
 
@@ -389,9 +469,7 @@ def _build_messages_model_fn(
     messages. Gym still owns the actual policy endpoint, so this thin adapter
     forwards those messages to the configured model server.
     """
-    from openai import OpenAI  # noqa: PLC0415
-
-    client = OpenAI(base_url=base_url, api_key=api_key or "dummy")
+    client = _build_policy_openai_client(base_url=base_url, api_key=api_key)
     call_index = 0
     base_log_context = _normalize_log_context(log_context)
 
@@ -407,6 +485,16 @@ def _build_messages_model_fn(
         }
         if payload.get("top_p") is not None:
             create_kwargs["top_p"] = payload["top_p"]
+        if rollout_purpose is not None:
+            # The Gym vLLM proxy reads metadata.extra_body and forwards the
+            # decoded fields to NeMo-RL's internal vLLM endpoint. Standalone
+            # benchmark calls omit this side channel entirely.
+            create_kwargs["metadata"] = {
+                "extra_body": json.dumps(
+                    {"nemo_rl_rollout_purpose": rollout_purpose},
+                    separators=(",", ":"),
+                )
+            }
         model_io_enabled = bool(os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip())
         current_call = 0
         started_ns = 0
@@ -517,6 +605,42 @@ def _recover_first_fenced_action(content: str) -> str | None:
     return "## Action:\nExecute the first generated action.\n## Code:\n" + fence
 
 
+def _structured_action_code(part: Any) -> str | None:
+    """Translate one Nano Omni structured GUI action into adapter code.
+
+    Nano Omni occasionally serializes its native ``click`` part into the
+    chat ``content`` string alongside a textual Action description.  The
+    generation is still exact and trainable; only its semantic transport
+    shape differs from the Markdown scaffold expected by OSWorld.
+    """
+
+    part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
+    if part_type == "action":
+        action = part.get("action") if isinstance(part, dict) else getattr(part, "action", None)
+        if action != "click":
+            return None
+        action_input = part.get("input") if isinstance(part, dict) else getattr(part, "input", None)
+        if not isinstance(action_input, Mapping):
+            raise ValueError(f"Structured click action has invalid input: {part!r}")
+        x = action_input.get("x")
+        y = action_input.get("y")
+    elif part_type == "click":
+        x = part.get("x") if isinstance(part, dict) else getattr(part, "x", None)
+        y = part.get("y") if isinstance(part, dict) else getattr(part, "y", None)
+    else:
+        return None
+    if (
+        isinstance(x, bool)
+        or not isinstance(x, (int, float))
+        or isinstance(y, bool)
+        or not isinstance(y, (int, float))
+        or not math.isfinite(float(x))
+        or not math.isfinite(float(y))
+    ):
+        raise ValueError(f"Structured click has invalid coordinates: {part!r}")
+    return f"pyautogui.click({float(x):.12g}, {float(y):.12g})"
+
+
 def _normalize_chat_content(content: Any, *, _depth: int = 0) -> str:
     """Recover one executable turn without serializing structured content.
 
@@ -553,12 +677,24 @@ def _normalize_chat_content(content: Any, *, _depth: int = 0) -> str:
         raise ValueError(f"Unsupported chat content type: {type(content).__name__}")
 
     text_parts: List[str] = []
+    action_codes: List[str] = []
     for part in content:
         part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
         text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
-        if part_type not in {"text", "output_text"} or not isinstance(text, str):
+        if part_type in {"text", "output_text"} and isinstance(text, str):
+            text_parts.append(_normalize_chat_content(text, _depth=_depth + 1))
+            continue
+        action_code = _structured_action_code(part)
+        if action_code is None:
             raise ValueError(f"Unsupported chat content part: {part!r}")
-        text_parts.append(_normalize_chat_content(text, _depth=_depth + 1))
+        action_codes.append(action_code)
+    if action_codes:
+        if len(action_codes) != 1:
+            raise ValueError(f"Expected one structured GUI action, received {len(action_codes)}")
+        action_text = "\n".join(part.strip() for part in text_parts if part.strip())
+        if not re.search(r"^\s*##\s*Action\s*:?", action_text, re.MULTILINE | re.IGNORECASE):
+            action_text = "## Action:\n" + (action_text or "Execute the generated click action.")
+        return action_text.rstrip() + "\n## Code:\n```python\n" + action_codes[0] + "\n```"
     if not text_parts:
         raise ValueError("Chat content contains no text parts")
     if len(text_parts) == 1:
@@ -586,7 +722,22 @@ def _normalize_chat_content(content: Any, *, _depth: int = 0) -> str:
 def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
     """Normalize OpenAI native tool calls for text-protocol OSWorld agents."""
 
-    content = _normalize_chat_content(message.content or "")
+    raw_content = message.content or ""
+    normalization_error = None
+    try:
+        content = _normalize_chat_content(raw_content)
+    except Exception as exc:  # noqa: BLE001 - exact generation evidence must survive parser failures.
+        if not structured:
+            raise
+        # A semantic adapter failure must not erase a completed model call's
+        # prompt IDs, sampled IDs, logprobs, or routed experts.  Return the raw
+        # content to the agent parser, which will reject the action normally,
+        # while preserving exact evidence for trajectory reconstruction.
+        normalization_error = {
+            "type": type(exc).__name__,
+            "message": repr(exc),
+        }
+        content = raw_content if isinstance(raw_content, str) else repr(_jsonable(raw_content))
 
     # Tool-aware vLLM deployments can return native OpenAI tool_calls even
     # when the OSWorld agent scaffold expects textual <tool_call> blocks.
@@ -625,8 +776,38 @@ def _normalize_chat_message(message: Any, *, structured: bool = False) -> Any:
             if think_match:
                 reasoning = think_match.group(1).strip()
                 content = content[think_match.end() :]
-        content = _normalize_chat_content(content)
-        return {"content": content, "reasoning_content": reasoning}
+        if normalization_error is None:
+            try:
+                # A vLLM proxy can wrap a serialized structured action after
+                # <think>.  The first normalization pass sees only a string;
+                # this second pass is where the structured payload is decoded.
+                # Keep it inside the exact-evidence preservation boundary too.
+                content = _normalize_chat_content(content)
+            except Exception as exc:  # noqa: BLE001 - preserve exact sampled evidence.
+                normalization_error = {
+                    "type": type(exc).__name__,
+                    "message": repr(exc),
+                }
+                content = content if isinstance(content, str) else repr(_jsonable(content))
+        normalized = {
+            "content": content,
+            "reasoning_content": reasoning,
+            "raw_content": raw_content,
+        }
+        if normalization_error is not None:
+            normalized["normalization_error"] = normalization_error
+        for field in (
+            "prompt_token_ids",
+            "generation_token_ids",
+            "generation_log_probs",
+            "routed_experts",
+        ):
+            value = getattr(message, field, None)
+            if value is None:
+                value = model_extra.get(field)
+            if value is not None:
+                normalized[field] = value
+        return normalized
     return content
 
 
@@ -674,6 +855,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     max_tokens = runner_kwargs.pop("max_tokens")
     temperature = runner_kwargs.pop("temperature")
     top_p = runner_kwargs.pop("top_p")
+    rollout_purpose = runner_kwargs.pop("rollout_purpose", None)
     log_context = _normalize_log_context(runner_kwargs.pop("log_context", None))
     model_fn = _build_model_fn(
         base_url=base_url,
@@ -688,6 +870,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         model_name=model_name,
         api_key=api_key,
         log_context=log_context,
+        rollout_purpose=rollout_purpose,
     )
     result = run_osworld_task(
         task_config,
@@ -718,6 +901,8 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
                 "reward": s.reward,
                 "done": s.done,
                 "info": s.info,
+                "state": s.state,
+                "next_state": s.next_state,
             }
             for s in result.steps
         ],
@@ -730,6 +915,17 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        removed_agent_kwargs = sorted(
+            field for field in ("training_mode", "training_turn_strategy") if field in self.config.agent_kwargs
+        )
+        if removed_agent_kwargs:
+            raise ValueError(
+                "OSWorld training-specific export switches were removed; "
+                "trajectory evidence is now automatic. Remove: "
+                + ", ".join(f"agent_kwargs.{field}" for field in removed_agent_kwargs)
+            )
+        if self.config.resources_server is not None and self.config.sandbox_provider is not None:
+            raise ValueError("OSWorld resources_server and sandbox_provider cannot be enabled together")
         _validate_runner_runtime(self.config)
         self.sem = Semaphore(self.config.concurrency)
 
@@ -808,6 +1004,10 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             try:
                 requires_proxy = task_requires_proxy(task_config)
                 enable_proxy = parse_env_bool("OSWORLD_ENABLE_PROXY", self.config.enable_proxy)
+                allow_direct_proxy_tasks = parse_env_bool(
+                    "OSWORLD_ALLOW_DIRECT_PROXY_TASKS",
+                    self.config.allow_direct_proxy_tasks,
+                )
             except ValueError as exc:
                 return _empty_response(
                     body,
@@ -815,10 +1015,36 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     termination_reason="proxy_configuration_error",
                 )
 
+            remote_resources = self.config.resources_server is not None
             proxy_config_file = os.environ.get("PROXY_CONFIG_FILE") or self.config.proxy_config_file
-            if not requires_proxy or not enable_proxy:
+            if not requires_proxy or not enable_proxy or remote_resources:
+                # A remote Resources Server owns its proxy configuration; do
+                # not leak a control-plane path into the environment plane.
                 proxy_config_file = None
-            if requires_proxy and enable_proxy:
+            if requires_proxy and not enable_proxy and not allow_direct_proxy_tasks:
+                return _empty_response(
+                    body,
+                    error=("ProxyRequiredButDisabled: task requires a proxy, but OSWORLD_ENABLE_PROXY is disabled"),
+                    termination_reason="proxy_required_but_disabled",
+                    proxy_required=True,
+                    proxy_enabled=False,
+                    proxy_configured=bool(proxy_config_file),
+                )
+            if requires_proxy and not enable_proxy and allow_direct_proxy_tasks:
+                if remote_resources:
+                    return _empty_response(
+                        body,
+                        error=(
+                            "ProxyConfigurationError: direct proxy task mode is not supported "
+                            "by the remote Resources Server"
+                        ),
+                        termination_reason="proxy_configuration_error",
+                        proxy_required=True,
+                        proxy_enabled=False,
+                        proxy_configured=False,
+                    )
+                proxy_config_file = None
+            if requires_proxy and enable_proxy and not remote_resources:
                 try:
                     proxy_config_file = inspect_proxy_config_file(proxy_config_file).path
                 except ValueError as exc:
@@ -854,9 +1080,29 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 }
             model_server_root = f"http://{model_server_config['host']}:{model_server_config['port']}"
             base_url = f"{self.base_url_for_run(model_server_root, body)}/v1"
+            resources_server_url = ""
+            if self.config.resources_server is not None:
+                resources_server_config = get_first_server_config_dict(
+                    global_config_dict,
+                    self.config.resources_server.name,
+                )
+                resources_server_url = f"http://{resources_server_config['host']}:{resources_server_config['port']}"
 
-            temperature = body.responses_create_params.temperature or self.config.temperature
-            top_p = body.responses_create_params.top_p or self.config.top_p
+            temperature = (
+                body.responses_create_params.temperature
+                if body.responses_create_params.temperature is not None
+                else self.config.temperature
+            )
+            top_p = (
+                body.responses_create_params.top_p
+                if body.responses_create_params.top_p is not None
+                else self.config.top_p
+            )
+            max_tokens = (
+                body.responses_create_params.max_output_tokens
+                if body.responses_create_params.max_output_tokens is not None
+                else self.config.max_tokens
+            )
             extra = body.model_extra or {}
             try:
                 task_attempt = int(extra.get("_ng_rollout_index", 0)) + 1
@@ -866,11 +1112,20 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 {
                     "run_id": os.environ.get("OSWORLD_RUN_ID") or os.environ.get("RUN_TAG"),
                     "adapter": "gym",
+                    "rollout_purpose": body.rollout_purpose,
                     "task_id": metadata.get("task_id") or task_config.get("id") or task_config.get("task_id"),
                     "domain": metadata.get("domain") or task_config.get("domain") or task_config.get("snapshot"),
                     "task_attempt": task_attempt,
                 }
             )
+
+            effective_agent_kwargs = dict(self.config.agent_kwargs)
+            if body.rollout_purpose is not None:
+                effective_agent_kwargs.update(
+                    self.config.agent_kwargs_by_rollout_purpose.get(
+                        body.rollout_purpose, {}
+                    )
+                )
 
             runner_kwargs: Dict[str, Any] = {
                 "provider_name": self.config.provider_name,
@@ -880,7 +1135,16 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "require_a11y_tree": self.config.require_a11y_tree,
                 "client_password": self.config.client_password,
                 "enable_proxy": enable_proxy,
+                "allow_direct_proxy_tasks": allow_direct_proxy_tasks,
                 "proxy_config_file": proxy_config_file,
+                "resources_server_url": resources_server_url,
+                "resources_server_auth_token": os.environ.get(
+                    self.config.resources_server_token_env,
+                    "",
+                ),
+                "resources_request_timeout": self.config.resources_request_timeout,
+                "resources_connect_timeout": self.config.resources_connect_timeout,
+                "resources_request_retries": self.config.resources_request_retries,
                 "sandbox_provider_config": sandbox_provider_config,
                 "sandbox_spec": sandbox_spec,
                 "vm_path": self.config.vm_path,
@@ -903,21 +1167,29 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "policy_base_url": policy_base_url,
                 "model_name": policy_model_name,
                 "api_key": policy_api_key,
-                "max_tokens": self.config.max_tokens,
+                "max_tokens": max_tokens,
                 "temperature": temperature,
                 "top_p": top_p,
+                "rollout_purpose": body.rollout_purpose,
                 "runner_name": self.config.runner_name,
                 "action_space": self.config.action_space,
                 "observation_type": self.config.observation_type,
                 "env_class_path": self.config.env_class_path,
                 "agent_class_path": self.config.agent_class_path,
-                "agent_kwargs": self.config.agent_kwargs,
+                "agent_kwargs": effective_agent_kwargs,
                 "log_context": log_context,
             }
 
             try:
+                # Child Ray tasks do not reliably inherit the NemoGym actor's
+                # runtime environment. Forward diagnostic paths explicitly so
+                # parse failures retain their model I/O and task trajectory.
+                rollout_env = {name: os.environ[name] for name in _ROLLOUT_DIAGNOSTIC_ENV_VARS if os.environ.get(name)}
+                runtime_env: Dict[str, Any] = {"py_executable": sys.executable}
+                if rollout_env:
+                    runtime_env["env_vars"] = rollout_env
                 future = _run_osworld_task_remote.options(
-                    runtime_env={"py_executable": sys.executable},
+                    runtime_env=runtime_env,
                 ).remote(task_config, runner_kwargs)
                 result_dict: Dict[str, Any] = await asyncio.to_thread(ray.get, future)
             except Exception as exc:  # noqa: BLE001
@@ -931,7 +1203,15 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             result_dict["proxy_enabled"] = enable_proxy
             result_dict["proxy_configured"] = bool(proxy_config_file)
 
-            return _build_response(body, result_dict, policy_model_name, temperature, top_p)
+            return _build_response(
+                body,
+                result_dict,
+                policy_model_name,
+                temperature,
+                top_p,
+                max_trajectory_length=self.config.max_trajectory_length,
+                max_output_tokens=max_tokens,
+            )
 
 
 def _build_response(
@@ -940,41 +1220,99 @@ def _build_response(
     policy_model_name: str,
     temperature: float,
     top_p: Optional[float],
+    *,
+    max_trajectory_length: Optional[int] = None,
+    max_output_tokens: Optional[int] = None,
 ) -> OSWorldVerifyResponse:
-    """Pack the OSWorld rollout into the shape the verify pipeline expects."""
+    """Pack one run without changing its prompt policy for training consumers."""
+
+    steps = result.get("steps", [])
+    if not isinstance(steps, list):
+        raise TypeError("OSWorld rollout steps must be a list")
+    verifier_metadata = body.verifier_metadata or {}
+    trajectory_fields, model_calls = build_trajectory_envelope(
+        steps=steps,
+        request_extra=body.model_extra or {},
+        verifier_metadata=verifier_metadata,
+        model_name=policy_model_name,
+        sample_eligible=not bool(result.get("mask_sample", False)),
+    )
+    output: List[Dict[str, Any]] = [
+        {
+            "id": f"msg-step-{step['step']}",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "annotations": [],
+                    "text": str(step.get("model_text") or ""),
+                }
+            ],
+        }
+        for step in steps
+    ]
+
+    exact_fields: Dict[str, Any] = {}
+    capabilities = trajectory_fields["trajectory_contract"]["capabilities"]
+    if capabilities["exact_model_call_evidence"]:
+        exact_fields = build_exact_trace_envelope(
+            model_calls=model_calls,
+            trajectory_contract=trajectory_fields["trajectory_contract"],
+            model_name=policy_model_name,
+            sampling_config={
+                "temperature": temperature,
+                "top_p": top_p,
+                "max_output_tokens": max_output_tokens,
+            },
+            policy_config={
+                "adapter": "osworld_agent",
+                "prompt_materialization_contract": ("nemotron_v3_nano_omni_bounded_history_v1"),
+                "max_trajectory_length": max_trajectory_length,
+            },
+        )
+        if exact_fields.get("media_assets") != trajectory_fields.get("media_assets"):
+            raise ValueError("Semantic trajectory and exact evidence disagree about media assets")
+        exact_fields.pop("media_assets")
+        # Exact model calls, including parser retries, are the trainable units.
+        # Semantic step messages remain available through trajectory_transitions.
+        output = exact_fields.pop("model_call_output")
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
         "created_at": 0.0,
         "model": policy_model_name,
         "object": "response",
-        "output": [
-            {
-                "id": f"msg-step-{step['step']}",
-                "type": "message",
-                "role": "assistant",
-                "status": "completed",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "annotations": [],
-                        "text": step["model_text"],
-                    }
-                ],
-            }
-            for step in result.get("steps", [])
-        ],
+        "output": output,
         "parallel_tool_calls": True,
         "tool_choice": "auto",
         "tools": [],
         "temperature": temperature,
         "top_p": top_p,
+        **trajectory_fields,
+        **exact_fields,
     }
     metadata = dict(body.verifier_metadata or {})
+    metadata_steps: List[Dict[str, Any]] = []
+    for step in steps:
+        projected_step = dict(step)
+        info = step.get("info")
+        if isinstance(info, Mapping):
+            projected_info = dict(info)
+            agent_info = info.get("agent")
+            if isinstance(agent_info, Mapping):
+                projected_agent_info = dict(agent_info)
+                raw_calls = projected_agent_info.pop("model_calls", None)
+                if isinstance(raw_calls, list):
+                    projected_agent_info["model_call_count"] = len(raw_calls)
+                projected_info["agent"] = projected_agent_info
+            projected_step["info"] = projected_info
+        metadata_steps.append(projected_step)
     metadata["osworld_score"] = result.get("score", 0.0)
     metadata["osworld_finished"] = result.get("finished", False)
     metadata["osworld_error"] = result.get("error")
-    metadata["osworld_steps"] = result.get("steps", [])
+    metadata["osworld_steps"] = metadata_steps
     metadata["osworld_artifact_dir"] = result.get("artifact_dir")
     metadata["osworld_model_name"] = policy_model_name
     metadata["osworld_termination_reason"] = result.get("termination_reason")
@@ -984,6 +1322,7 @@ def _build_response(
 
     return OSWorldVerifyResponse(
         responses_create_params=body.responses_create_params,
+        rollout_purpose=body.rollout_purpose,
         reward=float(result.get("reward", 0.0)),
         response=response_dict,
         verifier_metadata=metadata,
@@ -1012,6 +1351,7 @@ def _empty_response(
     )
     return OSWorldVerifyResponse(
         responses_create_params=body.responses_create_params,
+        rollout_purpose=body.rollout_purpose,
         reward=0.0,
         response={
             "id": "osworld-error",
