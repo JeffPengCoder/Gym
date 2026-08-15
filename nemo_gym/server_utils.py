@@ -509,14 +509,7 @@ class ServerClient(BaseModel):
             return "connection_error"
         except requests.exceptions.Timeout:
             return "timeout"
-        except Exception as error:
-            getLogger(__name__).warning(
-                "Unexpected error while polling NeMo Gym server %s at %s: %s: %s",
-                server_name,
-                self._build_server_base_url(server_config_dict),
-                type(error).__name__,
-                error,
-            )
+        except Exception:
             return "unknown_error"
 
 
