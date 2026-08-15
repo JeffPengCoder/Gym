@@ -243,7 +243,11 @@ DISCONNECTED_CLIENT_OS_HELP_TEXT = """We've run into this issue in two different
 
 
 async def request(
-    method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
+    method: str,
+    url: str,
+    _internal: bool = False,
+    _retry_transport_errors: bool = True,
+    **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
@@ -259,6 +263,8 @@ async def request(
         try:
             return await client.request(method=method, url=url, **kwargs)
         except ServerDisconnectedError:
+            if not _retry_transport_errors:
+                raise
             global _NUM_SERVER_DISCONNECTED_ERROR
             _NUM_SERVER_DISCONNECTED_ERROR += 1
             retries += 1
@@ -271,6 +277,8 @@ async def request(
 
             await asyncio.sleep(0.5)
         except ClientOSError:
+            if not _retry_transport_errors:
+                raise
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
             retries += 1
@@ -283,6 +291,8 @@ async def request(
 
             await asyncio.sleep(0.5)
         except Exception as e:
+            if not _retry_transport_errors:
+                raise
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
 
@@ -389,7 +399,13 @@ class ServerClient(BaseModel):
         return f"http://{host}:{server_config_dict.port}"
 
     async def request(
-        self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
+        self,
+        server_name: str,
+        url_path: str,
+        method: str,
+        *,
+        retry_transport_errors: bool = True,
+        **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
         base_url = self._build_server_base_url(server_config_dict)
@@ -419,7 +435,13 @@ class ServerClient(BaseModel):
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
-        return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
+        return await request(
+            method=method,
+            url=f"{base_url}{url_path}",
+            _internal=True,
+            _retry_transport_errors=retry_transport_errors,
+            **kwargs,
+        )
 
     async def get(
         self,
@@ -446,6 +468,8 @@ class ServerClient(BaseModel):
         self,
         server_name: str,
         url_path: str,
+        *,
+        retry_transport_errors: bool = True,
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         """
@@ -460,6 +484,7 @@ class ServerClient(BaseModel):
             server_name=server_name,
             url_path=url_path,
             method="POST",
+            retry_transport_errors=retry_transport_errors,
             **kwargs,
         )
 

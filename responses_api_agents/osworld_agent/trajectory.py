@@ -32,6 +32,10 @@ _TRAJECTORY_IDENTITY_FIELDS = (
     "rollout_index",
     "attempt_index",
 )
+_EVENT_IDENTITY_FIELDS = (
+    "sampling_event_id",
+    "source_group_id",
+)
 _MEDIA_PART_TYPES = frozenset({"image_url", "input_image", "image"})
 
 
@@ -126,6 +130,21 @@ def resolve_trajectory_identity(
                 raise ValueError(f"{field} must be a non-empty string")
         if metadata_task_id is not None and task_id != metadata_task_id:
             raise ValueError("trajectory_identity.task_id must match verifier_metadata task_id")
+        event_values = {
+            field: generic_identity.get(field) for field in _EVENT_IDENTITY_FIELDS
+        }
+        if (event_values["sampling_event_id"] is None) != (
+            event_values["source_group_id"] is None
+        ):
+            raise ValueError(
+                "trajectory_identity sampling_event_id and source_group_id "
+                "must be present together"
+            )
+        for field, value in event_values.items():
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(
+                    f"trajectory_identity.{field} must be a non-empty string"
+                )
         identity_source = "caller"
     elif legacy_identity_present:
         if request_extra.get("context_compaction_contract_version") != 2:
@@ -183,7 +202,7 @@ def resolve_trajectory_identity(
         )
         identity_source = "derived"
 
-    return {
+    identity = {
         "rollout_id": rollout_id,
         "group_id": group_id,
         "task_id": task_id,
@@ -191,6 +210,15 @@ def resolve_trajectory_identity(
         "attempt_index": attempt_index,
         "identity_source": identity_source,
     }
+    if generic_identity is not None:
+        identity.update(
+            {
+                field: generic_identity[field]
+                for field in _EVENT_IDENTITY_FIELDS
+                if generic_identity.get(field) is not None
+            }
+        )
+    return identity
 
 
 def _image_source(part: Mapping[str, Any]) -> dict[str, Any] | None:

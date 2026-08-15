@@ -50,6 +50,29 @@ _TEST_ADDR_INFO = (
 
 
 class TestServerUtils:
+    async def test_non_idempotent_request_does_not_retry_transport_failure(
+        self,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        client = MagicMock()
+        client.request = AsyncMock(side_effect=RuntimeError("ambiguous /run"))
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_aiohttp_client",
+            lambda: client,
+        )
+
+        with raises(RuntimeError, match="ambiguous /run"):
+            await nemo_gym.server_utils.request(
+                method="POST",
+                url="http://agent.test/run",
+                _internal=True,
+                _retry_transport_errors=False,
+                json={"_ng_execution_id": "execution-test"},
+            )
+
+        client.request.assert_awaited_once()
+
     def test_global_aiohttp_client_exit_uses_owner_loop(self, monkeypatch: MonkeyPatch) -> None:
         owner_loop = asyncio.new_event_loop()
 

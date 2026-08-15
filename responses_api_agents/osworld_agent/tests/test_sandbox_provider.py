@@ -71,6 +71,9 @@ def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, mon
         {"docker": {}},
         {
             "image": "docker://osworld@sha256:abc",
+            "metadata": {
+                osworld_sandbox.EXECUTION_ID_SANDBOX_METADATA_KEY: "execution-test-001"
+            },
             "ports": None,
             "resources": {"cpu": 4, "memory_mib": 16384},
             "provider_options": {"run_args": ["--security-opt", "label=disable"]},
@@ -97,6 +100,11 @@ def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, mon
         spec.provider_options["run_args"],
         "--label",
         "nemo-gym.run-id=smoke-run",
+    )
+    assert osworld_sandbox._has_option(
+        spec.provider_options["run_args"],
+        "--label",
+        f"{osworld_sandbox.EXECUTION_ID_SANDBOX_METADATA_KEY}=execution-test-001",
     )
 
 
@@ -205,6 +213,9 @@ def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatc
         {
             "ttl_s": 1800,
             "image": "busybox:1.36",
+            "metadata": {
+                osworld_sandbox.EXECUTION_ID_SANDBOX_METADATA_KEY: "execution-test-001"
+            },
             "entrypoint": ["/run/entry.sh"],
             "env": {"KVM": "Y"},
             "resources": {"cpu": 4, "memory_mib": 16384},
@@ -230,6 +241,9 @@ def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatc
     }
     assert spec.metadata["osworld-provider"] == "gym-opensandbox-sandbox"
     assert spec.metadata["run-id"] == "opensandbox-run"
+    assert spec.metadata[osworld_sandbox.EXECUTION_ID_SANDBOX_METADATA_KEY] == (
+        "execution-test-001"
+    )
     assert spec.entrypoint is None
     assert spec.env == {}
     assert spec.resources.cpu is None

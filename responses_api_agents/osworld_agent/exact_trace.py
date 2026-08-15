@@ -201,6 +201,13 @@ def build_exact_trace_envelope(
             "identity_source",
         )
     }
+    identity.update(
+        {
+            field: trajectory_contract[field]
+            for field in ("sampling_event_id", "source_group_id")
+            if trajectory_contract.get(field) is not None
+        }
+    )
     rollout_id = identity["rollout_id"]
     if not isinstance(rollout_id, str) or not rollout_id:
         raise ValueError("OSWorld exact trace has no rollout identity")

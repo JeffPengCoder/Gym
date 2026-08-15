@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from nemo_gym.global_config import EXECUTION_ID_SANDBOX_METADATA_KEY
 from nemo_gym.sandbox import Sandbox, SandboxEndpoint, SandboxSpec, SandboxStatus
 from responses_api_agents.osworld_agent.local_forwarder import start_forwarder
 
@@ -32,6 +33,7 @@ OSWORLD_IMAGE_ENTRYPOINT = ("/usr/bin/tini", "-s", "/run/entry.sh")
 OSWORLD_QCOW2_MOUNT = "/System.qcow2"
 OSWORLD_WORKLOAD_LABEL = "nemo-gym.workload=osworld"
 OSWORLD_RUN_ID_LABEL = "nemo-gym.run-id"
+OSWORLD_EXECUTION_ID_LABEL = EXECUTION_ID_SANDBOX_METADATA_KEY
 OPENSANDBOX_POOL_VM_PATH = "opensandbox-pool-managed"
 
 
@@ -226,6 +228,16 @@ class GymSandboxDesktopProvider:
         run_id_label = f"{OSWORLD_RUN_ID_LABEL}={run_id}"
         if run_id and not _has_option(run_args, "--label", run_id_label):
             run_args.extend(["--label", run_id_label])
+        execution_id = str(
+            metadata.get(EXECUTION_ID_SANDBOX_METADATA_KEY) or ""
+        ).strip()
+        execution_id_label = f"{OSWORLD_EXECUTION_ID_LABEL}={execution_id}"
+        if execution_id and not _has_option(
+            run_args,
+            "--label",
+            execution_id_label,
+        ):
+            run_args.extend(["--label", execution_id_label])
         if not _has_option(run_args, "--cap-add", "NET_ADMIN"):
             run_args.extend(["--cap-add", "NET_ADMIN"])
         if self._require_kvm and not _has_option(run_args, "--device", "/dev/kvm"):
