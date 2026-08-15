@@ -31,6 +31,7 @@ from responses_api_agents.osworld_agent.app import (
     _apply_sandbox_provider_overrides,
     _build_messages_model_fn,
     _build_response,
+    _empty_response,
     _log_context_headers,
     _model_io_images,
     _normalize_chat_message,
@@ -119,6 +120,9 @@ def test_log_context_headers_do_not_change_model_payload() -> None:
     context = {
         "run_id": "run-001",
         "adapter": "gym",
+        "sampling_event_id": "sampling-training-001",
+        "source_group_id": "dataset-group-001",
+        "execution_id": "execution-001",
         "rollout_id": "rollout-001",
         "group_id": "group-001",
         "rollout_index": 4,
@@ -133,6 +137,9 @@ def test_log_context_headers_do_not_change_model_payload() -> None:
     assert _log_context_headers(context) == {
         "x-nemo-gym-log-run-id": "run-001",
         "x-nemo-gym-log-adapter": "gym",
+        "x-nemo-gym-log-sampling-event-id": "sampling-training-001",
+        "x-nemo-gym-log-source-group-id": "dataset-group-001",
+        "x-nemo-gym-log-execution-id": "execution-001",
         "x-nemo-gym-log-rollout-id": "rollout-001",
         "x-nemo-gym-log-group-id": "group-001",
         "x-nemo-gym-log-rollout-index": "4",
@@ -913,6 +920,100 @@ def test_build_response_accepts_generic_caller_trajectory_identity() -> None:
     assert contract["rollout_index"] == 2
 
 
+def test_execution_identity_is_correlated_but_excluded_from_semantic_digest() -> None:
+    def build(execution_id: str):
+        request = OSWorldRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": []},
+                "verifier_metadata": {
+                    "task_id": "task-001",
+                    "domain": "chrome",
+                },
+                "trajectory_identity": {
+                    "schema_version": 1,
+                    "sampling_event_id": "sampling-training-001",
+                    "source_group_id": "dataset-group-001",
+                    "rollout_id": "rollout-generic-001",
+                    "group_id": "group-event-001",
+                    "task_id": "task-001",
+                    "rollout_index": 2,
+                    "attempt_index": 0,
+                },
+                "_ng_execution_id": execution_id,
+            }
+        )
+        assert "_ng_execution_id" not in request.model_dump()
+        result = {
+            **DEFAULT_RUN_RESULT,
+            "execution_id": execution_id,
+            "steps": [
+                {
+                    "step": 0,
+                    "model_text": "```DONE```",
+                    "actions": ["DONE"],
+                    "reward": 1.0,
+                    "done": True,
+                    "info": {
+                        "agent": {
+                            "model_calls": [
+                                {
+                                    "parse_attempt": 1,
+                                    "prompt_messages": [
+                                        {"role": "user", "content": "inspect"}
+                                    ],
+                                    "response": {
+                                        "raw_content": "```DONE```",
+                                        "prompt_token_ids": [1],
+                                        "generation_token_ids": [2],
+                                        "generation_log_probs": [-0.1],
+                                    },
+                                    "accepted": True,
+                                    "parse_error": None,
+                                    "parsed_actions": ["DONE"],
+                                }
+                            ]
+                        }
+                    },
+                }
+            ],
+        }
+        return _build_response(
+            request,
+            result,
+            "test-policy",
+            1.0,
+            0.9,
+        )
+
+    first = build("execution-first")
+    second = build("execution-second")
+
+    first_contract = first.response.trajectory_contract
+    second_contract = second.response.trajectory_contract
+    assert first_contract is not None
+    assert second_contract is not None
+    assert first_contract["sampling_event_id"] == "sampling-training-001"
+    assert first_contract["source_group_id"] == "dataset-group-001"
+    assert first_contract["trajectory_contract_id"] == second_contract[
+        "trajectory_contract_id"
+    ]
+    first_exact = first.response.context_compaction_contract
+    second_exact = second.response.context_compaction_contract
+    assert first_exact is not None
+    assert first_exact == second_exact
+    assert "execution_id" not in json.dumps(first_exact, sort_keys=True)
+    assert first.response.execution_context == {
+        "schema_version": 1,
+        "execution_id": "execution-first",
+        "sampling_event_id": "sampling-training-001",
+        "source_group_id": "dataset-group-001",
+        "rollout_id": "rollout-generic-001",
+        "group_id": "group-event-001",
+        "task_id": "task-001",
+    }
+    assert first.verifier_metadata["osworld_execution_id"] == "execution-first"
+
+
 def test_build_response_rejects_partial_caller_identity() -> None:
     request = OSWorldRunRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
@@ -922,6 +1023,38 @@ def test_build_response_rejects_partial_caller_identity() -> None:
 
     with pytest.raises(ValueError, match="identity is incomplete"):
         _build_response(request, DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9)
+
+
+def test_empty_response_preserves_explicit_semantic_execution_join() -> None:
+    request = OSWorldRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": []},
+            "verifier_metadata": {"task_id": "task-001"},
+            "trajectory_identity": {
+                "schema_version": 1,
+                "sampling_event_id": "sampling-evaluation-001",
+                "source_group_id": "dataset-group-001",
+                "rollout_id": "rollout-evaluation-001",
+                "group_id": "group-evaluation-001",
+                "task_id": "task-001",
+                "rollout_index": 0,
+                "attempt_index": 0,
+            },
+            "_ng_execution_id": "execution-empty-001",
+        }
+    )
+
+    response = _empty_response(request, error="fixture unavailable")
+
+    assert response.response.execution_context == {
+        "schema_version": 1,
+        "execution_id": "execution-empty-001",
+        "sampling_event_id": "sampling-evaluation-001",
+        "source_group_id": "dataset-group-001",
+        "rollout_id": "rollout-evaluation-001",
+        "group_id": "group-evaluation-001",
+        "task_id": "task-001",
+    }
 
 
 def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
@@ -1085,7 +1218,10 @@ class TestApp:
         assert "rollout_purpose" in OSWorldRunRequest.__annotations__
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         mock_remote.options.return_value.remote.return_value = MagicMock()
-        mock_to_thread.return_value = DEFAULT_RUN_RESULT
+        mock_to_thread.return_value = {
+            **DEFAULT_RUN_RESULT,
+            "execution_id": "execution-http-test",
+        }
 
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {"observability_enabled": True}
@@ -1099,8 +1235,19 @@ class TestApp:
         )
         payload = {
             **request.model_dump(mode="json"),
+            "_ng_execution_id": "execution-http-test",
             "_ng_task_index": 4,
             "_ng_rollout_index": 0,
+            "trajectory_identity": {
+                "schema_version": 1,
+                "sampling_event_id": "sampling-evaluation-http",
+                "source_group_id": "dataset-group-http",
+                "rollout_id": "rollout-evaluation-http",
+                "group_id": "group-evaluation-http",
+                "task_id": "test-task-001",
+                "rollout_index": 0,
+                "attempt_index": 0,
+            },
         }
         # Reproduce a generic /run boundary that keeps the standard
         # responses_create_params model but discards a top-level extension.
@@ -1111,8 +1258,27 @@ class TestApp:
 
         assert response.status_code == 200
         assert response.json()["rollout_purpose"] == "evaluation"
+        assert response.json()["response"]["execution_context"] == {
+            "schema_version": 1,
+            "execution_id": "execution-http-test",
+            "sampling_event_id": "sampling-evaluation-http",
+            "source_group_id": "dataset-group-http",
+            "rollout_id": "rollout-evaluation-http",
+            "group_id": "group-evaluation-http",
+            "task_id": "test-task-001",
+        }
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         assert positional_args[1]["rollout_purpose"] == "evaluation"
+        assert positional_args[1]["execution_id"] == "execution-http-test"
+        assert positional_args[1]["log_context"]["sampling_event_id"] == (
+            "sampling-evaluation-http"
+        )
+        assert positional_args[1]["log_context"]["rollout_id"] == (
+            "rollout-evaluation-http"
+        )
+        assert positional_args[1]["sandbox_spec"]["metadata"][
+            "nemo-gym.execution-id"
+        ] == "execution-http-test"
 
     @patch("benchmarks.osworld.assets.ensure_osworld_assets")
     def test_setup_webserver_idempotently_prefetches_configured_assets(self, mock_ensure) -> None:

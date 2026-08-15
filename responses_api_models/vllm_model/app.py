@@ -56,6 +56,9 @@ LOG = logging.getLogger("nemo_gym.vllm_model")
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
     "adapter": "x-nemo-gym-log-adapter",
+    "sampling_event_id": "x-nemo-gym-log-sampling-event-id",
+    "source_group_id": "x-nemo-gym-log-source-group-id",
+    "execution_id": "x-nemo-gym-log-execution-id",
     "rollout_id": "x-nemo-gym-log-rollout-id",
     "group_id": "x-nemo-gym-log-group-id",
     "rollout_index": "x-nemo-gym-log-rollout-index",

@@ -28,7 +28,12 @@ import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    EXECUTION_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
@@ -47,6 +52,7 @@ from nemo_gym.rollout_collection import (
     _get_max_rollout_attempts,
     _rollout_for_export,
     _rollout_request_debug_summary,
+    _trajectory_identity,
     loads_jsonl_line,
 )
 from nemo_gym.token_id_capture import (
@@ -75,6 +81,19 @@ def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 class TestLoadsJsonlLine:
     def test_parses_valid_line(self) -> None:
         assert loads_jsonl_line('{"a": 1}', "f.jsonl", 1) == {"a": 1}
+
+    def test_execution_id_does_not_replace_semantic_trajectory_identity(self) -> None:
+        row = {
+            EXECUTION_ID_KEY_NAME: "execution-physical-1",
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "trajectory_identity": {
+                "task_id": "task-logical",
+                "rollout_id": "rollout-logical",
+            },
+        }
+
+        assert _trajectory_identity(row) == ("task-logical", "rollout-logical")
 
     def test_malformed_line_raises_config_error_with_location(self) -> None:
         with pytest.raises(ConfigError, match=r"Malformed JSON in 'f.jsonl' at line 3"):
@@ -372,6 +391,13 @@ class TestRolloutCollection:
         with pytest.raises(RuntimeError, match="boom"):
             await next(RolloutCollectionHelper().run_examples([row]))
 
+        assert EXECUTION_ID_KEY_NAME not in row
+        posted_row = mock_server_client.post.await_args.kwargs["json"]
+        assert posted_row[EXECUTION_ID_KEY_NAME].startswith("execution-")
+        assert mock_server_client.post.await_args.kwargs[
+            "retry_transport_errors"
+        ] is False
+
         captured = capsys.readouterr()
         assert "[rollout_collection] /run failed status=500" in captured.out
         assert '"_ng_task_index": 7' in captured.out
@@ -381,6 +407,95 @@ class TestRolloutCollection:
         assert "do not log this either" not in captured.out
         assert "responses_create_params" not in captured.out
         assert "do not log this" not in captured.out
+
+    async def test_run_examples_allocates_fresh_execution_without_mutating_source(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source_row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": "solve"},
+        }
+        source_snapshot = json.loads(json.dumps(source_row))
+        response = MagicMock(status=200)
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
+        )
+
+        async def successful_status(_response):
+            return None
+
+        async def successful_json(_response):
+            return {"reward": 1.0}
+
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "raise_for_status", successful_status
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "get_response_json", successful_json
+        )
+        helper = RolloutCollectionHelper()
+
+        first_row, first_result = await next(helper.run_examples([source_row]))
+        second_row, second_result = await next(helper.run_examples([source_row]))
+
+        assert EXECUTION_ID_KEY_NAME not in source_row
+        assert source_row == source_snapshot
+        assert first_row is not source_row
+        assert second_row is not source_row
+        assert first_row[EXECUTION_ID_KEY_NAME] != second_row[EXECUTION_ID_KEY_NAME]
+        assert first_result[EXECUTION_ID_KEY_NAME] == first_row[
+            EXECUTION_ID_KEY_NAME
+        ]
+        assert second_result[EXECUTION_ID_KEY_NAME] == second_row[
+            EXECUTION_ID_KEY_NAME
+        ]
+        assert all(
+            call.kwargs["retry_transport_errors"] is False
+            for call in mock_server_client.post.await_args_list
+        )
+        assert mock_server_client.post.await_count == 2
+
+    async def test_run_examples_rejects_server_execution_id_conflict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source_row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": "solve"},
+        }
+        response = MagicMock(status=200)
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
+        )
+
+        async def successful_status(_response):
+            return None
+
+        async def conflicting_json(_response):
+            return {EXECUTION_ID_KEY_NAME: "execution-from-wrong-dispatch"}
+
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "raise_for_status", successful_status
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "get_response_json", conflicting_json
+        )
+
+        with pytest.raises(ValueError, match="wrong physical execution"):
+            await next(RolloutCollectionHelper().run_examples([source_row]))
 
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
