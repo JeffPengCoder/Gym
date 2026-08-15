@@ -958,9 +958,7 @@ def test_execution_identity_is_correlated_but_excluded_from_semantic_digest() ->
                             "model_calls": [
                                 {
                                     "parse_attempt": 1,
-                                    "prompt_messages": [
-                                        {"role": "user", "content": "inspect"}
-                                    ],
+                                    "prompt_messages": [{"role": "user", "content": "inspect"}],
                                     "response": {
                                         "raw_content": "```DONE```",
                                         "prompt_token_ids": [1],
@@ -994,9 +992,7 @@ def test_execution_identity_is_correlated_but_excluded_from_semantic_digest() ->
     assert second_contract is not None
     assert first_contract["sampling_event_id"] == "sampling-training-001"
     assert first_contract["source_group_id"] == "dataset-group-001"
-    assert first_contract["trajectory_contract_id"] == second_contract[
-        "trajectory_contract_id"
-    ]
+    assert first_contract["trajectory_contract_id"] == second_contract["trajectory_contract_id"]
     first_exact = first.response.context_compaction_contract
     second_exact = second.response.context_compaction_contract
     assert first_exact is not None
@@ -1270,15 +1266,9 @@ class TestApp:
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         assert positional_args[1]["rollout_purpose"] == "evaluation"
         assert positional_args[1]["execution_id"] == "execution-http-test"
-        assert positional_args[1]["log_context"]["sampling_event_id"] == (
-            "sampling-evaluation-http"
-        )
-        assert positional_args[1]["log_context"]["rollout_id"] == (
-            "rollout-evaluation-http"
-        )
-        assert positional_args[1]["sandbox_spec"]["metadata"][
-            "nemo-gym.execution-id"
-        ] == "execution-http-test"
+        assert positional_args[1]["log_context"]["sampling_event_id"] == ("sampling-evaluation-http")
+        assert positional_args[1]["log_context"]["rollout_id"] == ("rollout-evaluation-http")
+        assert positional_args[1]["sandbox_spec"]["metadata"]["nemo-gym.execution-id"] == "execution-http-test"
 
     @patch("benchmarks.osworld.assets.ensure_osworld_assets")
     def test_setup_webserver_idempotently_prefetches_configured_assets(self, mock_ensure) -> None:

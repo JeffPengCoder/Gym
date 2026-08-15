@@ -228,9 +228,7 @@ class GymSandboxDesktopProvider:
         run_id_label = f"{OSWORLD_RUN_ID_LABEL}={run_id}"
         if run_id and not _has_option(run_args, "--label", run_id_label):
             run_args.extend(["--label", run_id_label])
-        execution_id = str(
-            metadata.get(EXECUTION_ID_SANDBOX_METADATA_KEY) or ""
-        ).strip()
+        execution_id = str(metadata.get(EXECUTION_ID_SANDBOX_METADATA_KEY) or "").strip()
         execution_id_label = f"{OSWORLD_EXECUTION_ID_LABEL}={execution_id}"
         if execution_id and not _has_option(
             run_args,

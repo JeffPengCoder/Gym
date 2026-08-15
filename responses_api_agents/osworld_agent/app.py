@@ -461,9 +461,7 @@ def _explicit_trajectory_identity(
     """Resolve caller-owned semantic identity without inventing one on errors."""
 
     extra = body.model_extra or {}
-    if "trajectory_identity" not in extra and not any(
-        key in extra for key in _LEGACY_TRAJECTORY_IDENTITY_KEYS
-    ):
+    if "trajectory_identity" not in extra and not any(key in extra for key in _LEGACY_TRAJECTORY_IDENTITY_KEYS):
         return None
     return resolve_trajectory_identity(
         request_extra=extra,
@@ -1181,8 +1179,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 flush=True,
             )
             print(
-                "OSWORLD_RUN_EXECUTION|"
-                f"execution_id={execution_id or 'none'}",
+                f"OSWORLD_RUN_EXECUTION|execution_id={execution_id or 'none'}",
                 flush=True,
             )
             # The OSWorld task spec lives in verifier_metadata. Allow falling
@@ -1332,9 +1329,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     "run_id": os.environ.get("OSWORLD_RUN_ID") or os.environ.get("RUN_TAG"),
                     "adapter": "gym",
                     "rollout_purpose": body.rollout_purpose,
-                    "sampling_event_id": trajectory_identity.get(
-                        "sampling_event_id"
-                    ),
+                    "sampling_event_id": trajectory_identity.get("sampling_event_id"),
                     "source_group_id": trajectory_identity.get("source_group_id"),
                     "execution_id": execution_id,
                     "rollout_id": trajectory_identity["rollout_id"],

@@ -30,9 +30,7 @@ from nemo_gym.global_config import (
 )
 
 
-_EXECUTION_ID: ContextVar[Optional[str]] = ContextVar(
-    "nemo_gym_execution_id", default=None
-)
+_EXECUTION_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_execution_id", default=None)
 _CORRELATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -43,9 +41,7 @@ def new_execution_id() -> str:
 
 def _validated_correlation_id(value: Any, *, field: str) -> str:
     if not isinstance(value, str) or _CORRELATION_ID.fullmatch(value) is None:
-        raise ValueError(
-            f"{field} must match {_CORRELATION_ID.pattern!r}; got {value!r}"
-        )
+        raise ValueError(f"{field} must match {_CORRELATION_ID.pattern!r}; got {value!r}")
     return value
 
 

@@ -1082,10 +1082,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                     raise TypeError("Gym /run response must be a mapping")
                 execution_id = row[EXECUTION_ID_KEY_NAME]
                 observed_execution_id = result.get(EXECUTION_ID_KEY_NAME)
-                if (
-                    observed_execution_id is not None
-                    and observed_execution_id != execution_id
-                ):
+                if observed_execution_id is not None and observed_execution_id != execution_id:
                     raise ValueError(
                         "Gym /run returned the wrong physical execution: "
                         f"expected={execution_id!r}, "

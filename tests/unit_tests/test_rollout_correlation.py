@@ -264,33 +264,21 @@ def test_execution_id_is_explicit_bounded_and_wins_over_legacy_indices() -> None
     assert current_execution_id() is None
 
     with pytest.raises(ValueError, match="_ng_execution_id"):
-        maybe_execution_id_from_run_body(
-            {**body, "_ng_execution_id": "contains/a/path"}
-        )
+        maybe_execution_id_from_run_body({**body, "_ng_execution_id": "contains/a/path"})
 
 
 def test_base_run_request_default_json_shape_is_unchanged() -> None:
-    body = BaseRunRequest.model_validate(
-        {"responses_create_params": {"input": "solve"}}
-    )
+    body = BaseRunRequest.model_validate({"responses_create_params": {"input": "solve"}})
 
     assert set(BaseRunRequest.model_fields) == {"responses_create_params"}
-    assert body.model_dump(exclude_unset=True) == {
-        "responses_create_params": {"input": "solve"}
-    }
-    assert body.model_dump_json(exclude_unset=True) == (
-        '{"responses_create_params":{"input":"solve"}}'
-    )
+    assert body.model_dump(exclude_unset=True) == {"responses_create_params": {"input": "solve"}}
+    assert body.model_dump_json(exclude_unset=True) == ('{"responses_create_params":{"input":"solve"}}')
     execution_body = BaseRunRequest.model_validate(
         {
             "_ng_execution_id": "execution-private-slot",
             "responses_create_params": {"input": "solve"},
         }
     )
-    assert maybe_explicit_execution_id_from_run_body(execution_body) == (
-        "execution-private-slot"
-    )
+    assert maybe_explicit_execution_id_from_run_body(execution_body) == ("execution-private-slot")
     assert "_ng_execution_id" not in execution_body.model_dump()
-    assert execution_body.model_dump(exclude_unset=True) == body.model_dump(
-        exclude_unset=True
-    )
+    assert execution_body.model_dump(exclude_unset=True) == body.model_dump(exclude_unset=True)

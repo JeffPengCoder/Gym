@@ -349,9 +349,7 @@ class TestRolloutCollection:
         assert EXECUTION_ID_KEY_NAME not in row
         posted_row = mock_server_client.post.await_args.kwargs["json"]
         assert posted_row[EXECUTION_ID_KEY_NAME].startswith("execution-")
-        assert mock_server_client.post.await_args.kwargs[
-            "retry_transport_errors"
-        ] is False
+        assert mock_server_client.post.await_args.kwargs["retry_transport_errors"] is False
 
         captured = capsys.readouterr()
         assert "[rollout_collection] /run failed status=500" in captured.out
@@ -389,12 +387,8 @@ class TestRolloutCollection:
         async def successful_json(_response):
             return {"reward": 1.0}
 
-        monkeypatch.setattr(
-            nemo_gym.rollout_collection, "raise_for_status", successful_status
-        )
-        monkeypatch.setattr(
-            nemo_gym.rollout_collection, "get_response_json", successful_json
-        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", successful_status)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", successful_json)
         helper = RolloutCollectionHelper()
 
         first_row, first_result = await next(helper.run_examples([source_row]))
@@ -405,16 +399,9 @@ class TestRolloutCollection:
         assert first_row is not source_row
         assert second_row is not source_row
         assert first_row[EXECUTION_ID_KEY_NAME] != second_row[EXECUTION_ID_KEY_NAME]
-        assert first_result[EXECUTION_ID_KEY_NAME] == first_row[
-            EXECUTION_ID_KEY_NAME
-        ]
-        assert second_result[EXECUTION_ID_KEY_NAME] == second_row[
-            EXECUTION_ID_KEY_NAME
-        ]
-        assert all(
-            call.kwargs["retry_transport_errors"] is False
-            for call in mock_server_client.post.await_args_list
-        )
+        assert first_result[EXECUTION_ID_KEY_NAME] == first_row[EXECUTION_ID_KEY_NAME]
+        assert second_result[EXECUTION_ID_KEY_NAME] == second_row[EXECUTION_ID_KEY_NAME]
+        assert all(call.kwargs["retry_transport_errors"] is False for call in mock_server_client.post.await_args_list)
         assert mock_server_client.post.await_count == 2
 
     async def test_run_examples_rejects_server_execution_id_conflict(
@@ -442,12 +429,8 @@ class TestRolloutCollection:
         async def conflicting_json(_response):
             return {EXECUTION_ID_KEY_NAME: "execution-from-wrong-dispatch"}
 
-        monkeypatch.setattr(
-            nemo_gym.rollout_collection, "raise_for_status", successful_status
-        )
-        monkeypatch.setattr(
-            nemo_gym.rollout_collection, "get_response_json", conflicting_json
-        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", successful_status)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", conflicting_json)
 
         with pytest.raises(ValueError, match="wrong physical execution"):
             await next(RolloutCollectionHelper().run_examples([source_row]))
