@@ -95,6 +95,7 @@ def test_osworld_agent_dependency_overrides() -> None:
 
     assert "grpcio-status==1.71.2" in agent_overrides
     assert "protobuf==5.29.6" in agent_overrides
+    assert "numpy>=2.1,<2.5" in agent_overrides
     assert "torch==2.11.0" in public_overrides
     assert "numpy==2.5.1" not in agent_overrides
     assert "opencv-python-headless==5.0.0.93" not in agent_overrides
