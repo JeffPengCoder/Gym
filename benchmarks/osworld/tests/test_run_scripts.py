@@ -135,9 +135,9 @@ def test_managed_osworld_agent_installs_opensandbox_sdk() -> None:
     assert "matplotlib==3.10.6" in overrides
     assert "agp-client; sys_platform == 'never'" in overrides
     assert "--no-config" in runtime_script
-    assert '"numpy<2"' in runtime_script
+    assert '"numpy>=2.1,<2.5"' in runtime_script
     assert "cryptography~=46.0" in runtime_script
-    assert "opencv-python-headless~=4.8.1.78" in runtime_script
+    assert "opencv-python-headless~=4.10.0.84" in runtime_script
     assert "torchvision==0.26.0" in runtime_script
 
 

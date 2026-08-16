@@ -47,9 +47,9 @@ echo "[osworld-runtime-deps] Installing opt-in runtime dependencies..."
 # the default package index. The versions then look compatible while native
 # operators such as torchvision::nms cannot be loaded.
 uv pip install --no-config --torch-backend "${torch_backend}" --python "${venv_python}" \
-    "numpy<2" \
+    "numpy>=2.1,<2.5" \
     "cryptography~=46.0" \
-    "opencv-python-headless~=4.8.1.78" \
+    "opencv-python-headless~=4.10.0.84" \
     "torchvision==0.26.0"
 
 "${venv_python}" "${runtime_checker}" check
