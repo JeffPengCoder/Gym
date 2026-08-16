@@ -29,7 +29,6 @@ OSWORLD_AGENT_PUBLIC_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/over
 OSWORLD_RESOURCES_PROJECT = ROOT / "resources_servers/osworld/pyproject.toml"
 OSWORLD_AGENT_README = ROOT / "responses_api_agents/osworld_agent/README.md"
 OSWORLD_BENCHMARK_README = ROOT / "benchmarks/osworld/README.md"
-VLLM_MODEL_OVERRIDES = ROOT / "responses_api_models/vllm_model/uv-overrides.txt"
 VLLM_MODEL_PYTHON = ROOT / "responses_api_models/vllm_model/uv-python-version.txt"
 VLLM_MODEL_MANAGED_PYTHON = ROOT / "responses_api_models/vllm_model/uv-managed-python.txt"
 OSWORLD_AGENT_PYTHON = ROOT / "responses_api_agents/osworld_agent/uv-python-version.txt"
@@ -89,20 +88,32 @@ def test_osworld_resources_server_avoids_unsatisfiable_torchvision_resolution() 
     assert "torchvision; sys_platform == 'never'" in resource_uv["override-dependencies"]
 
 
-def test_nemo_rl_servers_override_cross_process_runtime_versions() -> None:
+def test_osworld_agent_dependency_overrides() -> None:
     requirements = OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8")
     agent_overrides = OSWORLD_AGENT_OVERRIDES.read_text(encoding="utf-8")
     public_overrides = OSWORLD_AGENT_PUBLIC_OVERRIDES.read_text(encoding="utf-8")
-    model_overrides = VLLM_MODEL_OVERRIDES.read_text(encoding="utf-8")
 
-    assert "ray==2.55.1" in agent_overrides
     assert "grpcio-status==1.71.2" in agent_overrides
     assert "protobuf==5.29.6" in agent_overrides
     assert "torch==2.11.0" in public_overrides
     assert "numpy==2.5.1" not in agent_overrides
     assert "opencv-python-headless==5.0.0.93" not in agent_overrides
-    assert "numpy<2" in requirements
-    assert "ray==2.55.1" in model_overrides
+    assert "numpy>=2.1,<2.5" in requirements
+
+
+def test_server_ray_version_is_owned_by_parent_process() -> None:
+    # global_config.py injects the parent process's exact Ray version into
+    # every server installation. Static overrides must not drag a current
+    # source checkout back to whichever Ray happened to ship in a base image.
+    ray_override = re.compile(r"(?m)^\s*ray(?:\[default\])?\s*[<>=!~]")
+    managed_overrides = [
+        *ROOT.glob("responses_api_agents/*/uv-overrides.txt"),
+        *ROOT.glob("responses_api_models/*/uv-overrides.txt"),
+        *ROOT.glob("resources_servers/*/uv-overrides.txt"),
+    ]
+    for override_path in managed_overrides:
+        assert ray_override.search(override_path.read_text(encoding="utf-8")) is None
+    assert not (ROOT / "responses_api_models/vllm_model/uv-overrides.txt").exists()
 
 
 def test_nemo_rl_servers_use_the_project_python_floor() -> None:

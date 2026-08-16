@@ -32,7 +32,9 @@ chardet<6
 # install_optional_runtime_deps.sh and benchmarks/osworld/README.md.
 cffi
 scipy
-numpy<2
+# NumPy 1.26 has no CPython 3.13 wheel. Keep this role on the NumPy 2 line
+# already exercised by Gym, while avoiding the NumPy 2.5/Numba boundary.
+numpy>=2.1,<2.5
 pynput
 ag2
 

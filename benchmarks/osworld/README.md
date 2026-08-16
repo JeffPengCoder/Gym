@@ -298,8 +298,10 @@ bash ../../responses_api_agents/osworld_agent/install_optional_runtime_deps.sh \
 The script uses `--no-config` only for that named agent venv and installs
 cryptography, headless OpenCV, and the matching torchvision wheel. It is
 idempotent, but skips installation only when the required versions are both
-present and importable. It also reasserts the normal agent's `numpy<2`
-constraint because the OpenCV 4.8 wheel uses NumPy's 1.x ABI. These are runtime
+present and importable. It also reasserts the normal agent's
+`numpy>=2.1,<2.5` constraint and installs the OpenCV 4.10 abi3 wheel so the
+managed Python 3.13 environment never falls back to building NumPy 1.26 or
+OpenCV from source. These are runtime
 imports for OSWorld's desktop stack,
 but repository policy excludes them from managed package and container
 resolution. `skip_venv_if_present: true` in the generated config then lets

@@ -1,8 +1,3 @@
-# The NeMo-RL-integrated agent joins the trainer's Ray cluster. Keep this
-# process-boundary version aligned with the accepted training image; the
-# standalone benchmark does not read this training-only override file.
-ray==2.55.1
-
 # OSWorld's legacy google-generativeai path selects google-api-core[grpc].
 # grpcio-status 1.81+ requires protobuf 6+, while google-generativeai still
 # requires protobuf <6. Put the known-compatible pair in the override policy,
