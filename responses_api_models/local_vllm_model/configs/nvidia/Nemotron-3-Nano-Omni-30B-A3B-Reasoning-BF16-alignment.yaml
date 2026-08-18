@@ -1,0 +1,46 @@
+# Public Nano Omni v3 profile for web-runtime alignment.
+#
+# The checkpoint and revision are public and immutable. The native-compatible
+# chat template and parser plugins remain explicit operator inputs until their
+# public implementations are provenance-bound and tested. Do not replace the
+# placeholders with cluster-specific paths in this repository.
+Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      replace_developer_role_with_system: false
+      debug: false
+
+      extra_body:
+        temperature: 0.1
+        top_p: 0.95
+        max_output_tokens: 4096
+
+      hf_home: null
+      vllm_serve_env_vars:
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+
+      vllm_serve_kwargs:
+        revision: 24e67ea000b7c2837fc8f9488aa2008524fac8ba
+        data_parallel_size: 1
+        tensor_parallel_size: 8
+        pipeline_parallel_size: 1
+        max_model_len: 64000
+        max_num_seqs: 32
+        gpu_memory_utilization: 0.9
+        enable_auto_tool_choice: true
+        trust_remote_code: true
+
+        # Required alignment inputs. Supply reviewed, readable paths in the
+        # run config; never commit cluster/user-specific values here.
+        chat_template: ???
+        tool_call_parser: ???
+        reasoning_parser_plugin: ???
+        reasoning_parser: nano_v3
+
+        model_loader_extra_config:
+          enable_multithread_load: true
+          num_threads: 16
