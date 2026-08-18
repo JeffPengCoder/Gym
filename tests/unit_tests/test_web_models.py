@@ -21,6 +21,16 @@ def test_selenium_is_scoped_to_webvoyager() -> None:
         )
 
 
+def test_native_visual_runtime_is_backend_neutral() -> None:
+    task = WebTask(
+        benchmark=WebBenchmark.VISUALWEBARENA,
+        task_id="17",
+        runtime_profile=WebRuntimeProfile.NATIVE_VISUAL,
+    )
+
+    assert task.runtime_profile == WebRuntimeProfile.NATIVE_VISUAL
+
+
 def test_image_requires_inline_or_artifact_transport() -> None:
     with pytest.raises(ValidationError, match="requires data_url or artifact"):
         WebImage()

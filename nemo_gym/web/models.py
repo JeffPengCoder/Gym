@@ -18,6 +18,7 @@ class WebBenchmark(StrEnum):
 
 class WebRuntimeProfile(StrEnum):
     BROWSERGYM = "browsergym"
+    NATIVE_VISUAL = "native_visual"
     SELENIUM = "selenium"
 
 

@@ -16,6 +16,7 @@ from nemo_gym.web.api_models import (
     WebVerifyRequest,
     WebVerifyResponse,
 )
+from nemo_gym.web.composed_backend import ComposedWebBackend, WebBrowserDriver, WebTaskEvaluator
 from nemo_gym.web.models import (
     WebAction,
     WebActionProfile,
@@ -34,6 +35,7 @@ from nemo_gym.web.models import (
 
 __all__ = [
     "ActionParseError",
+    "ComposedWebBackend",
     "WebCloseResponse",
     "WebEvaluateRequest",
     "WebEvaluateResponse",
@@ -41,6 +43,7 @@ __all__ = [
     "WebActionProfile",
     "WebArtifactRef",
     "WebBenchmark",
+    "WebBrowserDriver",
     "WebImage",
     "WebObservation",
     "WebObservationProfile",
@@ -54,6 +57,7 @@ __all__ = [
     "WebStepResult",
     "WebTab",
     "WebTask",
+    "WebTaskEvaluator",
     "WebVerifierResult",
     "WebVerifyRequest",
     "WebVerifyResponse",
