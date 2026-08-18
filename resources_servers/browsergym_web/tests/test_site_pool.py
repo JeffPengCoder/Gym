@@ -6,7 +6,12 @@ import asyncio
 import pytest
 
 from nemo_gym.web.models import WebBenchmark, WebTask
-from resources_servers.browsergym_web.site_pool import LocalSiteLockPool
+from nemo_gym.web.site_pool import LocalSiteLockPool
+from resources_servers.browsergym_web.site_pool import LocalSiteLockPool as BrowserGymLocalSiteLockPool
+
+
+def test_browsergym_site_pool_is_a_compatibility_export():
+    assert BrowserGymLocalSiteLockPool is LocalSiteLockPool
 
 
 def _task(task_id: str, sites: list[str], mutation_class: str) -> WebTask:

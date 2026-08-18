@@ -15,6 +15,7 @@ from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.models import WebArtifactRef, WebObservation, WebTask, WebVerifierResult
 from nemo_gym.web.operation_runner import ThreadAffineWebOperationRunner, WebOperationRunner
 from nemo_gym.web.protocol import WebEnvironmentBackend
+from nemo_gym.web.site_pool import LocalSiteLockPool, SiteLease, SitePool, UnmanagedSitePool
 from resources_servers.browsergym_web.backend import BrowserGymBackend
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
 from resources_servers.browsergym_web.models import (
@@ -25,12 +26,6 @@ from resources_servers.browsergym_web.models import (
     WebSessionStatusResponse,
     WebStepRequest,
     WebStepResponse,
-)
-from resources_servers.browsergym_web.site_pool import (
-    LocalSiteLockPool,
-    SiteLease,
-    SitePool,
-    UnmanagedSitePool,
 )
 
 

@@ -37,13 +37,18 @@ from nemo_gym.web.operation_runner import (
     ThreadAffineWebOperationRunner,
     WebOperationRunner,
 )
+from nemo_gym.web.site_pool import LocalSiteLockPool, SiteLease, SitePool, UnmanagedSitePool
 
 
 __all__ = [
     "ActionParseError",
     "ComposedWebBackend",
     "DirectWebOperationRunner",
+    "LocalSiteLockPool",
+    "SiteLease",
+    "SitePool",
     "ThreadAffineWebOperationRunner",
+    "UnmanagedSitePool",
     "WebCloseResponse",
     "WebEvaluateRequest",
     "WebEvaluateResponse",
