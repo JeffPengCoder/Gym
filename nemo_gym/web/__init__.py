@@ -37,16 +37,27 @@ from nemo_gym.web.operation_runner import (
     ThreadAffineWebOperationRunner,
     WebOperationRunner,
 )
+from nemo_gym.web.session import (
+    BenchmarkPreconditionError,
+    CapacityUnavailableError,
+    SessionConflictError,
+    SessionNotFoundError,
+    WebSessionState,
+)
 from nemo_gym.web.site_pool import LocalSiteLockPool, SiteLease, SitePool, UnmanagedSitePool
 
 
 __all__ = [
     "ActionParseError",
+    "BenchmarkPreconditionError",
+    "CapacityUnavailableError",
     "ComposedWebBackend",
     "DirectWebOperationRunner",
     "LocalSiteLockPool",
     "SiteLease",
     "SitePool",
+    "SessionConflictError",
+    "SessionNotFoundError",
     "ThreadAffineWebOperationRunner",
     "UnmanagedSitePool",
     "WebCloseResponse",
@@ -64,6 +75,7 @@ __all__ = [
     "WebOperationRunner",
     "WebResetRequest",
     "WebRuntimeProfile",
+    "WebSessionState",
     "WebSeedSessionRequest",
     "WebSeedSessionResponse",
     "WebSessionStatusResponse",

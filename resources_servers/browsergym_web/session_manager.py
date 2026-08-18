@@ -7,14 +7,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import OrderedDict
-from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from nemo_gym.web.artifacts import WebArtifactStore
-from nemo_gym.web.models import WebArtifactRef, WebObservation, WebTask, WebVerifierResult
+from nemo_gym.web.models import WebArtifactRef, WebObservation, WebTask
 from nemo_gym.web.operation_runner import ThreadAffineWebOperationRunner, WebOperationRunner
 from nemo_gym.web.protocol import WebEnvironmentBackend
+from nemo_gym.web.session import (
+    BenchmarkPreconditionError,
+    CapacityUnavailableError,
+    SessionConflictError,
+    SessionNotFoundError,
+    WebSessionState,
+)
 from nemo_gym.web.site_pool import LocalSiteLockPool, SiteLease, SitePool, UnmanagedSitePool
 from resources_servers.browsergym_web.backend import BrowserGymBackend
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
@@ -32,42 +37,10 @@ from resources_servers.browsergym_web.models import (
 LOG = logging.getLogger("nemo_gym.resources_servers.browsergym_web")
 
 
-class SessionNotFoundError(KeyError):
-    pass
-
-
-class SessionConflictError(RuntimeError):
-    pass
-
-
-class CapacityUnavailableError(RuntimeError):
-    pass
-
-
-class BenchmarkPreconditionError(RuntimeError):
-    """A deterministic task/environment setup failure for the current deployment."""
-
-
 BackendFactory = Callable[
     [BrowserGymWebResourcesServerConfig, str, WebArtifactStore],
     WebEnvironmentBackend,
 ]
-
-
-@dataclass
-class WebSessionState:
-    session_id: str
-    task: WebTask
-    backend: WebEnvironmentBackend
-    site_lease: SiteLease
-    observation: WebObservation
-    seed_info: dict[str, Any]
-    created_at: float
-    last_access_at: float
-    status: str = "ready"
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    operations: OrderedDict[str, WebStepResponse] = field(default_factory=OrderedDict)
-    verifier_result: WebVerifierResult | None = None
 
 
 class BrowserGymSessionManager:
