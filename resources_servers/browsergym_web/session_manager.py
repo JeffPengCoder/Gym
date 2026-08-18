@@ -8,13 +8,12 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any, Callable
 
 from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.models import WebArtifactRef, WebObservation, WebTask, WebVerifierResult
+from nemo_gym.web.operation_runner import ThreadAffineWebOperationRunner, WebOperationRunner
 from nemo_gym.web.protocol import WebEnvironmentBackend
 from resources_servers.browsergym_web.backend import BrowserGymBackend
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
@@ -85,6 +84,7 @@ class BrowserGymSessionManager:
         *,
         backend_factory: BackendFactory = BrowserGymBackend,
         site_pool: SitePool | None = None,
+        operation_runner: WebOperationRunner | None = None,
     ) -> None:
         self.config = config
         self._backend_factory = backend_factory
@@ -103,11 +103,9 @@ class BrowserGymSessionManager:
         # thread. A regular asyncio.to_thread() pool can move consecutive
         # calls between workers and fails under concurrent session creation
         # with ``greenlet.error: cannot switch to a different thread``.
-        self._browser_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="browsergym-playwright",
+        self._operation_runner = operation_runner or ThreadAffineWebOperationRunner(
+            thread_name_prefix="browsergym-playwright"
         )
-        self._browser_executor_shutdown = False
         self._started_at = time.time()
 
     async def start(self) -> None:
@@ -130,9 +128,7 @@ class BrowserGymSessionManager:
             *(self.close_session(session_id) for session_id in session_ids),
             return_exceptions=True,
         )
-        if not self._browser_executor_shutdown:
-            self._browser_executor.shutdown(wait=True, cancel_futures=True)
-            self._browser_executor_shutdown = True
+        await self._operation_runner.close()
 
     async def seed_session(self, session_id: str, body: WebSeedSessionRequest) -> WebSeedSessionResponse:
         self._validate_task(body.task)
@@ -326,10 +322,7 @@ class BrowserGymSessionManager:
     async def _run_backend(self, operation: Callable[..., Any], *args: Any) -> Any:
         """Run a BrowserGym operation on its thread-affine Playwright worker."""
 
-        if self._browser_executor_shutdown:
-            raise RuntimeError("BrowserGym session manager has already stopped")
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._browser_executor, partial(operation, *args))
+        return await self._operation_runner.run(operation, *args)
 
     async def _reset_backend(
         self, backend: WebEnvironmentBackend, task: WebTask

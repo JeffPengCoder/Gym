@@ -32,11 +32,18 @@ from nemo_gym.web.models import (
     WebTask,
     WebVerifierResult,
 )
+from nemo_gym.web.operation_runner import (
+    DirectWebOperationRunner,
+    ThreadAffineWebOperationRunner,
+    WebOperationRunner,
+)
 
 
 __all__ = [
     "ActionParseError",
     "ComposedWebBackend",
+    "DirectWebOperationRunner",
+    "ThreadAffineWebOperationRunner",
     "WebCloseResponse",
     "WebEvaluateRequest",
     "WebEvaluateResponse",
@@ -49,6 +56,7 @@ __all__ = [
     "WebImage",
     "WebObservation",
     "WebObservationProfile",
+    "WebOperationRunner",
     "WebResetRequest",
     "WebRuntimeProfile",
     "WebSeedSessionRequest",
