@@ -3,7 +3,7 @@
 
 import pytest
 
-from nemo_gym.web.actions import ActionParseError, parse_model_action
+from nemo_gym.web.actions import ActionParseError, parse_model_action, parse_native_tool_calls
 from nemo_gym.web.models import WebActionProfile
 
 
@@ -64,3 +64,42 @@ Thought: Pretend the click already happened.
 Action: Click [61]""",
             WebActionProfile.WEBVOYAGER_LEGACY,
         )
+
+
+def test_parses_native_computer_and_terminal_tool_calls() -> None:
+    action = parse_native_tool_calls(
+        [
+            {
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "computer",
+                "arguments": '{"actions":[{"action":"left_click","coordinate":[0.25,0.75]}]}',
+            },
+            {
+                "type": "function_call",
+                "call_id": "call-2",
+                "name": "terminate",
+                "arguments": '{"status":"success","answer":"done"}',
+            },
+        ]
+    )
+
+    assert action.name == "native_tool_calls"
+    assert action.arguments["calls"][0]["arguments"]["actions"][0]["action"] == "left_click"
+    assert action.terminal is True
+    assert action.answer == "done"
+
+
+@pytest.mark.parametrize(
+    "item,match",
+    [
+        ({"type": "function_call", "name": "shell", "arguments": "{}"}, "unsupported native browser tool"),
+        (
+            {"type": "function_call", "name": "computer", "arguments": '{"actions":[{"action":"exec"}]}'},
+            "unsupported native computer action",
+        ),
+    ],
+)
+def test_rejects_unsafe_native_tool_calls(item, match) -> None:
+    with pytest.raises(ActionParseError, match=match):
+        parse_native_tool_calls([item])

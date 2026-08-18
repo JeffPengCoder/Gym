@@ -24,14 +24,21 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from nemo_gym.web.actions import ActionParseError, parse_model_action
+from nemo_gym.web.actions import ActionParseError, parse_model_action, parse_native_tool_calls
 from nemo_gym.web.api_models import (
     WebCloseResponse,
     WebEvaluateResponse,
     WebSeedSessionResponse,
     WebStepResponse,
 )
-from nemo_gym.web.models import WebArtifactRef, WebBenchmark, WebObservation, WebTask, WebVerifierResult
+from nemo_gym.web.models import (
+    WebActionProfile,
+    WebArtifactRef,
+    WebBenchmark,
+    WebObservation,
+    WebTask,
+    WebVerifierResult,
+)
 from responses_api_agents.web_agent.render import parse_error_message, render_observation
 
 
@@ -106,6 +113,12 @@ def _extract_output_text(response: NeMoGymResponse) -> str:
             if getattr(block, "type", None) == "output_text":
                 parts.append(str(getattr(block, "text", "")))
     return "\n".join(part for part in parts if part).strip()
+
+
+def _parse_response_action(response: NeMoGymResponse, profile: WebActionProfile):
+    if profile == WebActionProfile.NATIVE_TOOLCALL:
+        return parse_native_tool_calls(response.output)
+    return parse_model_action(_extract_output_text(response), profile)
 
 
 def _http_error_payload(exc: Exception) -> dict[str, Any]:
@@ -332,9 +345,8 @@ class WebAgent(SimpleResponsesAPIAgent):
                     model_turns += 1
                     usage = _merge_usage(usage, model_response)
                     trajectory.extend(model_response.output)
-                    model_text = _extract_output_text(model_response)
                     try:
-                        action = parse_model_action(model_text, task.action_profile)
+                        action = _parse_response_action(model_response, task.action_profile)
                         break
                     except ActionParseError as exc:
                         if parse_attempt >= self.config.max_parse_retries:

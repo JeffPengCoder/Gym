@@ -30,6 +30,7 @@ class WebObservationProfile(StrEnum):
 
 class WebActionProfile(StrEnum):
     BROWSERGYM_HIGHLEVEL = "browsergym_highlevel"
+    NATIVE_TOOLCALL = "native_toolcall"
     WEBVOYAGER_LEGACY = "webvoyager_legacy"
 
 

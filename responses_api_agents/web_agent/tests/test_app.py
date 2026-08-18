@@ -9,13 +9,14 @@ import pytest
 from aiohttp import ClientResponseError
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage
+from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
-from nemo_gym.web.models import WebBenchmark, WebTask
+from nemo_gym.web.models import WebActionProfile, WebBenchmark, WebTask
 from responses_api_agents.web_agent.app import (
     WebAgent,
     WebAgentConfig,
     WebAgentRunRequest,
+    _parse_response_action,
     _redact_old_images,
 )
 
@@ -39,6 +40,27 @@ def _model_response(text: str) -> dict:
         "tool_choice": "auto",
         "tools": [],
     }
+
+
+def test_native_profile_reads_structured_function_calls_not_message_text():
+    payload = _model_response("")
+    payload["output"] = [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "tabs_focus",
+            "arguments": '{"tab_id": 2}',
+            "status": "completed",
+        }
+    ]
+
+    action = _parse_response_action(
+        NeMoGymResponse.model_validate(payload),
+        WebActionProfile.NATIVE_TOOLCALL,
+    )
+
+    assert action.name == "tabs_focus"
+    assert action.arguments["calls"][0]["arguments"] == {"tab_id": 2}
 
 
 def _observation(url="https://example.test") -> dict:

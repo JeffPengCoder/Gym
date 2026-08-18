@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 from typing import Any
 
@@ -37,6 +38,22 @@ ALLOWED_ACTIONS = frozenset(
     }
 )
 TERMINAL_ACTIONS = frozenset({"send_msg_to_user", "report_infeasible"})
+NATIVE_TOOL_NAMES = frozenset({"computer", "navigate", "tabs_create", "tabs_focus", "terminate"})
+NATIVE_COMPUTER_ACTIONS = frozenset(
+    {
+        "double_click",
+        "key_press",
+        "left_click",
+        "left_click_drag",
+        "middle_click",
+        "mouse_move",
+        "right_click",
+        "scroll",
+        "triple_click",
+        "type",
+        "wait",
+    }
+)
 
 
 class ActionParseError(ValueError):
@@ -170,8 +187,61 @@ def _legacy_webvoyager_action(text: str) -> WebAction:
     return parse_browsergym_action(text)
 
 
+def parse_native_tool_calls(items: list[Any], *, max_calls: int = 8) -> WebAction:
+    """Validate native Nano Omni function calls without executing arbitrary code."""
+
+    calls: list[dict[str, Any]] = []
+    for item in items:
+        item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+        if item_type != "function_call":
+            continue
+        name = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
+        raw_arguments = item.get("arguments") if isinstance(item, dict) else getattr(item, "arguments", None)
+        call_id = item.get("call_id") if isinstance(item, dict) else getattr(item, "call_id", None)
+        if name not in NATIVE_TOOL_NAMES:
+            raise ActionParseError(f"unsupported native browser tool: {name!r}")
+        try:
+            arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+        except json.JSONDecodeError as exc:
+            raise ActionParseError(f"invalid JSON arguments for native tool {name!r}") from exc
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise ActionParseError(f"native tool {name!r} arguments must be an object")
+        if name == "computer":
+            actions = arguments.get("actions")
+            if not isinstance(actions, list) or not actions:
+                raise ActionParseError("native computer tool requires a non-empty actions list")
+            for action in actions:
+                if not isinstance(action, dict) or action.get("action") not in NATIVE_COMPUTER_ACTIONS:
+                    raise ActionParseError("unsupported native computer action")
+        calls.append({"id": call_id, "name": name, "arguments": arguments})
+
+    if not calls:
+        raise ActionParseError("model response did not contain a native function call")
+    if len(calls) > max_calls:
+        raise ActionParseError(f"native response exceeded the {max_calls}-call limit")
+    terminal_indices = [index for index, call in enumerate(calls) if call["name"] == "terminate"]
+    if terminal_indices and terminal_indices[-1] != len(calls) - 1:
+        raise ActionParseError("native terminate must be the final tool call")
+
+    terminal = bool(terminal_indices)
+    terminal_args = calls[-1]["arguments"] if terminal else {}
+    answer = terminal_args.get("answer") if terminal else None
+    return WebAction(
+        name=calls[0]["name"] if len(calls) == 1 else "native_tool_calls",
+        script="",
+        arguments={"calls": calls},
+        terminal=terminal,
+        answer=None if answer is None else str(answer),
+        raw_model_output=json.dumps(calls, ensure_ascii=False),
+    )
+
+
 def parse_model_action(text: str, profile: WebActionProfile | str) -> WebAction:
     profile = WebActionProfile(profile)
+    if profile == WebActionProfile.NATIVE_TOOLCALL:
+        raise ActionParseError("native tool-call actions must be parsed from structured response output")
     if profile == WebActionProfile.WEBVOYAGER_LEGACY:
         action = _legacy_webvoyager_action(text)
         return action.model_copy(update={"raw_model_output": text})
