@@ -23,7 +23,7 @@ from pytest import LogCaptureFixture, MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
+from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
     AlmostServerError,
     ConfigError,
@@ -73,8 +73,10 @@ class TestGlobalConfig:
             "dry_run": False,
             "model_endpoint_readiness_timeout_seconds": 600,
             "allow_openai_version_skew": False,
-            "uv_cache_dir": str(CACHE_DIR / "uv"),
+            "uv_cache_dir": str(CACHE_DIR.expanduser().resolve() / "uv"),
             "uv_venv_dir": str(WORKING_DIR),
+            "results_dir": str(RESULTS_DIR.expanduser().resolve()),
+            "cache_dir": str(CACHE_DIR.expanduser().resolve()),
         }
 
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
@@ -193,6 +195,37 @@ class TestGlobalConfig:
         self._mock_parse_environment(monkeypatch, DictConfig({"allow_openai_version_skew": "false"}))
 
         with raises(ConfigError, match="must be a boolean"):
+            get_global_config_dict()
+
+    def test_get_global_config_dict_artifact_dir_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(
+            monkeypatch, DictConfig({"results_dir": "/shared/results", "cache_dir": "/local/cache"})
+        )
+
+        global_config_dict = get_global_config_dict()
+        assert global_config_dict["results_dir"] == "/shared/results"
+        assert global_config_dict["cache_dir"] == "/local/cache"
+        # uv_cache_dir defaults under the (overridden) cache root.
+        assert global_config_dict["uv_cache_dir"] == str(Path("/local/cache") / "uv")
+
+    def test_get_global_config_dict_artifact_dir_normalization(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(
+            monkeypatch, DictConfig({"results_dir": "relative/results", "cache_dir": "~/gym-cache"})
+        )
+
+        global_config_dict = get_global_config_dict()
+        # Children resolve relative paths against their own cwd; the parser
+        # must hand them an absolute path.
+        assert global_config_dict["results_dir"] == str((Path.cwd() / "relative/results").resolve())
+        assert global_config_dict["cache_dir"] == str((Path.home() / "gym-cache").resolve())
+
+    def test_get_global_config_dict_artifact_dir_rejects_non_string(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(monkeypatch, DictConfig({"results_dir": 123}))
+
+        with raises(ConfigError, match="results_dir must be a non-empty path string"):
             get_global_config_dict()
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
