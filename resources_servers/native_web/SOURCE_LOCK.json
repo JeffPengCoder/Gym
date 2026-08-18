@@ -1,0 +1,29 @@
+{
+  "repository": "https://gitlab-master.nvidia.com/mingjiel/osworld_internal",
+  "snapshots": {
+    "nemotron_v3": {
+      "branch": "nemotron-v3",
+      "commit": "3b775dc538931ead0cb6b4922349da9c6d493dab",
+      "benchmarks": [
+        "webarena",
+        "webvoyager"
+      ]
+    },
+    "visualwebarena": {
+      "branch": "visualwebarena",
+      "commit": "267b8d95243c9832990b4da1e6f1f328b0496a6b",
+      "benchmarks": [
+        "visualwebarena"
+      ]
+    }
+  },
+  "benchmark_data": {
+    "repository": "https://github.com/jayl940712/webarena_benchmarks",
+    "commit": "6a2977939b157b0ab9de7799bb089c721f1ac115",
+    "task_counts": {
+      "webarena": 812,
+      "visualwebarena": 908,
+      "webvoyager": 552
+    }
+  }
+}

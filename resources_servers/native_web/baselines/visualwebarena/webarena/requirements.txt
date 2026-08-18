@@ -1,0 +1,9 @@
+playwright
+webarena-verified
+httpx
+pyautogui
+python-xlib
+Pillow
+numpy
+scikit-image
+trafilatura
