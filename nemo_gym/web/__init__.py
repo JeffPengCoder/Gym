@@ -3,6 +3,19 @@
 """Dependency-light contracts shared by NeMo Gym web agents and runtimes."""
 
 from nemo_gym.web.actions import ActionParseError, parse_model_action
+from nemo_gym.web.api_models import (
+    WebCloseResponse,
+    WebEvaluateRequest,
+    WebEvaluateResponse,
+    WebResetRequest,
+    WebSeedSessionRequest,
+    WebSeedSessionResponse,
+    WebSessionStatusResponse,
+    WebStepRequest,
+    WebStepResponse,
+    WebVerifyRequest,
+    WebVerifyResponse,
+)
 from nemo_gym.web.models import (
     WebAction,
     WebActionProfile,
@@ -21,6 +34,9 @@ from nemo_gym.web.models import (
 
 __all__ = [
     "ActionParseError",
+    "WebCloseResponse",
+    "WebEvaluateRequest",
+    "WebEvaluateResponse",
     "WebAction",
     "WebActionProfile",
     "WebArtifactRef",
@@ -28,10 +44,18 @@ __all__ = [
     "WebImage",
     "WebObservation",
     "WebObservationProfile",
+    "WebResetRequest",
     "WebRuntimeProfile",
+    "WebSeedSessionRequest",
+    "WebSeedSessionResponse",
+    "WebSessionStatusResponse",
+    "WebStepRequest",
+    "WebStepResponse",
     "WebStepResult",
     "WebTab",
     "WebTask",
     "WebVerifierResult",
+    "WebVerifyRequest",
+    "WebVerifyResponse",
     "parse_model_action",
 ]

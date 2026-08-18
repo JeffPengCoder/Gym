@@ -25,13 +25,13 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.web.actions import ActionParseError, parse_model_action
-from nemo_gym.web.models import WebArtifactRef, WebBenchmark, WebObservation, WebTask, WebVerifierResult
-from resources_servers.browsergym_web.models import (
+from nemo_gym.web.api_models import (
     WebCloseResponse,
     WebEvaluateResponse,
     WebSeedSessionResponse,
     WebStepResponse,
 )
+from nemo_gym.web.models import WebArtifactRef, WebBenchmark, WebObservation, WebTask, WebVerifierResult
 from responses_api_agents.web_agent.render import parse_error_message, render_observation
 
 
