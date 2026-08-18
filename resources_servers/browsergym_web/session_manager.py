@@ -13,9 +13,9 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Callable
 
+from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.models import WebArtifactRef, WebObservation, WebTask, WebVerifierResult
 from nemo_gym.web.protocol import WebEnvironmentBackend
-from resources_servers.browsergym_web.artifacts import WebArtifactStore
 from resources_servers.browsergym_web.backend import BrowserGymBackend
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
 from resources_servers.browsergym_web.models import (

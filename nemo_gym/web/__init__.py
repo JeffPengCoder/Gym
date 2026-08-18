@@ -16,6 +16,7 @@ from nemo_gym.web.api_models import (
     WebVerifyRequest,
     WebVerifyResponse,
 )
+from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.composed_backend import ComposedWebBackend, WebBrowserDriver, WebTaskEvaluator
 from nemo_gym.web.models import (
     WebAction,
@@ -42,6 +43,7 @@ __all__ = [
     "WebAction",
     "WebActionProfile",
     "WebArtifactRef",
+    "WebArtifactStore",
     "WebBenchmark",
     "WebBrowserDriver",
     "WebImage",
