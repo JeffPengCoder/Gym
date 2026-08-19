@@ -122,6 +122,11 @@ A result is comparable only when all expected task IDs are present exactly
 once, no unexpected task IDs are present, and no task is masked as an
 infrastructure/configuration failure.
 
+When a cleanup wave reruns masked rows, pass its input with
+`--superseded-ids-jsonl` and list the first-wave paths before cleanup paths.
+The last result for only those explicitly declared task IDs then supersedes
+the preserved first-wave result; undeclared duplicates remain an audit error.
+
 ## Validation order
 
 Run one task first, then one task from every retained domain, then a 32-task

@@ -91,3 +91,20 @@ def test_native_summary_retries_masked_rows_as_well_as_missing_rows(tmp_path) ->
     assert report["missing_task_ids"] == ["c"]
     assert report["retry_task_ids"] == ["a", "c"]
     assert [json.loads(line)["payload"] for line in cleanup.read_text().splitlines()] == ["a", "c"]
+
+
+def test_native_summary_accepts_declared_cleanup_supersession() -> None:
+    report = summarize(
+        [
+            {"task_id": "a", "task_success": False, "mask_sample": True},
+            {"task_id": "a", "task_success": True, "mask_sample": False},
+        ],
+        expected_task_ids={"a"},
+        superseded_task_ids={"a"},
+    )
+
+    assert report["duplicate_task_ids"] == []
+    assert report["superseded_task_ids"] == ["a"]
+    assert report["success"] == 1
+    assert report["invalid_or_infrastructure"] == 0
+    assert report["comparable"] is True

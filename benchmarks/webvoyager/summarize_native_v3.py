@@ -26,6 +26,7 @@ def summarize(
     rows: list[dict[str, Any]],
     *,
     expected_task_ids: set[str] | None = None,
+    superseded_task_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     by_task: dict[str, dict[str, Any]] = {}
     duplicates: Counter[str] = Counter()
@@ -53,7 +54,11 @@ def summarize(
         for row in expected_rows
         if not row.get("task_success")
     )
-    duplicate_ids = sorted(task_id for task_id, count in duplicates.items() if count > 1)
+    superseded = superseded_task_ids or set()
+    duplicate_ids = sorted(
+        task_id for task_id, count in duplicates.items() if count > 1 and task_id not in superseded
+    )
+    superseded_ids = sorted(task_id for task_id, count in duplicates.items() if count > 1 and task_id in superseded)
     return {
         "expected": expected_count,
         "completed_unique": len(completed_ids),
@@ -66,6 +71,7 @@ def summarize(
         "strict_sr": success / expected_count if expected_count else 0.0,
         "invalid_or_infrastructure": invalid,
         "duplicate_task_ids": duplicate_ids,
+        "superseded_task_ids": superseded_ids,
         "failure_kinds": dict(sorted(failures.items())),
         "comparable": (
             len(completed_ids) == expected_count
@@ -129,12 +135,24 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--missing-output", type=Path)
+    parser.add_argument(
+        "--superseded-ids-jsonl",
+        type=Path,
+        help="Task IDs intentionally rerun; the last loaded result wins without counting as an accidental duplicate.",
+    )
     args = parser.parse_args()
     dataset_rows: list[dict[str, Any]] | None = None
     expected_task_ids: set[str] | None = None
     if args.dataset:
         dataset_rows, expected_task_ids = load_dataset(args.dataset)
-    report = summarize(load_rows(args.rollouts), expected_task_ids=expected_task_ids)
+    superseded_task_ids: set[str] | None = None
+    if args.superseded_ids_jsonl:
+        _, superseded_task_ids = load_dataset(args.superseded_ids_jsonl)
+    report = summarize(
+        load_rows(args.rollouts),
+        expected_task_ids=expected_task_ids,
+        superseded_task_ids=superseded_task_ids,
+    )
     if args.missing_output:
         if dataset_rows is None:
             parser.error("--missing-output requires --dataset")
