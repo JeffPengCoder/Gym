@@ -8,6 +8,7 @@ shared by dataset preparation, the Responses agent and native web runtimes.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
@@ -220,3 +221,53 @@ def native_webvoyager_tools() -> list[dict[str, Any]]:
     """Return a mutation-safe copy for one Responses request."""
 
     return deepcopy(NATIVE_WEBVOYAGER_TOOLS)
+
+
+def adapt_native_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the native WebVoyager wire row without importing Gym runtime deps.
+
+    Batch preparation runs before the Gym virtual environments exist.  Keep
+    this adapter next to the prompt/tool contract so a stdlib-only controller
+    can produce the exact same row consumed by the full runtime.
+    """
+
+    task_id = record.get("id")
+    if task_id is None:
+        raise ValueError("native WebVoyager record requires id")
+    start_url = record.get("web") or record.get("start_url")
+    if isinstance(start_url, str):
+        start_urls = [part.strip() for part in start_url.split(" |AND| ") if part.strip()]
+    elif isinstance(start_url, list):
+        start_urls = [str(part) for part in start_url if part]
+    elif start_url:
+        start_urls = [str(start_url)]
+    else:
+        start_urls = []
+    site = record.get("web_name")
+    web_task = {
+        "benchmark": "webvoyager",
+        "task_id": str(task_id),
+        "intent": str(record.get("ques") or record.get("intent") or ""),
+        "start_urls": start_urls,
+        "sites": [str(site)] if site else [],
+        "input_images": [],
+        "runtime_profile": "native_visual",
+        "observation_profile": "screenshot",
+        "action_profile": "native_toolcall",
+        "verifier_profile": "native_webvoyager_gemini",
+        "auth_profile": None,
+        "seed": 0,
+        "task_kwargs": {},
+        "original_metadata": dict(record),
+    }
+    return {
+        "responses_create_params": {
+            "input": [],
+            "metadata": {"benchmark": "webvoyager", "task_id": str(task_id)},
+            "instructions": NATIVE_WEBVOYAGER_SYSTEM_PROMPT,
+            "tools": native_webvoyager_tools(),
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+        },
+        "web_task": web_task,
+    }
