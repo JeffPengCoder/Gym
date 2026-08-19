@@ -30,11 +30,12 @@ def test_public_nano_omni_profile_pins_web_alignment_runtime() -> None:
     assert config["extra_body"] == {
         "temperature": 0.1,
         "top_p": 0.95,
-        "max_output_tokens": 4096,
+        "max_output_tokens": 16384,
+        "chat_template_kwargs": {"truncate_history_thinking": False},
     }
     assert serve["tensor_parallel_size"] == 8
     assert serve["data_parallel_size"] == 1
-    assert serve["max_model_len"] == 64000
+    assert serve["max_model_len"] == 128000
     assert serve["max_num_seqs"] == 32
     assert serve["reasoning_parser"] == "nano_v3"
 
@@ -43,8 +44,9 @@ def test_native_compatibility_inputs_fail_closed_without_private_defaults() -> N
     text = CONFIG.read_text(encoding="utf-8")
     serve = _config()["vllm_serve_kwargs"]
 
+    assert serve["tokenizer"] == "???"
     assert serve["chat_template"] == "???"
-    assert serve["tool_call_parser"] == "???"
+    assert serve["tool_call_parser"] == "qwen3_coder"
     assert serve["reasoning_parser_plugin"] == "???"
     assert "/lustre/" not in text
     assert "/home/" not in text

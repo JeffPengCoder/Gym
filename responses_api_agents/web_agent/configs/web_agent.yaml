@@ -14,6 +14,8 @@ web_agent:
       webvoyager_judge_server: null
       max_steps: 15
       max_parse_retries: 2
+      model_turn_max_retries: 0
+      model_retry_delay_secs: 1.0
       max_image_history: 3
       judge_max_screenshots: 3
       visual_observation_text: full_axtree

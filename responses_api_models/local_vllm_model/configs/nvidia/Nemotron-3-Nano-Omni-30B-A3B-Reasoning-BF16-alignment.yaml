@@ -17,7 +17,12 @@ Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment:
       extra_body:
         temperature: 0.1
         top_p: 0.95
-        max_output_tokens: 4096
+        # The pinned native client omits max_tokens and therefore inherits the
+        # checkpoint's 16K generation limit. Pin the equivalent Responses
+        # value so a different server generation_config cannot lower it.
+        max_output_tokens: 16384
+        chat_template_kwargs:
+          truncate_history_thinking: false
 
       hf_home: null
       vllm_serve_env_vars:
@@ -28,7 +33,7 @@ Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment:
         data_parallel_size: 1
         tensor_parallel_size: 8
         pipeline_parallel_size: 1
-        max_model_len: 64000
+        max_model_len: 128000
         max_num_seqs: 32
         gpu_memory_utilization: 0.9
         enable_auto_tool_choice: true
@@ -36,8 +41,11 @@ Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment:
 
         # Required alignment inputs. Supply reviewed, readable paths in the
         # run config; never commit cluster/user-specific values here.
+        tokenizer: ???
         chat_template: ???
-        tool_call_parser: ???
+        # The pinned native launchers use vLLM's built-in Qwen3 parser for
+        # Nano Omni structured browser calls.
+        tool_call_parser: qwen3_coder
         reasoning_parser_plugin: ???
         reasoning_parser: nano_v3
 

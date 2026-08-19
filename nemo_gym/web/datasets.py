@@ -14,7 +14,9 @@ from nemo_gym.web.models import (
     WebBenchmark,
     WebObservationProfile,
     WebTask,
+    WebRuntimeProfile,
 )
+from nemo_gym.web.native_webvoyager import NATIVE_WEBVOYAGER_SYSTEM_PROMPT, native_webvoyager_tools
 
 
 def _start_urls(value: Any) -> list[str]:
@@ -110,6 +112,36 @@ def adapt_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
         original_metadata=dict(record),
     )
     return gym_row(task)
+
+
+def adapt_native_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt the maintained 552-task population to the native Nano Omni route."""
+
+    task = WebTask(
+        benchmark=WebBenchmark.WEBVOYAGER,
+        task_id=record.get("id"),
+        intent=str(record.get("ques") or record.get("intent") or ""),
+        start_urls=_start_urls(record.get("web") or record.get("start_url")),
+        sites=[str(record.get("web_name"))] if record.get("web_name") else [],
+        runtime_profile=WebRuntimeProfile.NATIVE_VISUAL,
+        observation_profile=WebObservationProfile.SCREENSHOT,
+        action_profile=WebActionProfile.NATIVE_TOOLCALL,
+        verifier_profile="native_webvoyager_gemini",
+        original_metadata=dict(record),
+    )
+    row = gym_row(task)
+    row["responses_create_params"].update(
+        {
+            # The native prompt carries the instruction in each browser turn;
+            # do not prepend Gym's generic duplicate user message.
+            "input": [],
+            "instructions": NATIVE_WEBVOYAGER_SYSTEM_PROMPT,
+            "tools": native_webvoyager_tools(),
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+        }
+    )
+    return row
 
 
 def load_json_records(path: str | Path) -> list[dict[str, Any]]:

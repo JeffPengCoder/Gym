@@ -100,11 +100,28 @@ class BrowserGymSessionManager:
 
     async def seed_session(self, session_id: str, body: WebSeedSessionRequest) -> WebSeedSessionResponse:
         self._validate_task(body.task)
+        started = time.monotonic()
+        LOG.info(
+            "event=web_session_seed_start session=%s benchmark=%s task=%s active=%d creating=%d capacity=%d",
+            session_id,
+            body.task.benchmark.value,
+            body.task.task_id,
+            len(self._sessions),
+            len(self._creating),
+            self.config.max_sessions,
+        )
         async with self._lock:
             existing = self._sessions.get(session_id)
             if existing is not None:
                 self._require_same_task(existing.task, body.task, session_id)
                 existing.last_access_at = time.time()
+                LOG.info(
+                    "event=web_session_seed_cached session=%s benchmark=%s task=%s status=%s",
+                    session_id,
+                    body.task.benchmark.value,
+                    body.task.task_id,
+                    existing.status,
+                )
                 return self._seed_response(existing)
             if session_id in self._creating:
                 raise SessionConflictError(f"session {session_id!r} is already being created")
@@ -135,12 +152,14 @@ class BrowserGymSessionManager:
                 self._creating.discard(session_id)
                 self._sessions[session_id] = state
             LOG.info(
-                "Seeded BrowserGym session=%s benchmark=%s task=%s lease=%s isolated=%s",
+                "event=web_session_seed_complete session=%s benchmark=%s task=%s lease=%s isolated=%s "
+                "elapsed_seconds=%.3f",
                 session_id,
                 body.task.benchmark.value,
                 body.task.task_id,
                 lease.lease_id,
                 lease.isolated,
+                time.monotonic() - started,
             )
             return self._seed_response(state)
         # Client-side seed timeouts cancel this coroutine.  CancelledError is a
@@ -149,6 +168,13 @@ class BrowserGymSessionManager:
         # site lease).  That permanently consumes admission capacity and turns
         # every later rollout into a fast 503 until the server is restarted.
         except BaseException:
+            LOG.exception(
+                "event=web_session_seed_failed session=%s benchmark=%s task=%s elapsed_seconds=%.3f",
+                session_id,
+                body.task.benchmark.value,
+                body.task.task_id,
+                time.monotonic() - started,
+            )
             if backend is not None:
                 try:
                     await self._run_backend(backend.close)
@@ -166,6 +192,13 @@ class BrowserGymSessionManager:
         self._require_same_task(state.task, body.task, session_id)
         async with state.lock:
             state.status = "resetting"
+            started = time.monotonic()
+            LOG.info(
+                "event=web_session_reset_start session=%s benchmark=%s task=%s",
+                session_id,
+                body.task.benchmark.value,
+                body.task.task_id,
+            )
             try:
                 observation, seed_info = await self._reset_backend(state.backend, body.task)
                 state.task = body.task
@@ -175,9 +208,23 @@ class BrowserGymSessionManager:
                 state.verifier_result = None
                 state.status = "ready"
                 state.last_access_at = time.time()
+                LOG.info(
+                    "event=web_session_reset_complete session=%s benchmark=%s task=%s elapsed_seconds=%.3f",
+                    session_id,
+                    body.task.benchmark.value,
+                    body.task.task_id,
+                    time.monotonic() - started,
+                )
                 return self._seed_response(state)
             except Exception:
                 state.status = "error"
+                LOG.exception(
+                    "event=web_session_reset_failed session=%s benchmark=%s task=%s elapsed_seconds=%.3f",
+                    session_id,
+                    body.task.benchmark.value,
+                    body.task.task_id,
+                    time.monotonic() - started,
+                )
                 raise
 
     async def observe(self, session_id: str) -> WebObservation:
@@ -195,10 +242,26 @@ class BrowserGymSessionManager:
             if cached is not None:
                 state.operations.move_to_end(body.operation_id)
                 state.last_access_at = time.time()
+                LOG.info(
+                    "event=web_session_step_cached session=%s task=%s operation=%s",
+                    session_id,
+                    state.task.task_id,
+                    body.operation_id,
+                )
                 return cached
             if state.verifier_result is not None:
                 raise SessionConflictError(f"session {session_id!r} has already been evaluated")
             state.status = "stepping"
+            started = time.monotonic()
+            LOG.info(
+                "event=web_session_step_start session=%s benchmark=%s task=%s operation=%s action=%s terminal=%s",
+                session_id,
+                state.task.benchmark.value,
+                state.task.task_id,
+                body.operation_id,
+                body.action.name,
+                body.action.terminal,
+            )
             try:
                 result = await self._run_backend(state.backend.step, body.action)
                 response = WebStepResponse(operation_id=body.operation_id, **result.model_dump())
@@ -208,9 +271,27 @@ class BrowserGymSessionManager:
                     state.operations.popitem(last=False)
                 state.status = "finished" if result.terminated or result.truncated else "ready"
                 state.last_access_at = time.time()
+                LOG.info(
+                    "event=web_session_step_complete session=%s task=%s operation=%s execution_ok=%s "
+                    "terminated=%s truncated=%s elapsed_seconds=%.3f",
+                    session_id,
+                    state.task.task_id,
+                    body.operation_id,
+                    result.execution_ok,
+                    result.terminated,
+                    result.truncated,
+                    time.monotonic() - started,
+                )
                 return response
             except Exception:
                 state.status = "error"
+                LOG.exception(
+                    "event=web_session_step_failed session=%s task=%s operation=%s elapsed_seconds=%.3f",
+                    session_id,
+                    state.task.task_id,
+                    body.operation_id,
+                    time.monotonic() - started,
+                )
                 raise
 
     async def evaluate(self, session_id: str, final_answer: str | None = None) -> WebEvaluateResponse:
@@ -220,14 +301,38 @@ class BrowserGymSessionManager:
                 state.last_access_at = time.time()
                 return WebEvaluateResponse(result=state.verifier_result)
             state.status = "evaluating"
+            started = time.monotonic()
+            LOG.info(
+                "event=web_session_evaluate_start session=%s benchmark=%s task=%s final_answer_present=%s",
+                session_id,
+                state.task.benchmark.value,
+                state.task.task_id,
+                bool(final_answer),
+            )
             try:
                 result = await self._run_backend(state.backend.evaluate, final_answer)
                 state.verifier_result = result
                 state.status = "evaluated"
                 state.last_access_at = time.time()
+                LOG.info(
+                    "event=web_session_evaluate_complete session=%s task=%s valid_sample=%s reward=%s "
+                    "failure_kind=%s elapsed_seconds=%.3f",
+                    session_id,
+                    state.task.task_id,
+                    result.valid_sample,
+                    result.reward,
+                    result.failure_kind or "none",
+                    time.monotonic() - started,
+                )
                 return WebEvaluateResponse(result=result)
             except Exception:
                 state.status = "error"
+                LOG.exception(
+                    "event=web_session_evaluate_failed session=%s task=%s elapsed_seconds=%.3f",
+                    session_id,
+                    state.task.task_id,
+                    time.monotonic() - started,
+                )
                 raise
 
     async def close_session(self, session_id: str) -> bool:
@@ -247,7 +352,14 @@ class BrowserGymSessionManager:
             LOG.exception("BrowserGym backend close failed for session=%s", session_id)
         finally:
             await self._site_pool.release(state.site_lease, healthy=healthy)
-        LOG.info("Closed BrowserGym session=%s lease=%s", session_id, state.site_lease.lease_id)
+        LOG.info(
+            "event=web_session_close session=%s benchmark=%s task=%s lease=%s healthy=%s",
+            session_id,
+            state.task.benchmark.value,
+            state.task.task_id,
+            state.site_lease.lease_id,
+            healthy,
+        )
         return True
 
     async def recording_artifacts(self, session_id: str) -> list[WebArtifactRef]:

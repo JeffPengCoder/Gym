@@ -87,6 +87,8 @@ def _goal_images(goal: list[dict[str, Any]]) -> list[str]:
 
 
 def action_guidance(task: WebTask, action_prompt_profile: str = "standard") -> str:
+    if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
+        return ""
     if task.action_profile == WebActionProfile.WEBVOYAGER_LEGACY:
         return WEBVOYAGER_ACTION_GUIDANCE
     if action_prompt_profile == "standard":
@@ -138,12 +140,30 @@ def render_observation(
     profile = task.observation_profile
     if profile is None:
         profile = WebObservationProfile.A11Y if task.benchmark.value == "webarena" else WebObservationProfile.SOM
-    text_parts = [
-        f"Task: {_goal_text(observation.goal, task.intent)}",
-        f"Step: {step_index}",
-        f"Current URL: {observation.url}",
-    ]
-    if observation.tabs:
+    if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
+        text_parts = []
+        if step_index == 0:
+            text_parts.append(f"# Task Instruction:\n\n{_goal_text(observation.goal, task.intent)}")
+        text_parts.append(f"You are currently on Step {step_index + 1}.")
+        tab_lines = [
+            "Tab Context:",
+            f"- current_tab_id: {observation.active_tab_index}",
+            f"- tab_count: {len(observation.tabs)}",
+            "- available_tabs:",
+        ]
+        tab_lines.extend(
+            f"  - tab_id: {tab.index}, title: {tab.title}, url: {tab.url}" for tab in observation.tabs
+        )
+        if not observation.tabs:
+            tab_lines.append("  - (none)")
+        text_parts.append("\n".join(tab_lines))
+    else:
+        text_parts = [
+            f"Task: {_goal_text(observation.goal, task.intent)}",
+            f"Step: {step_index}",
+            f"Current URL: {observation.url}",
+        ]
+    if observation.tabs and task.action_profile != WebActionProfile.NATIVE_TOOLCALL:
         text_parts.append(
             "Tabs:\n"
             + "\n".join(
@@ -162,13 +182,27 @@ def render_observation(
         compact_text = compact_som_text(observation.axtree_text)
         if compact_text:
             text_parts.append(f"Labelled interactive elements (ids match the screenshot):\n{compact_text}")
-    text_parts.append(action_guidance(task, action_prompt_profile))
+    guidance = action_guidance(task, action_prompt_profile)
+    if guidance:
+        text_parts.append(guidance)
 
-    content: list[dict[str, Any]] = [{"type": "input_text", "text": "\n\n".join(text_parts)}]
+    content: list[dict[str, Any]] = []
+    # The native recipe places the current browser screenshot before text and
+    # task-reference images. BrowserGym profiles retain their historical order.
+    if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
+        screenshot = observation.screenshot
+        if screenshot is not None and screenshot.data_url:
+            content.append({"type": "input_image", "image_url": screenshot.data_url, "detail": "high"})
+        content.append({"type": "input_text", "text": "\n\n".join(text_parts)})
+    else:
+        content.append({"type": "input_text", "text": "\n\n".join(text_parts)})
     if step_index == 0:
         for image_url in [*_goal_images(observation.goal), *task.input_images]:
             content.append({"type": "input_image", "image_url": image_url, "detail": "high"})
-    if profile in {WebObservationProfile.SCREENSHOT, WebObservationProfile.SOM}:
+    if (
+        task.action_profile != WebActionProfile.NATIVE_TOOLCALL
+        and profile in {WebObservationProfile.SCREENSHOT, WebObservationProfile.SOM}
+    ):
         screenshot = observation.screenshot
         if screenshot is not None and screenshot.data_url:
             content.append(
@@ -186,7 +220,9 @@ def parse_error_message(
     action_prompt_profile: str = "standard",
     action_profile: WebActionProfile | str | None = None,
 ) -> NeMoGymEasyInputMessage:
-    if action_profile is not None and WebActionProfile(action_profile) == WebActionProfile.WEBVOYAGER_LEGACY:
+    if action_profile is not None and WebActionProfile(action_profile) == WebActionProfile.NATIVE_TOOLCALL:
+        content = f"Tool-call parse error: {error}. Return corrected structured browser tool calls only."
+    elif action_profile is not None and WebActionProfile(action_profile) == WebActionProfile.WEBVOYAGER_LEGACY:
         content = (
             f"Action parse error: {error}. Return one corrected response and stop after its Action line.\n"
             f"{WEBVOYAGER_ACTION_GUIDANCE}"

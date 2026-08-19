@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -283,7 +284,7 @@ async def test_action_parse_failure_is_retried_without_stepping_browser():
 
 
 @pytest.mark.asyncio
-async def test_webvoyager_routes_final_evidence_to_external_judge():
+async def test_webvoyager_routes_final_evidence_to_external_judge(caplog):
     agent = _agent(judge=True)
     calls = _wire(
         agent,
@@ -331,7 +332,8 @@ async def test_webvoyager_routes_final_evidence_to_external_judge():
         ),
     )
 
-    result = await agent.run(request, body)
+    with caplog.at_level(logging.INFO, logger="nemo_gym.responses_api_agents.web_agent"):
+        result = await agent.run(request, body)
 
     assert result.reward == 1.0
     judge_call = next(call for call in calls if call[1] == "/verify_webvoyager")
@@ -340,6 +342,19 @@ async def test_webvoyager_routes_final_evidence_to_external_judge():
     assert len(judge_call[2]["screenshots"]) == 2
     paths = [path for _server, path, _body in calls]
     assert paths.index("/evaluate") < paths.index("/close") < paths.index("/verify_webvoyager")
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    for event in (
+        "event=web_rollout_start",
+        "event=web_seed_complete",
+        "event=web_model_turn_complete",
+        "event=web_action_parsed",
+        "event=web_environment_step_complete",
+        "event=web_session_close_complete",
+        "event=web_judge_complete",
+        "event=web_rollout_complete",
+    ):
+        assert event in messages
+    assert "data:image/png;base64,abc" not in messages
 
 
 @pytest.mark.asyncio
