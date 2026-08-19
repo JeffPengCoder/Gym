@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from pathlib import Path
+
+import yaml
 
 from benchmarks.webvoyager.summarize_native_v3 import (
     load_dataset,
@@ -9,6 +12,22 @@ from benchmarks.webvoyager.summarize_native_v3 import (
     summarize,
     write_missing_rows,
 )
+
+
+def test_native_v3_policy_preserves_history_thinking() -> None:
+    config_path = Path(__file__).parents[1] / "configs" / "native_v3_policy.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    kwargs = config["policy_model"]["responses_api_models"]["vllm_model"]["chat_template_kwargs"]
+    assert kwargs == {"truncate_history_thinking": False}
+
+    recipe_lock_path = Path(__file__).parents[1] / "native_v3_recipe_lock.json"
+    recipe_lock = json.loads(recipe_lock_path.read_text(encoding="utf-8"))
+    assert recipe_lock["policy_transport_endpoint"] == "/v1/chat/completions"
+    assert recipe_lock["policy_chat_template_kwargs"] == kwargs
+    assert recipe_lock["policy_chat_template_sha256"] == (
+        "41428e0c65e312c359df2495ef5284769a9520b15a693deda4c34a1538208faa"
+    )
 
 
 def test_native_summary_keeps_fixed_denominator_and_exposes_masked_failures() -> None:

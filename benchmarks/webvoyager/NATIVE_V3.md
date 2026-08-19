@@ -9,7 +9,9 @@ continues to provide the public Selenium/BrowserGym-compatible baseline.
 ```text
 552-task pinned dataset
   -> WebAgent native profile
-     -> public Nano Omni v3 Responses endpoint (TP8)
+     -> Gym Responses boundary
+        -> vLLM model proxy
+           -> public Nano Omni v3 /v1/chat/completions endpoint (TP8)
      -> native_web resource server
         -> one Xvfb display
         -> headed Chromium managed by Playwright
@@ -32,7 +34,12 @@ does not own model prompting or scoring.
   revision `24e67ea000b7c2837fc8f9488aa2008524fac8ba`.
 - Generation: temperature 0.1, top-p 0.95, 100 browser steps, three recent
   browser screenshots, structured native browser tools.
-- Serving: TP8, 128K context, keep-history chat-template behavior.
+- Serving: TP8, 128K context, an independently staged multimodal public-v3
+  template, and
+  `chat_template_kwargs={"truncate_history_thinking": false}` on every vLLM
+  chat-completions request. Layer
+  `benchmarks/webvoyager/configs/native_v3_policy.yaml` after the generic
+  `vllm_model` config.
 - Judge: `gcp/google/gemini-3-flash-preview`, all trajectory screenshots,
   JSON `SUCCESS`/`FAILURE` verdict.
 
@@ -40,7 +47,10 @@ does not own model prompting or scoring.
 
 1. Set `WEBVOYAGER_SOURCE_JSONL` and run the native prepare script.
 2. Provide reviewed paths for the tokenizer, chat template and reasoning
-   parser plugin in the public v3 model config. The tokenizer is not optional:
+   parser plugin in the public v3 model config. Stage the public-v3 multimodal
+   template as a separate immutable runtime asset and pass that explicit path
+   to vLLM; do not rely on an implicit model-directory fallback. The tokenizer
+   is not optional:
    serving directly from the public checkpoint currently emits the Mistral
    regex warning and is not equivalent to the launcher's explicit Nano
    tokenizer input.
@@ -52,6 +62,13 @@ does not own model prompting or scoring.
    `WA_CAPTCHA_SOLVER=module.path:factory` override is supplied.
 6. Configure the judge endpoint/key through the standard Gym secret/config
    channel.
+
+The agent-facing route remains Gym's Responses API so the common rollout
+contract is unchanged. The `vllm_model` proxy converts the request to OpenAI
+Chat Completions and sends it to the policy endpoint. The captured outbound
+payload—not the agent-facing URL—is the parity boundary: it must contain
+`messages`, the five native WebVoyager tools and
+`chat_template_kwargs.truncate_history_thinking=false`.
 
 ## Debug logging contract
 
