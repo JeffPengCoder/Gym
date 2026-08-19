@@ -128,6 +128,7 @@ def test_capsolver_no_challenge_emits_debug_scan(caplog) -> None:
 def test_capsolver_environment_selection_logs_presence_not_value(monkeypatch, caplog) -> None:
     monkeypatch.setenv("CAPSOLVER_API_KEY", "CAP-private-key")
     monkeypatch.setenv("WA_CAPTCHA_PROVIDER", "capsolver")
+    monkeypatch.setenv("WA_CAPTCHA_PROXY_SERVER", "http://proxy-user:proxy-password@proxy.example:19407")
 
     with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.native_web.captcha"):
         solver = captcha.captcha_solver_from_environment()
@@ -136,7 +137,9 @@ def test_capsolver_environment_selection_logs_presence_not_value(monkeypatch, ca
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "provider=capsolver" in messages
     assert "key_present=true" in messages
+    assert "solver_proxy_present=True" in messages
     assert "CAP-private-key" not in messages
+    assert "proxy-password" not in messages
 
 
 def test_capsolver_task_uses_the_browser_proxy_without_logging_credentials() -> None:
@@ -151,7 +154,7 @@ def test_capsolver_task_uses_the_browser_proxy_without_logging_credentials() -> 
         },
     )
 
-    task = captcha.CapSolverBrowserSolver._build_task(page, "turnstile", "public-site-key")
+    task = captcha.CapSolverBrowserSolver("CAP-private-key")._build_task(page, "turnstile", "public-site-key")
 
     assert task == {
         "type": "AntiTurnstileTask",
@@ -163,6 +166,39 @@ def test_capsolver_task_uses_the_browser_proxy_without_logging_credentials() -> 
         "proxyLogin": "proxy-user",
         "proxyPassword": "proxy-password",
     }
+
+
+def test_capsolver_explicit_public_proxy_overrides_browser_loopback_proxy() -> None:
+    page = _Page()
+    setattr(
+        page.context,
+        captcha.BROWSER_PROXY_CONFIG_ATTR,
+        {"server": "http://127.0.0.1:19407"},
+    )
+
+    solver = captcha.CapSolverBrowserSolver(
+        "CAP-private-key",
+        proxy_server="http://proxy-user:proxy-password@proxy.example:29407",
+    )
+    task = solver._build_task(page, "recaptcha", "public-site-key")
+
+    assert task["type"] == "ReCaptchaV2Task"
+    assert task["proxyAddress"] == "proxy.example"
+    assert task["proxyPort"] == 29407
+    assert task["proxyLogin"] == "proxy-user"
+    assert task["proxyPassword"] == "proxy-password"
+
+
+def test_capsolver_rejects_browser_loopback_proxy_without_public_override() -> None:
+    page = _Page()
+    setattr(
+        page.context,
+        captcha.BROWSER_PROXY_CONFIG_ATTR,
+        {"server": "http://127.0.0.1:19407"},
+    )
+
+    with pytest.raises(RuntimeError, match="WA_CAPTCHA_PROXY_SERVER"):
+        captcha.CapSolverBrowserSolver("CAP-private-key")._build_task(page, "recaptcha", "public-site-key")
 
 
 class _ChallengeBody:

@@ -60,6 +60,10 @@ does not own model prompting or scoring.
 5. Provide `CAPSOLVER_API_KEY` and set `WA_CAPTCHA_PROVIDER=capsolver`. The
    built-in Turnstile/reCAPTCHA v2 integration is used unless an approved
    `WA_CAPTCHA_SOLVER=module.path:factory` override is supplied.
+   If the browser reaches Squid through a node-local SSH tunnel, also set
+   `WA_CAPTCHA_PROXY_SERVER` to the public endpoint for that same Squid
+   instance. CapSolver runs outside the worker namespace and cannot use a
+   browser proxy such as `127.0.0.1:19407`.
 6. Configure the judge endpoint/key through the standard Gym secret/config
    channel.
 

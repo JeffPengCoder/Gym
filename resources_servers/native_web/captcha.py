@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import ipaddress
 import logging
 import os
 import time
 from typing import Any, Protocol
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
@@ -159,9 +160,10 @@ class CapSolverBrowserSolver:
     CREATE_URL = "https://api.capsolver.com/createTask"
     RESULT_URL = "https://api.capsolver.com/getTaskResult"
 
-    def __init__(self, api_key: str, *, timeout: float = 45.0) -> None:
+    def __init__(self, api_key: str, *, timeout: float = 45.0, proxy_server: str = "") -> None:
         self._api_key = api_key
         self._timeout = timeout
+        self._solver_proxy_config = self._parse_proxy_server(proxy_server) if proxy_server else None
         self._completed_challenges: set[tuple[str, str, str]] = set()
 
     def maybe_solve(self, page: Any, *, phase: str) -> bool:
@@ -360,13 +362,45 @@ class CapSolverBrowserSolver:
         return cls._challenge_signal(page) is not None
 
     @staticmethod
-    def _proxy_fields(page: Any) -> dict[str, Any]:
+    def _parse_proxy_server(proxy_server: str) -> dict[str, str]:
+        parsed = urlparse(proxy_server if "://" in proxy_server else f"http://{proxy_server}")
         try:
-            config = getattr(page.context, BROWSER_PROXY_CONFIG_ATTR, None)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("WA_CAPTCHA_PROXY_SERVER has an invalid port") from exc
+        if parsed.scheme.lower() not in {"http", "https", "socks5"} or not parsed.hostname or not port:
+            raise ValueError("WA_CAPTCHA_PROXY_SERVER is not a valid proxy URL")
+        config = {"server": f"{parsed.scheme.lower()}://{parsed.hostname}:{port}"}
+        if parsed.username:
+            config["username"] = unquote(parsed.username)
+        if parsed.password:
+            config["password"] = unquote(parsed.password)
+        return config
+
+    @staticmethod
+    def _is_loopback_proxy(config: dict[str, str]) -> bool:
+        parsed = urlparse(config.get("server", ""))
+        if parsed.hostname == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(parsed.hostname or "").is_loopback
+        except ValueError:
+            return False
+
+    def _proxy_fields(self, page: Any) -> dict[str, Any]:
+        config = self._solver_proxy_config
+        try:
+            if config is None:
+                config = getattr(page.context, BROWSER_PROXY_CONFIG_ATTR, None)
         except Exception:
             config = None
         if not config:
             return {}
+        if self._is_loopback_proxy(config):
+            raise RuntimeError(
+                "CapSolver cannot reach the browser's loopback proxy; set "
+                "WA_CAPTCHA_PROXY_SERVER to the public endpoint for the same proxy"
+            )
         parsed = urlparse(str(config.get("server", "")))
         try:
             port = parsed.port
@@ -385,9 +419,8 @@ class CapSolverBrowserSolver:
             fields["proxyPassword"] = config["password"]
         return fields
 
-    @classmethod
-    def _build_task(cls, page: Any, kind: str, site_key: str) -> dict[str, Any]:
-        proxy_fields = cls._proxy_fields(page)
+    def _build_task(self, page: Any, kind: str, site_key: str) -> dict[str, Any]:
+        proxy_fields = self._proxy_fields(page)
         if kind == "turnstile":
             task_type = "AntiTurnstileTask" if proxy_fields else "AntiTurnstileTaskProxyLess"
         else:
@@ -468,10 +501,13 @@ def captcha_solver_from_environment() -> CaptchaSolver:
     api_key = os.environ.get("CAPSOLVER_API_KEY", "").strip()
     if api_key and os.environ.get("WA_CAPTCHA_PROVIDER", "capsolver").lower() == "capsolver":
         timeout = float(os.environ.get("WA_CAPTCHA_TIMEOUT", "45"))
+        proxy_server = os.environ.get("WA_CAPTCHA_PROXY_SERVER", "").strip()
         LOG.info(
-            "event=captcha_solver_configured provider=capsolver key_present=true timeout_seconds=%.1f",
+            "event=captcha_solver_configured provider=capsolver key_present=true "
+            "timeout_seconds=%.1f solver_proxy_present=%s",
             timeout,
+            bool(proxy_server),
         )
-        return CapSolverBrowserSolver(api_key, timeout=timeout)
+        return CapSolverBrowserSolver(api_key, timeout=timeout, proxy_server=proxy_server)
     LOG.info("event=captcha_solver_configured provider=none key_present=%s", bool(api_key))
     return NoopCaptchaSolver()
