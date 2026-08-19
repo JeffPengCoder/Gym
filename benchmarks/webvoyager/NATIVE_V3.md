@@ -97,6 +97,31 @@ For the reference topology, run two dataset splits concurrently. Each split
 uses one TP8 policy replica and 16 one-session browser resource replicas. A
 cleanup/resume pass dispatches only tasks without a terminal result.
 
+Each browser replica must have an independent X display, HOME, temporary
+directory, artifact directory and rollout output. Do not set
+`gym eval --concurrency=16` against a single native resource server: native
+coordinate actions are display-global and that server intentionally permits
+only one session. Start 16 isolated, single-concurrency Gym processes per
+split instead. The policy endpoints and read-only component environments may
+be shared within a split after one serialized prefetch has completed.
+
+Merge worker outputs by task ID and generate the cleanup input from the exact
+pinned dataset, rather than from worker exit codes. The summarizer accepts
+multiple files or run directories and writes the missing-task JSONL
+atomically:
+
+```bash
+python benchmarks/webvoyager/summarize_native_v3.py \
+  split-0/workers split-1/workers \
+  --dataset webvoyager.jsonl \
+  --output aggregate/summary.json \
+  --missing-output cleanup/missing.jsonl
+```
+
+A result is comparable only when all expected task IDs are present exactly
+once, no unexpected task IDs are present, and no task is masked as an
+infrastructure/configuration failure.
+
 ## Validation order
 
 Run one task first, then one task from every retained domain, then a 32-task

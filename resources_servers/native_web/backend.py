@@ -22,7 +22,11 @@ from nemo_gym.web.models import (
     WebTask,
     WebVerifierResult,
 )
-from resources_servers.native_web.captcha import captcha_solver_from_environment
+from resources_servers.native_web.captcha import (
+    BROWSER_PROXY_CONFIG_ATTR,
+    CAPTCHA_INTERCEPT_SCRIPT,
+    captcha_solver_from_environment,
+)
 from resources_servers.native_web.config import NativeWebResourcesServerConfig
 
 
@@ -148,6 +152,16 @@ class NativeWebDriver:
         if proxy:
             context_kwargs["proxy"] = self._playwright_proxy(proxy)
         self._context = self._browser.new_context(**context_kwargs)
+        if proxy:
+            try:
+                setattr(self._context, BROWSER_PROXY_CONFIG_ATTR, dict(context_kwargs["proxy"]))
+            except Exception:
+                LOG.warning(
+                    "event=native_browser_proxy_metadata_failed session=%s task=%s",
+                    self.session_id,
+                    task.task_id,
+                )
+        self._context.add_init_script(CAPTCHA_INTERCEPT_SCRIPT)
         self._context.add_init_script(PRINT_INTERCEPT_SCRIPT)
         self._context.on("page", self._configure_page)
         self._page = self._context.new_page()

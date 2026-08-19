@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 from resources_servers.native_web import captcha
 
 
@@ -28,6 +30,7 @@ class _Page:
     def __init__(self, site_key: str | None = "public-site-key") -> None:
         self._site_key = site_key
         self.injected_token: str | None = None
+        self.context = type("Context", (), {})()
 
     def locator(self, selector: str) -> _Locator:
         if selector.startswith(".cf-turnstile"):
@@ -127,4 +130,62 @@ def test_capsolver_environment_selection_logs_presence_not_value(monkeypatch, ca
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "provider=capsolver" in messages
     assert "key_present=true" in messages
+    assert "CAP-private-key" not in messages
+
+
+def test_capsolver_task_uses_the_browser_proxy_without_logging_credentials() -> None:
+    page = _Page()
+    setattr(
+        page.context,
+        captcha.BROWSER_PROXY_CONFIG_ATTR,
+        {
+            "server": "http://proxy.example:19407",
+            "username": "proxy-user",
+            "password": "proxy-password",
+        },
+    )
+
+    task = captcha.CapSolverBrowserSolver._build_task(page, "turnstile", "public-site-key")
+
+    assert task == {
+        "type": "AntiTurnstileTask",
+        "websiteURL": page.url,
+        "websiteKey": "public-site-key",
+        "proxyType": "http",
+        "proxyAddress": "proxy.example",
+        "proxyPort": 19407,
+        "proxyLogin": "proxy-user",
+        "proxyPassword": "proxy-password",
+    }
+
+
+class _ChallengeBody:
+    def inner_text(self, *, timeout: int) -> str:
+        assert timeout == 1_000
+        return "Checking if the site connection is secure"
+
+
+class _ChallengePage(_Page):
+    def __init__(self) -> None:
+        super().__init__(site_key=None)
+
+    def title(self) -> str:
+        return "Just a moment..."
+
+    def locator(self, selector: str):
+        if selector == "body":
+            return _ChallengeBody()
+        return _Locator(None)
+
+
+def test_capsolver_fails_closed_for_blocking_challenge_without_site_key(caplog) -> None:
+    solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
+
+    with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.native_web.captcha"):
+        with pytest.raises(RuntimeError, match="no supported site key"):
+            solver.maybe_solve(_ChallengePage(), phase="initial")
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=captcha_unresolved" in messages
+    assert "reason=site_key_missing" in messages
     assert "CAP-private-key" not in messages

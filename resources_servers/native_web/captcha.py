@@ -24,6 +24,70 @@ import httpx
 LOG = logging.getLogger("nemo_gym.resources_servers.native_web.captcha")
 
 
+BROWSER_PROXY_CONFIG_ATTR = "_nemo_gym_browser_proxy_config"
+CHALLENGE_TITLE_MARKERS = (
+    "just a moment",
+    "attention required",
+    "checking your browser",
+    "verify you are human",
+    "human verification",
+    "security check",
+    "captcha",
+)
+CHALLENGE_TEXT_MARKERS = (
+    "verify you are human",
+    "performing security verification",
+    "checking if the site connection is secure",
+    "complete the security check",
+    "complete the captcha",
+    "please verify that you are not a robot",
+    "i am not a robot",
+    "protected by cloudflare",
+)
+CAPTCHA_FRAME_URL_MARKERS = (
+    "challenges.cloudflare.com",
+    "turnstile",
+    "google.com/recaptcha",
+    "recaptcha.net/recaptcha",
+)
+CAPTCHA_INTERCEPT_SCRIPT = """(() => {
+    if (window.__nemoGymTurnstileHookInstalled) return;
+    window.__nemoGymTurnstileHookInstalled = true;
+    window.__nemoGymTurnstileParams = null;
+    window.__nemoGymTurnstileCallback = null;
+    const capture = (params) => {
+        if (!params || !params.sitekey) return;
+        window.__nemoGymTurnstileParams = {
+            websiteKey: params.sitekey,
+            action: params.action || null,
+            cdata: params.cData || params.cdata || null,
+        };
+        if (typeof params.callback === 'function') {
+            window.__nemoGymTurnstileCallback = params.callback;
+        }
+    };
+    const wrap = (turnstile) => {
+        if (!turnstile || turnstile.__nemoGymWrapped || typeof turnstile.render !== 'function') {
+            return turnstile;
+        }
+        const render = turnstile.render.bind(turnstile);
+        turnstile.render = (container, params = {}) => {
+            capture(params);
+            return render(container, params);
+        };
+        turnstile.__nemoGymWrapped = true;
+        return turnstile;
+    };
+    let value = window.turnstile;
+    Object.defineProperty(window, 'turnstile', {
+        configurable: true,
+        get() { return value; },
+        set(next) { value = wrap(next); },
+    });
+    if (value) value = wrap(value);
+})();"""
+
+
 def _origin(url: str) -> str:
     """Return a log-safe origin without query parameters or credentials."""
 
@@ -95,12 +159,22 @@ class CapSolverBrowserSolver:
     def __init__(self, api_key: str, *, timeout: float = 45.0) -> None:
         self._api_key = api_key
         self._timeout = timeout
+        self._completed_challenges: set[tuple[str, str, str]] = set()
 
     def maybe_solve(self, page: Any, *, phase: str) -> bool:
         started = time.monotonic()
         origin = _origin(getattr(page, "url", ""))
+        blocking_challenge = self._is_challenge_page(page)
         challenge = self._challenge(page)
         if challenge is None:
+            if blocking_challenge:
+                LOG.error(
+                    "event=captcha_unresolved provider=capsolver phase=%s origin=%s "
+                    "reason=site_key_missing",
+                    phase,
+                    origin,
+                )
+                raise RuntimeError("CAPTCHA challenge detected but no supported site key was found")
             LOG.debug(
                 "event=captcha_scan provider=capsolver phase=%s origin=%s challenge=none",
                 phase,
@@ -108,7 +182,19 @@ class CapSolverBrowserSolver:
             )
             return False
         kind, site_key = challenge
-        task_type = "AntiTurnstileTaskProxyLess" if kind == "turnstile" else "ReCaptchaV2TaskProxyLess"
+        identity = (origin, kind, _fingerprint(site_key))
+        if identity in self._completed_challenges:
+            LOG.error(
+                "event=captcha_unresolved provider=capsolver phase=%s origin=%s challenge=%s "
+                "reason=repeated_after_solution site_key_sha256=%s",
+                phase,
+                origin,
+                kind,
+                identity[2],
+            )
+            raise RuntimeError("CAPTCHA challenge remained after an accepted solver response")
+        task = self._build_task(page, kind, site_key)
+        task_type = str(task["type"])
         LOG.info(
             "event=captcha_detected provider=capsolver phase=%s origin=%s challenge=%s "
             "site_key_sha256=%s task_type=%s",
@@ -124,7 +210,7 @@ class CapSolverBrowserSolver:
                     self.CREATE_URL,
                     json={
                         "clientKey": self._api_key,
-                        "task": {"type": task_type, "websiteURL": page.url, "websiteKey": site_key},
+                        "task": task,
                     },
                 )
                 response.raise_for_status()
@@ -170,6 +256,9 @@ class CapSolverBrowserSolver:
                     if not token:
                         raise RuntimeError("CapSolver returned no browser token")
                     injection = self._inject(page, kind, str(token))
+                    self._completed_challenges.add(identity)
+                    if blocking_challenge and not self._wait_for_challenge_clear(page):
+                        raise RuntimeError("CAPTCHA solution was injected but the challenge page did not clear")
                     LOG.info(
                         "event=captcha_solved provider=capsolver phase=%s origin=%s challenge=%s "
                         "provider_task_sha256=%s polls=%d fields=%d callbacks=%d elapsed_seconds=%.3f",
@@ -221,7 +310,90 @@ class CapSolverBrowserSolver:
                 continue
             kind = "turnstile" if "cloudflare" in parsed.netloc or "turnstile" in frame.url else "recaptcha"
             candidates.append((kind, value))
+        try:
+            captured = page.evaluate(
+                """() => {
+                    const params = window.__nemoGymTurnstileParams;
+                    return params && params.websiteKey ? params.websiteKey : null;
+                }"""
+            )
+            if captured:
+                candidates.insert(0, ("turnstile", str(captured)))
+        except Exception:
+            pass
         return candidates[0] if candidates else None
+
+    @staticmethod
+    def _is_challenge_page(page: Any) -> bool:
+        try:
+            title = str(page.title() or "").lower()
+            if any(marker in title for marker in CHALLENGE_TITLE_MARKERS):
+                return True
+        except Exception:
+            pass
+        try:
+            body = str(page.locator("body").inner_text(timeout=1_000) or "").lower()
+            if any(marker in body for marker in CHALLENGE_TEXT_MARKERS):
+                return True
+        except Exception:
+            pass
+        for frame in getattr(page, "frames", []):
+            frame_url = str(getattr(frame, "url", "")).lower()
+            if any(marker in frame_url for marker in CAPTCHA_FRAME_URL_MARKERS):
+                return True
+        return False
+
+    @staticmethod
+    def _proxy_fields(page: Any) -> dict[str, Any]:
+        try:
+            config = getattr(page.context, BROWSER_PROXY_CONFIG_ATTR, None)
+        except Exception:
+            config = None
+        if not config:
+            return {}
+        parsed = urlparse(str(config.get("server", "")))
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if parsed.scheme.lower() not in {"http", "https", "socks5"} or not parsed.hostname or not port:
+            return {}
+        fields: dict[str, Any] = {
+            "proxyType": parsed.scheme.lower(),
+            "proxyAddress": parsed.hostname,
+            "proxyPort": port,
+        }
+        if config.get("username"):
+            fields["proxyLogin"] = config["username"]
+        if config.get("password"):
+            fields["proxyPassword"] = config["password"]
+        return fields
+
+    @classmethod
+    def _build_task(cls, page: Any, kind: str, site_key: str) -> dict[str, Any]:
+        proxy_fields = cls._proxy_fields(page)
+        if kind == "turnstile":
+            task_type = "AntiTurnstileTask" if proxy_fields else "AntiTurnstileTaskProxyLess"
+        else:
+            task_type = "ReCaptchaV2Task" if proxy_fields else "ReCaptchaV2TaskProxyLess"
+        return {
+            "type": task_type,
+            "websiteURL": page.url,
+            "websiteKey": site_key,
+            **proxy_fields,
+        }
+
+    @classmethod
+    def _wait_for_challenge_clear(cls, page: Any, *, timeout: float = 12.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not cls._is_challenge_page(page):
+                return True
+            try:
+                page.wait_for_timeout(1_000)
+            except Exception:
+                time.sleep(1.0)
+        return not cls._is_challenge_page(page)
 
     @staticmethod
     def _inject(page: Any, kind: str, token: str) -> dict[str, int]:
@@ -246,6 +418,12 @@ class CapSolverBrowserSolver:
                     if (typeof callback === 'function' && /captcha|turnstile/i.test(callback.name || '')) {
                         try { callback(token); callbacksCalled += 1; } catch (_) {}
                     }
+                }
+                if (typeof window.__nemoGymTurnstileCallback === 'function') {
+                    try {
+                        window.__nemoGymTurnstileCallback(token);
+                        callbacksCalled += 1;
+                    } catch (_) {}
                 }
                 return {fieldCount: fields.length, callbacksCalled};
             }""",
