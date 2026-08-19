@@ -44,11 +44,14 @@ CHALLENGE_TEXT_MARKERS = (
     "i am not a robot",
     "protected by cloudflare",
 )
-CAPTCHA_FRAME_URL_MARKERS = (
-    "challenges.cloudflare.com",
-    "turnstile",
-    "google.com/recaptcha",
-    "recaptcha.net/recaptcha",
+CAPTCHA_FRAME_SELECTORS = (
+    'iframe[src*="challenges.cloudflare.com"]',
+    'iframe[src*="turnstile"]',
+    'iframe[src*="google.com/recaptcha"]',
+    'iframe[src*="recaptcha.net/recaptcha"]',
+    'iframe[title*="Cloudflare"]',
+    'iframe[title*="captcha"]',
+    'iframe[title*="CAPTCHA"]',
 )
 CAPTCHA_INTERCEPT_SCRIPT = """(() => {
     if (window.__nemoGymTurnstileHookInstalled) return;
@@ -164,15 +167,17 @@ class CapSolverBrowserSolver:
     def maybe_solve(self, page: Any, *, phase: str) -> bool:
         started = time.monotonic()
         origin = _origin(getattr(page, "url", ""))
-        blocking_challenge = self._is_challenge_page(page)
+        challenge_signal = self._challenge_signal(page)
+        blocking_challenge = challenge_signal is not None
         challenge = self._challenge(page)
         if challenge is None:
             if blocking_challenge:
                 LOG.error(
                     "event=captcha_unresolved provider=capsolver phase=%s origin=%s "
-                    "reason=site_key_missing",
+                    "reason=site_key_missing signal=%s",
                     phase,
                     origin,
+                    challenge_signal,
                 )
                 raise RuntimeError("CAPTCHA challenge detected but no supported site key was found")
             LOG.debug(
@@ -324,24 +329,35 @@ class CapSolverBrowserSolver:
         return candidates[0] if candidates else None
 
     @staticmethod
-    def _is_challenge_page(page: Any) -> bool:
+    def _challenge_signal(page: Any) -> str | None:
         try:
             title = str(page.title() or "").lower()
-            if any(marker in title for marker in CHALLENGE_TITLE_MARKERS):
-                return True
+            for marker in CHALLENGE_TITLE_MARKERS:
+                if marker in title:
+                    return f"title:{marker}"
         except Exception:
             pass
         try:
             body = str(page.locator("body").inner_text(timeout=1_000) or "").lower()
-            if any(marker in body for marker in CHALLENGE_TEXT_MARKERS):
-                return True
+            for marker in CHALLENGE_TEXT_MARKERS:
+                if marker in body:
+                    return f"body:{marker}"
         except Exception:
             pass
-        for frame in getattr(page, "frames", []):
-            frame_url = str(getattr(frame, "url", "")).lower()
-            if any(marker in frame_url for marker in CAPTCHA_FRAME_URL_MARKERS):
-                return True
-        return False
+        for selector in CAPTCHA_FRAME_SELECTORS:
+            try:
+                locator = page.locator(selector)
+                for index in range(min(locator.count(), 5)):
+                    box = locator.nth(index).bounding_box()
+                    if box and box.get("width", 0) > 20 and box.get("height", 0) > 20:
+                        return f"visible_frame:{selector}"
+            except Exception:
+                pass
+        return None
+
+    @classmethod
+    def _is_challenge_page(cls, page: Any) -> bool:
+        return cls._challenge_signal(page) is not None
 
     @staticmethod
     def _proxy_fields(page: Any) -> dict[str, Any]:

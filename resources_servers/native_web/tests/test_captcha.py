@@ -22,6 +22,12 @@ class _Locator:
         assert name == "data-sitekey"
         return self._site_key
 
+    def nth(self, _index: int):
+        return self
+
+    def bounding_box(self):
+        return None
+
 
 class _Page:
     url = "https://example.test/form?private=query"
@@ -165,6 +171,44 @@ class _ChallengeBody:
         return "Checking if the site connection is secure"
 
 
+class _NormalBody:
+    def inner_text(self, *, timeout: int) -> str:
+        assert timeout == 1_000
+        return "Sports news, scores, schedules, and highlights"
+
+
+class _FrameLocator(_Locator):
+    def __init__(self, *, visible: bool) -> None:
+        super().__init__(None)
+        self._visible = visible
+
+    def count(self) -> int:
+        return 1
+
+    def bounding_box(self):
+        if self._visible:
+            return {"width": 300, "height": 80}
+        return None
+
+
+class _BackgroundCaptchaFramePage(_Page):
+    frames = [type("Frame", (), {"url": "https://google.com/recaptcha/api2/bframe"})()]
+
+    def __init__(self, *, visible: bool) -> None:
+        super().__init__(site_key=None)
+        self._visible = visible
+
+    def title(self) -> str:
+        return "Sports homepage"
+
+    def locator(self, selector: str):
+        if selector == "body":
+            return _NormalBody()
+        if selector.startswith("iframe"):
+            return _FrameLocator(visible=self._visible)
+        return _Locator(None)
+
+
 class _ChallengePage(_Page):
     def __init__(self) -> None:
         super().__init__(site_key=None)
@@ -189,3 +233,27 @@ def test_capsolver_fails_closed_for_blocking_challenge_without_site_key(caplog) 
     assert "event=captcha_unresolved" in messages
     assert "reason=site_key_missing" in messages
     assert "CAP-private-key" not in messages
+
+
+def test_capsolver_ignores_hidden_background_captcha_frame(caplog) -> None:
+    solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
+
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.native_web.captcha"):
+        assert solver.maybe_solve(_BackgroundCaptchaFramePage(visible=False), phase="after navigate") is False
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=captcha_scan" in messages
+    assert "challenge=none" in messages
+    assert "event=captcha_unresolved" not in messages
+
+
+def test_capsolver_treats_visible_captcha_frame_as_blocking(caplog) -> None:
+    solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
+
+    with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.native_web.captcha"):
+        with pytest.raises(RuntimeError, match="no supported site key"):
+            solver.maybe_solve(_BackgroundCaptchaFramePage(visible=True), phase="after navigate")
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=captcha_unresolved" in messages
+    assert "signal=visible_frame:" in messages
