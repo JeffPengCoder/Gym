@@ -16,6 +16,10 @@ native_web:
       viewport_width: 1920
       viewport_height: 1080
       action_delay_seconds: 2.0
+      # Reusable native-web defaults stay strict. Benchmark profiles may opt
+      # into bounded recovery explicitly.
+      terminate_on_action_error: true
+      max_computer_actions: 20
       proxy_mode: webvoyager_domains
       require_captcha_solver: true
       record_video: false
