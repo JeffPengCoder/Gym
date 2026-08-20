@@ -17,6 +17,7 @@ web_agent:
       # Shared agent defaults preserve strict parsing and do not alter
       # trajectories. Individual benchmark profiles opt into recovery.
       native_action_recovery: strict
+      native_tool_alias_recovery: strict
       native_max_computer_actions: 20
       native_parse_retry_feedback: false
       native_parse_retry_temperature: null

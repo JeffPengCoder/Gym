@@ -55,6 +55,7 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     max_steps: int = Field(default=15, ge=1, le=200)
     max_parse_retries: int = Field(default=2, ge=0, le=10)
     native_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict"
+    native_tool_alias_recovery: Literal["strict", "webvoyager_v3"] = "strict"
     native_max_computer_actions: int = Field(default=20, ge=1, le=100)
     native_parse_retry_feedback: bool = False
     native_parse_retry_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
@@ -135,12 +136,14 @@ def _parse_response_action(
     profile: WebActionProfile,
     *,
     native_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict",
+    native_tool_alias_recovery: Literal["strict", "webvoyager_v3"] = "strict",
     native_max_computer_actions: int = 20,
 ):
     if profile == WebActionProfile.NATIVE_TOOLCALL:
         return parse_native_tool_calls(
             response.output,
             recovery=native_action_recovery,
+            alias_recovery=native_tool_alias_recovery,
             max_computer_actions=native_max_computer_actions,
         )
     return parse_model_action(_extract_output_text(response), profile)
@@ -172,6 +175,7 @@ def _native_parse_retry_messages(response: NeMoGymResponse, error: ActionParseEr
                 "Return a corrected call using only the declared tools. For browser clicks, typing, "
                 "keys, scrolling, dragging, or waiting, call `computer` and make "
                 "`arguments.actions` a JSON array of action objects, not a quoted string."
+                " Use `left_click`, never `click`, as a computer action name."
             ),
         ),
     ]
@@ -286,7 +290,12 @@ def _action_call_names(action: Any) -> str:
 def _native_recovery_modes(action: Any) -> str:
     metadata = getattr(action, "metadata", {})
     records = metadata.get("native_parse", {}).get("calls", []) if isinstance(metadata, dict) else []
-    modes = [str(record.get("recovery_mode", "strict")) for record in records if isinstance(record, dict)]
+    modes: list[str] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        modes.append(str(record.get("recovery_mode", "strict")))
+        modes.extend(str(mode) for mode in record.get("alias_recovery_modes", []))
     return ",".join(modes) or "strict"
 
 
@@ -596,6 +605,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                             model_response,
                             task.action_profile,
                             native_action_recovery=self.config.native_action_recovery,
+                            native_tool_alias_recovery=self.config.native_tool_alias_recovery,
                             native_max_computer_actions=self.config.native_max_computer_actions,
                         )
                         if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:

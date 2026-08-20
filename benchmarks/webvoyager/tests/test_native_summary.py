@@ -47,12 +47,14 @@ def test_native_v3_robust_evaluation_is_scoped_to_the_benchmark_profile() -> Non
     assert base_config["terminate_on_action_error"] is True
     assert base_config["max_computer_actions"] == 20
     assert base_agent["native_action_recovery"] == "strict"
+    assert base_agent["native_tool_alias_recovery"] == "strict"
     assert base_agent["native_parse_retry_feedback"] is False
     assert base_agent["native_parse_retry_temperature"] is None
     assert base_agent["repeated_action_warning_threshold"] == 0
     assert resources["terminate_on_action_error"] is False
     assert resources["max_computer_actions"] == 20
     assert agent["native_action_recovery"] == "repair_single_closing_bracket"
+    assert agent["native_tool_alias_recovery"] == "webvoyager_v3"
     assert agent["native_parse_retry_feedback"] is True
     assert agent["native_parse_retry_temperature"] == 0.2
     assert agent["repeated_action_warning_threshold"] == 3

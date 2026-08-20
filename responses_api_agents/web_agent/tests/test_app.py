@@ -86,6 +86,7 @@ def test_native_retry_feedback_contains_error_and_no_image() -> None:
 
     assert [message.role for message in messages] == ["assistant", "user"]
     assert "unsupported native browser tool" in messages[1].content
+    assert "Use `left_click`, never `click`" in messages[1].content
     assert "arguments.actions" in messages[1].content
     assert "input_image" not in json.dumps([message.model_dump() for message in messages])
 

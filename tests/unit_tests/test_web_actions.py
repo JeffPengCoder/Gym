@@ -144,6 +144,99 @@ def test_native_alignment_mode_still_rejects_actions_string() -> None:
         )
 
 
+def test_native_alias_recovery_is_opt_in_and_records_nested_click_conversion() -> None:
+    item = {
+        "type": "function_call",
+        "call_id": "call-click",
+        "name": "computer",
+        "arguments": '{"actions":[{"action":"click","coordinate":[0.25,0.75]}]}',
+    }
+    with pytest.raises(ActionParseError, match="unsupported native computer action"):
+        parse_native_tool_calls([item])
+
+    action = parse_native_tool_calls([item], alias_recovery="webvoyager_v3")
+
+    call = action.arguments["calls"][0]
+    assert call["name"] == "computer"
+    assert call["arguments"]["actions"] == [{"action": "left_click", "coordinate": [0.25, 0.75]}]
+    record = action.metadata["native_parse"]["calls"][0]
+    assert record["original_tool"] == "computer"
+    assert record["alias_recovery_modes"] == ["computer.click_to_left_click"]
+    assert action.metadata["native_parse"]["recovered"] is True
+
+
+@pytest.mark.parametrize(
+    "name,arguments,expected_action,expected_payload,expected_mode",
+    [
+        (
+            "click",
+            '{"x":"0.25","y":"0.75"}',
+            "left_click",
+            {"coordinate": [0.25, 0.75]},
+            "tool.click_xy_to_computer_left_click",
+        ),
+        (
+            "left_click",
+            '{"coordinate":"[0.4, 0.6]"}',
+            "left_click",
+            {"coordinate": [0.4, 0.6]},
+            "tool.left_click_coordinate_to_computer_left_click",
+        ),
+        (
+            "type",
+            '{"text":"hello"}',
+            "type",
+            {"text": "hello"},
+            "tool.type_to_computer_type",
+        ),
+        (
+            "wait",
+            '{"duration":"2"}',
+            "wait",
+            {"duration": 2.0},
+            "tool.wait_to_computer_wait",
+        ),
+    ],
+)
+def test_native_alias_recovery_wraps_unambiguous_top_level_actions(
+    name, arguments, expected_action, expected_payload, expected_mode
+) -> None:
+    with pytest.raises(ActionParseError, match="unsupported native browser tool"):
+        parse_native_tool_calls(
+            [{"type": "function_call", "call_id": "call-alias", "name": name, "arguments": arguments}]
+        )
+
+    action = parse_native_tool_calls(
+        [{"type": "function_call", "call_id": "call-alias", "name": name, "arguments": arguments}],
+        alias_recovery="webvoyager_v3",
+    )
+
+    call = action.arguments["calls"][0]
+    assert call["name"] == "computer"
+    computer_action = call["arguments"]["actions"][0]
+    assert computer_action.pop("action") == expected_action
+    assert computer_action == expected_payload
+    record = action.metadata["native_parse"]["calls"][0]
+    assert record["original_tool"] == name
+    assert record["alias_recovery_modes"] == [expected_mode]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{"target":"Buy button"}',
+        '{"x":"500","y":"300"}',
+        '{"action":"type","coordinate":"[0.4,0.6]","text":"query"}',
+    ],
+)
+def test_native_alias_recovery_rejects_ambiguous_or_non_normalized_clicks(arguments) -> None:
+    with pytest.raises(ActionParseError):
+        parse_native_tool_calls(
+            [{"type": "function_call", "name": "click", "arguments": arguments}],
+            alias_recovery="webvoyager_v3",
+        )
+
+
 def test_native_recovery_rejects_non_local_json_damage() -> None:
     with pytest.raises(ActionParseError, match="not eligible"):
         parse_native_tool_calls(

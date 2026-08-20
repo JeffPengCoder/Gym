@@ -32,6 +32,7 @@ native_webvoyager_agent:
       max_steps: 100
       max_parse_retries: 2
       native_action_recovery: repair_single_closing_bracket
+      native_tool_alias_recovery: webvoyager_v3
       native_max_computer_actions: 20
       native_parse_retry_feedback: true
       native_parse_retry_temperature: 0.2

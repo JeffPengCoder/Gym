@@ -66,6 +66,7 @@ NATIVE_CLICK_ACTIONS = frozenset(
     }
 )
 NativeActionRecovery = Literal["strict", "decode_string", "repair_single_closing_bracket"]
+NativeToolAliasRecovery = Literal["strict", "webvoyager_v3"]
 
 
 class ActionParseError(ValueError):
@@ -267,10 +268,21 @@ def _native_coordinate(value: Any, *, field: str) -> None:
     _native_number(value[1], field=f"{field}[1]", minimum=0, maximum=1)
 
 
-def _validate_native_computer_action(action: Any, index: int) -> dict[str, Any]:
+def _validate_native_computer_action(
+    action: Any,
+    index: int,
+    *,
+    alias_recovery: NativeToolAliasRecovery,
+) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(action, dict):
         raise ActionParseError(f"native computer action[{index}] must be an object")
+    normalized = dict(action)
     name = action.get("action")
+    alias_modes: list[str] = []
+    if name == "click" and alias_recovery == "webvoyager_v3":
+        name = "left_click"
+        normalized["action"] = name
+        alias_modes.append("computer.click_to_left_click")
     if name not in NATIVE_COMPUTER_ACTIONS:
         raise ActionParseError(f"unsupported native computer action[{index}]: {name!r}")
     prefix = f"native computer action[{index}] ({name})"
@@ -301,7 +313,92 @@ def _validate_native_computer_action(action: Any, index: int) -> dict[str, Any]:
         amount = parameters.get("scroll_amount")
         if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
             raise ActionParseError(f"{prefix}.scroll_amount must be a non-negative integer")
-    return dict(action)
+    return normalized, alias_modes
+
+
+def _native_alias_number(value: Any, *, field: str, minimum: float, maximum: float) -> float:
+    decoded = value
+    if isinstance(value, str):
+        try:
+            decoded = float(value.strip())
+        except ValueError as exc:
+            raise ActionParseError(f"{field} must be a number") from exc
+    return _native_number(decoded, field=field, minimum=minimum, maximum=maximum)
+
+
+def _native_alias_coordinate(value: Any, *, field: str) -> list[float]:
+    decoded = value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ActionParseError(f"{field} must be a JSON coordinate array") from exc
+    if not isinstance(decoded, (list, tuple)) or len(decoded) != 2:
+        raise ActionParseError(f"{field} must contain normalized x and y")
+    return [
+        _native_alias_number(decoded[0], field=f"{field}[0]", minimum=0, maximum=1),
+        _native_alias_number(decoded[1], field=f"{field}[1]", minimum=0, maximum=1),
+    ]
+
+
+def _normalize_native_tool_alias(
+    name: Any,
+    arguments: dict[str, Any],
+    *,
+    alias_recovery: NativeToolAliasRecovery,
+) -> tuple[Any, dict[str, Any], list[str]]:
+    """Normalize only unambiguous public-v3 tool aliases.
+
+    The native benchmark contract remains strict by default. The opt-in mode
+    accepts shapes observed in the public Nano Omni v3 transport logs and
+    rejects fields whose intended browser semantics cannot be proven.
+    """
+
+    if alias_recovery == "strict":
+        return name, arguments, []
+
+    keys = set(arguments)
+    if name in {"click", "left_click"}:
+        coordinate: list[float] | None = None
+        mode: str | None = None
+        if keys == {"x", "y"}:
+            x = _native_alias_number(arguments["x"], field="native click.x", minimum=0, maximum=1)
+            y = _native_alias_number(arguments["y"], field="native click.y", minimum=0, maximum=1)
+            coordinate = [x, y]
+            mode = f"tool.{name}_xy_to_computer_left_click"
+        elif keys <= {"action", "coordinate"} and "coordinate" in arguments:
+            declared_action = arguments.get("action")
+            if declared_action not in {None, "click", "left_click"}:
+                return name, arguments, []
+            coordinate = _native_alias_coordinate(arguments["coordinate"], field="native click.coordinate")
+            mode = f"tool.{name}_coordinate_to_computer_left_click"
+        if coordinate is not None and mode is not None:
+            return (
+                "computer",
+                {"actions": [{"action": "left_click", "coordinate": coordinate}]},
+                [mode],
+            )
+
+    if name == "type" and keys <= {"action", "text"}:
+        if arguments.get("action") in {None, "type"} and isinstance(arguments.get("text"), str):
+            return (
+                "computer",
+                {"actions": [{"action": "type", "text": arguments["text"]}]},
+                ["tool.type_to_computer_type"],
+            )
+
+    if name == "wait" and keys <= {"action", "duration"}:
+        if arguments.get("action") in {None, "wait"}:
+            duration = _native_alias_number(
+                arguments.get("duration"), field="native wait.duration", minimum=0, maximum=30
+            )
+            return (
+                "computer",
+                {"actions": [{"action": "wait", "duration": duration}]},
+                ["tool.wait_to_computer_wait"],
+            )
+
+    return name, arguments, []
 
 
 def _validate_native_tool_arguments(
@@ -309,19 +406,28 @@ def _validate_native_tool_arguments(
     arguments: dict[str, Any],
     *,
     recovery: NativeActionRecovery,
+    alias_recovery: NativeToolAliasRecovery,
     max_computer_actions: int,
-) -> tuple[dict[str, Any], str, int]:
+) -> tuple[dict[str, Any], str, int, list[str]]:
     normalized = dict(arguments)
+    alias_modes: list[str] = []
     if name == "computer":
         actions, recovery_mode = _decode_native_actions(arguments.get("actions"), recovery)
         if not isinstance(actions, list) or not actions:
             raise ActionParseError("native computer tool requires a non-empty actions list")
         if len(actions) > max_computer_actions:
             raise ActionParseError(f"native computer tool exceeded the {max_computer_actions}-action batch limit")
-        normalized["actions"] = [
-            _validate_native_computer_action(action, index) for index, action in enumerate(actions)
-        ]
-        return normalized, recovery_mode, len(actions)
+        validated_actions: list[dict[str, Any]] = []
+        for index, action in enumerate(actions):
+            validated, action_aliases = _validate_native_computer_action(
+                action,
+                index,
+                alias_recovery=alias_recovery,
+            )
+            validated_actions.append(validated)
+            alias_modes.extend(action_aliases)
+        normalized["actions"] = validated_actions
+        return normalized, recovery_mode, len(actions), alias_modes
     if name == "navigate":
         url = arguments.get("url")
         if not isinstance(url, str) or not url:
@@ -345,7 +451,7 @@ def _validate_native_tool_arguments(
         answer = arguments.get("answer")
         if answer is not None and not isinstance(answer, str):
             raise ActionParseError("native terminate.answer must be a string or null")
-    return normalized, "strict", 0
+    return normalized, "strict", 0, alias_modes
 
 
 def parse_native_tool_calls(
@@ -354,6 +460,7 @@ def parse_native_tool_calls(
     max_calls: int = 8,
     max_computer_actions: int = 20,
     recovery: NativeActionRecovery = "strict",
+    alias_recovery: NativeToolAliasRecovery = "strict",
 ) -> WebAction:
     """Validate native Nano Omni function calls without executing arbitrary code."""
 
@@ -366,8 +473,6 @@ def parse_native_tool_calls(
         name = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
         raw_arguments = item.get("arguments") if isinstance(item, dict) else getattr(item, "arguments", None)
         call_id = item.get("call_id") if isinstance(item, dict) else getattr(item, "call_id", None)
-        if name not in NATIVE_TOOL_NAMES:
-            raise ActionParseError(f"unsupported native browser tool: {name!r}")
         try:
             arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
         except json.JSONDecodeError as exc:
@@ -376,18 +481,30 @@ def parse_native_tool_calls(
             arguments = {}
         if not isinstance(arguments, dict):
             raise ActionParseError(f"native tool {name!r} arguments must be an object")
-        arguments, recovery_mode, computer_actions = _validate_native_tool_arguments(
+        original_name = name
+        name, arguments, alias_modes = _normalize_native_tool_alias(
+            name,
+            arguments,
+            alias_recovery=alias_recovery,
+        )
+        if name not in NATIVE_TOOL_NAMES:
+            raise ActionParseError(f"unsupported native browser tool: {name!r}")
+        arguments, recovery_mode, computer_actions, action_alias_modes = _validate_native_tool_arguments(
             name,
             arguments,
             recovery=recovery,
+            alias_recovery=alias_recovery,
             max_computer_actions=max_computer_actions,
         )
+        alias_modes.extend(action_alias_modes)
         calls.append({"id": call_id, "name": name, "arguments": arguments})
         parse_records.append(
             {
                 "call_id": call_id,
                 "tool": name,
+                "original_tool": original_name,
                 "recovery_mode": recovery_mode,
+                "alias_recovery_modes": alias_modes,
                 "computer_actions": computer_actions,
             }
         )
@@ -413,7 +530,9 @@ def parse_native_tool_calls(
         metadata={
             "native_parse": {
                 "calls": parse_records,
-                "recovered": any(record["recovery_mode"] != "strict" for record in parse_records),
+                "recovered": any(
+                    record["recovery_mode"] != "strict" or record["alias_recovery_modes"] for record in parse_records
+                ),
             }
         },
     )
