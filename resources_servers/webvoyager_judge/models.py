@@ -12,11 +12,14 @@ from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.web.models import WebBenchmark, WebTask, WebVerifierResult
 
 
+MAX_WEBVOYAGER_JUDGE_EVIDENCE_ITEMS = 200
+
+
 class WebVoyagerJudgeRequest(BaseModel):
     task: WebTask
     final_answer: str = ""
-    screenshots: list[str] = Field(default_factory=list, max_length=20)
-    page_urls: list[str] = Field(default_factory=list, max_length=20)
+    screenshots: list[str] = Field(default_factory=list, max_length=MAX_WEBVOYAGER_JUDGE_EVIDENCE_ITEMS)
+    page_urls: list[str] = Field(default_factory=list, max_length=MAX_WEBVOYAGER_JUDGE_EVIDENCE_ITEMS)
 
     @model_validator(mode="after")
     def require_webvoyager(self) -> "WebVoyagerJudgeRequest":
@@ -35,8 +38,8 @@ class WebVoyagerStandardVerifyRequest(BaseVerifyRequest):
 
     web_task: WebTask
     final_answer: str = ""
-    screenshots: list[str] = Field(default_factory=list, max_length=20)
-    page_urls: list[str] = Field(default_factory=list, max_length=20)
+    screenshots: list[str] = Field(default_factory=list, max_length=MAX_WEBVOYAGER_JUDGE_EVIDENCE_ITEMS)
+    page_urls: list[str] = Field(default_factory=list, max_length=MAX_WEBVOYAGER_JUDGE_EVIDENCE_ITEMS)
 
 
 class WebVoyagerStandardVerifyResponse(BaseVerifyResponse):
