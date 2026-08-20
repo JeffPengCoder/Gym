@@ -295,7 +295,11 @@ def test_native_driver_terminates_without_a_second_solve_after_budget_exhaustion
             raise TimeoutError("provider detail must not escape")
 
     monkeypatch.setenv("WA_MAX_CAPTCHA_FAILURES", "0")
-    driver = NativeWebDriver(_config(action_delay_seconds=0), "session-test", object())
+    driver = NativeWebDriver(
+        _config(action_delay_seconds=0, terminate_on_action_error=False),
+        "session-test",
+        object(),
+    )
     solver = _FailingSolver()
     driver._captcha_solver = solver
     driver._page = type("Page", (), {"url": "https://example.test/private?query=secret"})()

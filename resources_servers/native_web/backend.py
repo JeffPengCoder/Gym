@@ -354,7 +354,15 @@ class NativeWebDriver:
             if not self._captcha_budget_exhausted:
                 self._maybe_solve_captcha("before post-action screenshot", failure_step=captcha_failure_step)
             self._observation = self._capture()
-        terminated = action.terminal or (not execution_ok and self.config.terminate_on_action_error)
+        # The pinned native runner treats an exhausted CAPTCHA budget as a
+        # task-level terminal error, even when ordinary action errors remain
+        # policy-visible.  Do not give the agent more correction turns that
+        # could create additional paid solver tasks.
+        terminated = (
+            action.terminal
+            or self._captcha_budget_exhausted
+            or (not execution_ok and self.config.terminate_on_action_error)
+        )
         LOG.info(
             "event=native_browser_step_complete session=%s task=%s step=%d execution_ok=%s "
             "terminated=%s origin=%s elapsed_seconds=%.3f",
