@@ -141,7 +141,7 @@ def test_native_action_error_can_be_returned_for_policy_recovery(monkeypatch) ->
         }
     )
     monkeypatch.setattr(driver, "_execute_call", lambda *_args: (_ for _ in ()).throw(ValueError("bad action")))
-    monkeypatch.setattr(driver, "_maybe_solve_captcha", lambda _phase: False)
+    monkeypatch.setattr(driver, "_maybe_solve_captcha", lambda _phase, **_kwargs: False)
     monkeypatch.setattr(
         driver,
         "_capture",
@@ -188,7 +188,7 @@ def test_native_driver_validates_entire_batch_before_side_effect(monkeypatch) ->
     )
     executed = []
     monkeypatch.setattr(driver, "_execute_computer", lambda action: executed.append(action))
-    monkeypatch.setattr(driver, "_maybe_solve_captcha", lambda _phase: False)
+    monkeypatch.setattr(driver, "_maybe_solve_captcha", lambda _phase, **_kwargs: False)
     monkeypatch.setattr(
         driver,
         "_capture",
@@ -256,3 +256,84 @@ def test_native_driver_defers_transient_captcha_solver_error(caplog) -> None:
     assert "error_type=TimeoutError" in messages
     assert "provider detail must not escape" not in messages
     assert "private?query=secret" not in messages
+
+
+def test_native_driver_caps_captcha_failures_by_vlm_step(monkeypatch, caplog) -> None:
+    class _FailingSolver:
+        def maybe_solve(self, _page, *, phase: str) -> bool:
+            assert phase
+            raise TimeoutError("provider detail must not escape")
+
+    monkeypatch.setenv("WA_MAX_CAPTCHA_FAILURES", "1")
+    driver = NativeWebDriver(_config(), "session-test", object())
+    driver._captcha_solver = _FailingSolver()
+    driver._page = type("Page", (), {"url": "https://example.test/private?query=secret"})()
+    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.native_web"):
+        assert driver._maybe_solve_captcha("after computer", failure_step=0) is False
+        assert driver._maybe_solve_captcha("before post-action screenshot", failure_step=0) is False
+        with pytest.raises(RuntimeError, match="failed more than 1 times"):
+            driver._maybe_solve_captcha("after computer", failure_step=1)
+
+    assert driver._captcha_failures == 2
+    assert driver._captcha_budget_exhausted is True
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert messages.count("event=captcha_failure_counted") == 2
+    assert "event=captcha_failure_budget_exhausted" in messages
+    assert "provider detail must not escape" not in messages
+    assert "private?query=secret" not in messages
+
+
+def test_native_driver_terminates_without_a_second_solve_after_budget_exhaustion(monkeypatch) -> None:
+    class _FailingSolver:
+        calls = 0
+
+        def maybe_solve(self, _page, *, phase: str) -> bool:
+            assert phase == "after computer"
+            self.calls += 1
+            raise TimeoutError("provider detail must not escape")
+
+    monkeypatch.setenv("WA_MAX_CAPTCHA_FAILURES", "0")
+    driver = NativeWebDriver(_config(action_delay_seconds=0), "session-test", object())
+    solver = _FailingSolver()
+    driver._captcha_solver = solver
+    driver._page = type("Page", (), {"url": "https://example.test/private?query=secret"})()
+    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    driver._observation = WebObservation.model_validate(
+        {
+            "goal": [],
+            "screenshot": {"data_url": "data:image/png;base64,abc"},
+            "url": "https://example.test",
+        }
+    )
+    monkeypatch.setattr(driver, "_execute_call", lambda *_args: None)
+    monkeypatch.setattr(
+        driver,
+        "_capture",
+        lambda: driver._observation.model_copy(update={"last_action_error": driver._last_error}),
+    )
+
+    result = driver.step(
+        WebAction.model_validate(
+            {
+                "name": "computer",
+                "script": "",
+                "arguments": {
+                    "calls": [
+                        {
+                            "name": "computer",
+                            "arguments": {"actions": [{"action": "wait", "duration": 1}]},
+                        }
+                    ]
+                },
+            }
+        )
+    )
+
+    assert result.execution_ok is False
+    assert result.terminated is True
+    assert solver.calls == 1
+    assert result.observation.last_action_error == (
+        "RuntimeError: Captcha solver failed more than 0 times after VLM inference; aborting task at step 0"
+    )

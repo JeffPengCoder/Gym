@@ -181,6 +181,9 @@ class NativeWebDriver:
         self._started_at = 0.0
         self._last_action = ""
         self._last_error = ""
+        self._last_captcha_failure_step: int | None = None
+        self._captcha_failures = 0
+        self._captcha_budget_exhausted = False
         self._evidence: deque[WebArtifactRef] = deque(maxlen=config.max_evidence_screenshots)
         self._captcha_solver = captcha_solver_from_environment()
 
@@ -250,6 +253,9 @@ class NativeWebDriver:
         self._started_at = time.monotonic()
         self._last_action = ""
         self._last_error = ""
+        self._last_captcha_failure_step = None
+        self._captcha_failures = 0
+        self._captcha_budget_exhausted = False
         self._evidence.clear()
         if task.start_urls:
             self._page.goto(task.start_urls[0], wait_until="domcontentloaded", timeout=120_000)
@@ -285,6 +291,7 @@ class NativeWebDriver:
         self._last_error = ""
         execution_ok = True
         started = time.monotonic()
+        captcha_failure_step = self._step
         calls = action.arguments.get("calls", [])
         call_names = [str(call.get("name", "unknown")) for call in calls if isinstance(call, dict)]
         LOG.info(
@@ -325,7 +332,7 @@ class NativeWebDriver:
                     time.monotonic() - call_started,
                 )
                 if call["name"] != "terminate":
-                    self._maybe_solve_captcha(f"after {call['name']}")
+                    self._maybe_solve_captcha(f"after {call['name']}", failure_step=captcha_failure_step)
         except Exception as exc:  # A malformed/failed UI operation is policy-visible.
             execution_ok = False
             self._last_error = f"{type(exc).__name__}: {exc}"
@@ -344,7 +351,8 @@ class NativeWebDriver:
                 raise RuntimeError("terminal action has no prior observation")
         else:
             time.sleep(self.config.action_delay_seconds)
-            self._maybe_solve_captcha("before post-action screenshot")
+            if not self._captcha_budget_exhausted:
+                self._maybe_solve_captcha("before post-action screenshot", failure_step=captcha_failure_step)
             self._observation = self._capture()
         terminated = action.terminal or (not execution_ok and self.config.terminate_on_action_error)
         LOG.info(
@@ -425,7 +433,7 @@ class NativeWebDriver:
                 return proxy
         return ""
 
-    def _maybe_solve_captcha(self, phase: str) -> bool:
+    def _maybe_solve_captcha(self, phase: str, *, failure_step: int | None = None) -> bool:
         if self.config.require_captcha_solver and not self.config.captcha_solver():
             LOG.error(
                 "event=captcha_precondition_failed session=%s task=%s phase=%s missing_env=%s",
@@ -451,6 +459,41 @@ class NativeWebDriver:
                 _url_origin(self._page.url if self._page is not None else ""),
                 type(exc).__name__,
             )
+            if failure_step is not None and self._last_captcha_failure_step != failure_step:
+                self._last_captcha_failure_step = failure_step
+                self._captcha_failures += 1
+                try:
+                    max_failures = int(os.environ.get("WA_MAX_CAPTCHA_FAILURES", "3"))
+                except ValueError:
+                    max_failures = 3
+                    LOG.warning(
+                        "event=captcha_failure_budget_invalid value_present=true fallback=%d",
+                        max_failures,
+                    )
+                max_failures = max(0, max_failures)
+                LOG.warning(
+                    "event=captcha_failure_counted session=%s task=%s step=%d failures=%d max_failures=%d",
+                    self.session_id,
+                    self._task.task_id if self._task is not None else "unknown",
+                    failure_step,
+                    self._captcha_failures,
+                    max_failures,
+                )
+                if self._captcha_failures > max_failures:
+                    self._captcha_budget_exhausted = True
+                    LOG.error(
+                        "event=captcha_failure_budget_exhausted session=%s task=%s step=%d "
+                        "failures=%d max_failures=%d",
+                        self.session_id,
+                        self._task.task_id if self._task is not None else "unknown",
+                        failure_step,
+                        self._captcha_failures,
+                        max_failures,
+                    )
+                    raise RuntimeError(
+                        f"Captcha solver failed more than {max_failures} times "
+                        f"after VLM inference; aborting task at step {failure_step}"
+                    ) from None
             return False
         if solved:
             LOG.info(
