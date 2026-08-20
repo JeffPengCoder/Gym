@@ -340,7 +340,24 @@ class NativeWebDriver:
                 self.config.captcha_solver_env,
             )
             raise RuntimeError(f"captcha solver is required but {self.config.captcha_solver_env} is unset")
-        solved = self._captcha_solver.maybe_solve(self._page, phase=phase)
+        try:
+            solved = self._captcha_solver.maybe_solve(self._page, phase=phase)
+        except Exception as exc:
+            # Match the native runner's failure boundary: a transient solver
+            # timeout or a challenge that remains visible is not a resource
+            # server crash. Keep the live page available to the agent and let
+            # the normal task/judge path determine the outcome.
+            LOG.warning(
+                "event=captcha_solver_deferred session=%s task=%s step=%d phase=%s "
+                "origin=%s error_type=%s",
+                self.session_id,
+                self._task.task_id if self._task is not None else "unknown",
+                self._step,
+                phase,
+                _url_origin(self._page.url if self._page is not None else ""),
+                type(exc).__name__,
+            )
+            return False
         if solved:
             LOG.info(
                 "event=captcha_applied session=%s task=%s step=%d phase=%s origin=%s",

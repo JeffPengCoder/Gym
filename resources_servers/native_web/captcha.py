@@ -191,7 +191,17 @@ class CapSolverBrowserSolver:
         kind, site_key = challenge
         identity = (origin, kind, _fingerprint(site_key))
         if identity in self._completed_challenges:
-            LOG.error(
+            if not blocking_challenge:
+                LOG.debug(
+                    "event=captcha_scan provider=capsolver phase=%s origin=%s challenge=%s "
+                    "status=completed_nonblocking site_key_sha256=%s",
+                    phase,
+                    origin,
+                    kind,
+                    identity[2],
+                )
+                return False
+            LOG.warning(
                 "event=captcha_unresolved provider=capsolver phase=%s origin=%s challenge=%s "
                 "reason=repeated_after_solution site_key_sha256=%s",
                 phase,
@@ -199,7 +209,7 @@ class CapSolverBrowserSolver:
                 kind,
                 identity[2],
             )
-            raise RuntimeError("CAPTCHA challenge remained after an accepted solver response")
+            return False
         task = self._build_task(page, kind, site_key)
         task_type = str(task["type"])
         LOG.info(
@@ -448,8 +458,11 @@ class CapSolverBrowserSolver:
     def _inject(page: Any, kind: str, token: str) -> dict[str, int]:
         field_name = "cf-turnstile-response" if kind == "turnstile" else "g-recaptcha-response"
         result = page.evaluate(
-            """([name, token]) => {
-                let fields = Array.from(document.querySelectorAll(`textarea[name="${name}"], input[name="${name}"]`));
+            """([name, token, kind]) => {
+                let fields = Array.from(document.querySelectorAll(
+                    `textarea[name="${name}"], input[name="${name}"], ` +
+                    `textarea[name^="${name}"], input[name^="${name}"]`
+                ));
                 if (!fields.length) {
                     const field = document.createElement('textarea');
                     field.name = name;
@@ -463,8 +476,38 @@ class CapSolverBrowserSolver:
                     field.dispatchEvent(new Event('change', {bubbles: true}));
                 }
                 let callbacksCalled = 0;
-                for (const callback of Object.values(window)) {
-                    if (typeof callback === 'function' && /captcha|turnstile/i.test(callback.name || '')) {
+
+                for (const element of document.querySelectorAll('[data-callback]')) {
+                    const callbackName = element.getAttribute('data-callback');
+                    const callback = callbackName && window[callbackName];
+                    if (typeof callback === 'function') {
+                        try { callback(token); callbacksCalled += 1; } catch (_) {}
+                    }
+                }
+
+                if (kind === 'recaptcha') {
+                    const callbacks = [];
+                    const seen = new Set();
+                    const scan = (object, depth = 0) => {
+                        if (!object || depth > 8 || seen.has(object)) return;
+                        if (typeof object !== 'object' && typeof object !== 'function') return;
+                        seen.add(object);
+                        for (const key of Object.keys(object)) {
+                            let value;
+                            try { value = object[key]; } catch (_) { continue; }
+                            if ((key === 'callback' || key === 'promise-callback') &&
+                                typeof value === 'function') {
+                                callbacks.push(value);
+                            } else if (value &&
+                                       (typeof value === 'object' || typeof value === 'function')) {
+                                scan(value, depth + 1);
+                            }
+                        }
+                    };
+                    if (window.___grecaptcha_cfg && window.___grecaptcha_cfg.clients) {
+                        scan(window.___grecaptcha_cfg.clients);
+                    }
+                    for (const callback of callbacks) {
                         try { callback(token); callbacksCalled += 1; } catch (_) {}
                     }
                 }
@@ -476,7 +519,7 @@ class CapSolverBrowserSolver:
                 }
                 return {fieldCount: fields.length, callbacksCalled};
             }""",
-            [field_name, token],
+            [field_name, token, kind],
         )
         if not isinstance(result, dict):
             return {"fieldCount": 0, "callbacksCalled": 0}

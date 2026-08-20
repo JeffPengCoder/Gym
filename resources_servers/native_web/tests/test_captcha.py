@@ -43,8 +43,11 @@ class _Page:
             return _Locator(self._site_key)
         return _Locator(None)
 
-    def evaluate(self, _script: str, arguments: list[str]):
-        _field_name, token = arguments
+    def evaluate(self, script: str, arguments: list[str]):
+        _field_name, token, kind = arguments
+        assert kind == "turnstile"
+        assert "data-callback" in script
+        assert "___grecaptcha_cfg" in script
         self.injected_token = token
         return {"fieldCount": 1, "callbacksCalled": 1}
 
@@ -122,6 +125,41 @@ def test_capsolver_no_challenge_emits_debug_scan(caplog) -> None:
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "event=captcha_scan" in messages
     assert "challenge=none" in messages
+    assert "CAP-private-key" not in messages
+
+
+def test_capsolver_ignores_completed_nonblocking_widget(monkeypatch, caplog) -> None:
+    client = _Client(timeout=30.0)
+    monkeypatch.setattr(captcha.httpx, "Client", lambda **_kwargs: client)
+    monkeypatch.setattr(captcha.time, "sleep", lambda _seconds: None)
+    page = _Page()
+    solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
+
+    assert solver.maybe_solve(page, phase="after navigate") is True
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.native_web.captcha"):
+        assert solver.maybe_solve(page, phase="before post-action screenshot") is False
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "status=completed_nonblocking" in messages
+    assert "event=captcha_unresolved" not in messages
+
+
+def test_capsolver_defers_completed_blocking_widget_without_crashing(caplog) -> None:
+    class _CompletedBlockingPage(_Page):
+        def title(self) -> str:
+            return "Just a moment..."
+
+    page = _CompletedBlockingPage()
+    solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
+    solver._completed_challenges.add(
+        ("https://example.test", "turnstile", captcha._fingerprint("public-site-key"))
+    )
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.native_web.captcha"):
+        assert solver.maybe_solve(page, phase="before post-action screenshot") is False
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "reason=repeated_after_solution" in messages
     assert "CAP-private-key" not in messages
 
 

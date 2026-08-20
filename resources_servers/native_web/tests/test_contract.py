@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import tomllib
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from nemo_gym.web.datasets import adapt_native_webvoyager_record
 from nemo_gym.web.models import WebTask
 from nemo_gym.web.native_webvoyager import NATIVE_WEBVOYAGER_SYSTEM_PROMPT, NATIVE_WEBVOYAGER_TOOLS
 from resources_servers.webvoyager_judge.prompts import NATIVE_WEBVOYAGER_JUDGE_PROMPT
+from resources_servers.native_web.backend import NativeWebDriver
 from resources_servers.native_web.config import NativeWebResourcesServerConfig
 from resources_servers.native_web.session_manager import NativeWebSessionManager
 
@@ -99,3 +101,24 @@ def test_native_component_declares_parent_gym_runtime() -> None:
         "path": "../..",
         "editable": True,
     }
+
+
+def test_native_driver_defers_transient_captcha_solver_error(caplog) -> None:
+    class _FailingSolver:
+        def maybe_solve(self, _page, *, phase: str) -> bool:
+            assert phase == "before post-action screenshot"
+            raise TimeoutError("provider detail must not escape")
+
+    driver = NativeWebDriver(_config(), "session-test", object())
+    driver._captcha_solver = _FailingSolver()
+    driver._page = type("Page", (), {"url": "https://example.test/private?query=secret"})()
+    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.native_web"):
+        assert driver._maybe_solve_captcha("before post-action screenshot") is False
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=captcha_solver_deferred" in messages
+    assert "error_type=TimeoutError" in messages
+    assert "provider detail must not escape" not in messages
+    assert "private?query=secret" not in messages
