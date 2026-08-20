@@ -30,6 +30,22 @@ def test_native_v3_policy_preserves_history_thinking() -> None:
     )
 
 
+def test_native_v3_robust_evaluation_is_scoped_to_the_benchmark_profile() -> None:
+    config_path = Path(__file__).parents[1] / "configs" / "native_v3.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    resources = config["native_webvoyager_resources"]["resources_servers"]["native_web"]
+    agent = config["native_webvoyager_agent"]["responses_api_agents"]["web_agent"]
+
+    assert resources["terminate_on_action_error"] is False
+    assert resources["max_computer_actions"] == 20
+    assert agent["native_action_recovery"] == "repair_single_closing_bracket"
+    assert agent["native_parse_retry_feedback"] is True
+    assert agent["native_parse_retry_temperature"] == 0.2
+    assert agent["repeated_action_warning_threshold"] == 3
+    assert agent["max_consecutive_execution_failures"] == 3
+
+
 def test_native_summary_keeps_fixed_denominator_and_exposes_masked_failures() -> None:
     report = summarize(
         [

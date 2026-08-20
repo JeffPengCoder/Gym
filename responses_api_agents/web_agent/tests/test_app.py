@@ -17,6 +17,7 @@ from responses_api_agents.web_agent.app import (
     WebAgent,
     WebAgentConfig,
     WebAgentRunRequest,
+    _native_parse_retry_messages,
     _parse_response_action,
     _redact_old_images,
 )
@@ -43,6 +44,20 @@ def _model_response(text: str) -> dict:
     }
 
 
+def _native_model_response(name: str, arguments: str) -> dict:
+    payload = _model_response("")
+    payload["output"] = [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": name,
+            "arguments": arguments,
+            "status": "completed",
+        }
+    ]
+    return payload
+
+
 def test_native_profile_reads_structured_function_calls_not_message_text():
     payload = _model_response("")
     payload["output"] = [
@@ -62,6 +77,85 @@ def test_native_profile_reads_structured_function_calls_not_message_text():
 
     assert action.name == "tabs_focus"
     assert action.arguments["calls"][0]["arguments"] == {"tab_id": 2}
+
+
+def test_native_retry_feedback_contains_error_and_no_image() -> None:
+    response = NeMoGymResponse.model_validate(_native_model_response("click", '{"x":0.2,"y":0.3}'))
+
+    messages = _native_parse_retry_messages(response, ValueError("unsupported native browser tool: 'click'"))
+
+    assert [message.role for message in messages] == ["assistant", "user"]
+    assert "unsupported native browser tool" in messages[1].content
+    assert "arguments.actions" in messages[1].content
+    assert "input_image" not in json.dumps([message.model_dump() for message in messages])
+
+
+@pytest.mark.asyncio
+async def test_native_parse_retry_injects_feedback_and_retry_temperature() -> None:
+    agent = _agent(
+        parse_retries=1,
+        judge=True,
+        native_parse_retry_feedback=True,
+        native_parse_retry_temperature=0.2,
+        model_retry_delay_secs=0,
+    )
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [_seed("Allrecipes--0")],
+            "/v1/responses": [
+                _native_model_response("click", '{"coordinate":[0.2,0.3]}'),
+                _native_model_response("terminate", '{"status":"success","answer":"done"}'),
+            ],
+            "/step": [
+                {
+                    "operation_id": "step-0",
+                    "observation": _observation(),
+                    "execution_ok": True,
+                    "terminated": True,
+                }
+            ],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
+            "/verify_webvoyager": [
+                {
+                    "result": {
+                        "reward": 1.0,
+                        "raw_score": 1.0,
+                        "task_success": True,
+                        "valid_sample": True,
+                    }
+                }
+            ],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": [], "temperature": 0.1},
+        web_task=WebTask(
+            benchmark=WebBenchmark.WEBVOYAGER,
+            task_id="Allrecipes--0",
+            intent="Find a recipe",
+            start_urls=["https://example.test"],
+            runtime_profile="native_visual",
+            observation_profile="screenshot",
+            action_profile="native_toolcall",
+        ),
+    )
+
+    result = await agent.run(request, body)
+
+    model_bodies = [call_body for _server, path, call_body in calls if path == "/v1/responses"]
+    assert result.model_turns == 2
+    assert len(model_bodies) == 2
+    assert model_bodies[0].temperature == 0.1
+    assert model_bodies[1].temperature == 0.2
+    assert sum("input_image" in json.dumps(item.model_dump()) for item in model_bodies[1].input) == 1
+    assert any(
+        getattr(item, "role", None) == "user" and "arguments.actions" in str(item.content)
+        for item in model_bodies[1].input
+    )
 
 
 def _observation(url="https://example.test") -> dict:

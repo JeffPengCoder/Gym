@@ -13,12 +13,12 @@ import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.web.datasets import adapt_native_webvoyager_record
-from nemo_gym.web.models import WebTask
+from nemo_gym.web.models import WebAction, WebObservation, WebTask
 from nemo_gym.web.native_webvoyager import NATIVE_WEBVOYAGER_SYSTEM_PROMPT, NATIVE_WEBVOYAGER_TOOLS
-from resources_servers.webvoyager_judge.prompts import NATIVE_WEBVOYAGER_JUDGE_PROMPT
-from resources_servers.native_web.backend import NativeWebDriver
+from resources_servers.native_web.backend import NativeWebDriver, _type_browser_text
 from resources_servers.native_web.config import NativeWebResourcesServerConfig
 from resources_servers.native_web.session_manager import NativeWebSessionManager
+from resources_servers.webvoyager_judge.prompts import NATIVE_WEBVOYAGER_JUDGE_PROMPT
 
 
 NATIVE_WEB_ROOT = Path(__file__).resolve().parents[1]
@@ -87,6 +87,140 @@ def test_native_config_rejects_headless_execution() -> None:
 def test_native_config_rejects_multiple_sessions_on_one_display() -> None:
     with pytest.raises(ValueError, match="max_sessions=1"):
         _config(max_sessions=2)
+
+
+def test_native_text_input_splits_special_keys() -> None:
+    events = []
+
+    class _PyAutoGUI:
+        @staticmethod
+        def write(text, *, interval):
+            events.append(("write", text, interval))
+
+        @staticmethod
+        def press(key):
+            events.append(("press", key))
+
+        @staticmethod
+        def hotkey(*keys):
+            events.append(("hotkey", *keys))
+
+    _type_browser_text(_PyAutoGUI(), "a\nb\t<c")
+
+    assert events == [
+        ("write", "a", 0.01),
+        ("press", "enter"),
+        ("write", "b", 0.01),
+        ("press", "tab"),
+        ("hotkey", "shift", ","),
+        ("write", "c", 0.01),
+    ]
+
+
+def test_native_text_input_uses_clipboard_for_unicode(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        "resources_servers.native_web.backend._paste_unicode",
+        lambda _pyautogui, text: calls.append(text),
+    )
+
+    _type_browser_text(object(), "北京")
+
+    assert calls == ["北京"]
+
+
+def test_native_action_error_can_be_returned_for_policy_recovery(monkeypatch) -> None:
+    driver = NativeWebDriver(_config(terminate_on_action_error=False, action_delay_seconds=0), "session", object())
+    driver._page = object()
+    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    driver._observation = WebObservation.model_validate(
+        {
+            "goal": [],
+            "screenshot": {"data_url": "data:image/png;base64,abc"},
+            "url": "https://example.test",
+        }
+    )
+    monkeypatch.setattr(driver, "_execute_call", lambda *_args: (_ for _ in ()).throw(ValueError("bad action")))
+    monkeypatch.setattr(driver, "_maybe_solve_captcha", lambda _phase: False)
+    monkeypatch.setattr(
+        driver,
+        "_capture",
+        lambda: driver._observation.model_copy(
+            update={
+                "last_action": driver._last_action,
+                "last_action_error": driver._last_error,
+            }
+        ),
+    )
+
+    result = driver.step(
+        WebAction.model_validate(
+            {
+                "name": "computer",
+                "script": "",
+                "arguments": {
+                    "calls": [
+                        {
+                            "name": "computer",
+                            "arguments": {"actions": [{"action": "wait", "duration": 1}]},
+                        }
+                    ]
+                },
+            }
+        )
+    )
+
+    assert result.execution_ok is False
+    assert result.terminated is False
+    assert result.observation.last_action_error == "ValueError: bad action"
+
+
+def test_native_driver_validates_entire_batch_before_side_effect(monkeypatch) -> None:
+    driver = NativeWebDriver(_config(terminate_on_action_error=False, action_delay_seconds=0), "session", object())
+    driver._page = object()
+    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    driver._observation = WebObservation.model_validate(
+        {
+            "goal": [],
+            "screenshot": {"data_url": "data:image/png;base64,abc"},
+            "url": "https://example.test",
+        }
+    )
+    executed = []
+    monkeypatch.setattr(driver, "_execute_computer", lambda action: executed.append(action))
+    monkeypatch.setattr(driver, "_maybe_solve_captcha", lambda _phase: False)
+    monkeypatch.setattr(
+        driver,
+        "_capture",
+        lambda: driver._observation.model_copy(update={"last_action_error": driver._last_error}),
+    )
+
+    result = driver.step(
+        WebAction.model_validate(
+            {
+                "name": "computer",
+                "script": "",
+                "arguments": {
+                    "calls": [
+                        {
+                            "name": "computer",
+                            "arguments": {
+                                "actions": [
+                                    {"action": "left_click", "coordinate": [0.2, 0.3]},
+                                    {"action": "left_click", "coordinate": [2, 3]},
+                                ]
+                            },
+                        }
+                    ]
+                },
+            }
+        )
+    )
+
+    assert result.execution_ok is False
+    assert result.terminated is False
+    assert executed == []
+    assert "action[1]" in result.observation.last_action_error
 
 
 def test_native_component_declares_parent_gym_runtime() -> None:

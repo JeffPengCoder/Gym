@@ -6,11 +6,15 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import signal
+import subprocess
 import time
 from collections import deque
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from nemo_gym.web.actions import parse_native_tool_calls
 from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.models import (
     WebAction,
@@ -67,6 +71,8 @@ PRINT_INTERCEPT_SCRIPT = """(() => {
         window.__webvoyagerPrintCalls.push({url: window.location.href, timestamp: Date.now()});
     };
 })();"""
+SPECIAL_TEXT_KEYS = {"\n": "enter", "\t": "tab"}
+SHIFT_TEXT_KEYS = {"<": ","}
 
 
 def _url_origin(url: str) -> str:
@@ -77,6 +83,80 @@ def _url_origin(url: str) -> str:
         return "unknown"
     port = f":{parsed.port}" if parsed.port else ""
     return f"{parsed.scheme or 'unknown'}://{parsed.hostname}{port}"
+
+
+def _stop_clipboard_owner(process: subprocess.Popen[bytes] | None) -> None:
+    if process is None:
+        return
+    try:
+        process.wait(timeout=0.5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        process.wait(timeout=0.5)
+
+
+def _paste_unicode(pyautogui: Any, text: str) -> None:
+    xclip = shutil.which("xclip")
+    if xclip is None:
+        raise RuntimeError("xclip is required for Unicode browser text input")
+    process = subprocess.Popen(
+        [xclip, "-selection", "clipboard", "-in"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    if process.stdin is None:
+        raise RuntimeError("xclip stdin pipe was not created")
+    try:
+        process.stdin.write(text.encode("utf-8"))
+        process.stdin.close()
+        time.sleep(0.1)
+        if process.poll() not in {None, 0}:
+            raise RuntimeError(f"xclip exited before paste with code {process.returncode}")
+        pyautogui.hotkey("ctrl", "v")
+        time.sleep(0.5)
+    finally:
+        _stop_clipboard_owner(process)
+
+
+def _type_browser_text(pyautogui: Any, text: str) -> None:
+    """Type text without losing Unicode or interpreting newlines as glyphs."""
+
+    buffer: list[str] = []
+
+    def flush() -> None:
+        if not buffer:
+            return
+        chunk = "".join(buffer)
+        if chunk.isascii():
+            pyautogui.write(chunk, interval=0.01)
+        else:
+            _paste_unicode(pyautogui, chunk)
+        buffer.clear()
+
+    for character in text:
+        if character in SPECIAL_TEXT_KEYS:
+            flush()
+            pyautogui.press(SPECIAL_TEXT_KEYS[character])
+        elif character in SHIFT_TEXT_KEYS:
+            flush()
+            pyautogui.hotkey("shift", SHIFT_TEXT_KEYS[character])
+        else:
+            buffer.append(character)
+    flush()
 
 
 class NativeWebDriver:
@@ -178,8 +258,7 @@ class NativeWebDriver:
         self._maybe_solve_captcha("initial")
         self._observation = self._capture()
         LOG.info(
-            "event=native_browser_reset_complete session=%s task=%s origin=%s tabs=%d "
-            "elapsed_seconds=%.3f",
+            "event=native_browser_reset_complete session=%s task=%s origin=%s tabs=%d elapsed_seconds=%.3f",
             self.session_id,
             task.task_id,
             _url_origin(self._observation.url),
@@ -218,12 +297,27 @@ class NativeWebDriver:
             action.terminal,
         )
         try:
+            validated_action = parse_native_tool_calls(
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": call.get("id"),
+                        "name": call.get("name"),
+                        "arguments": call.get("arguments"),
+                    }
+                    for call in calls
+                    if isinstance(call, dict)
+                ],
+                max_computer_actions=self.config.max_computer_actions,
+            )
+            if validated_action.terminal != action.terminal:
+                raise ValueError("native action terminal flag does not match its tool calls")
+            calls = validated_action.arguments["calls"]
             for call in calls:
                 call_started = time.monotonic()
                 self._execute_call(call["name"], call.get("arguments") or {})
                 LOG.info(
-                    "event=native_browser_tool_complete session=%s task=%s step=%d tool=%s "
-                    "elapsed_seconds=%.3f",
+                    "event=native_browser_tool_complete session=%s task=%s step=%d tool=%s elapsed_seconds=%.3f",
                     self.session_id,
                     self._task.task_id if self._task is not None else "unknown",
                     self._step,
@@ -252,6 +346,7 @@ class NativeWebDriver:
             time.sleep(self.config.action_delay_seconds)
             self._maybe_solve_captcha("before post-action screenshot")
             self._observation = self._capture()
+        terminated = action.terminal or (not execution_ok and self.config.terminate_on_action_error)
         LOG.info(
             "event=native_browser_step_complete session=%s task=%s step=%d execution_ok=%s "
             "terminated=%s origin=%s elapsed_seconds=%.3f",
@@ -259,14 +354,14 @@ class NativeWebDriver:
             self._task.task_id if self._task is not None else "unknown",
             self._step,
             execution_ok,
-            action.terminal or not execution_ok,
+            terminated,
             _url_origin(self._observation.url) if self._observation is not None else "none",
             time.monotonic() - started,
         )
         return WebStepResult(
             observation=self._observation,
             execution_ok=execution_ok,
-            terminated=action.terminal or not execution_ok,
+            terminated=terminated,
             info=(
                 {"action_error": self._last_error, "native_status": "error"}
                 if self._last_error
@@ -348,8 +443,7 @@ class NativeWebDriver:
             # server crash. Keep the live page available to the agent and let
             # the normal task/judge path determine the outcome.
             LOG.warning(
-                "event=captcha_solver_deferred session=%s task=%s step=%d phase=%s "
-                "origin=%s error_type=%s",
+                "event=captcha_solver_deferred session=%s task=%s step=%d phase=%s origin=%s error_type=%s",
                 self.session_id,
                 self._task.task_id if self._task is not None else "unknown",
                 self._step,
@@ -399,8 +493,7 @@ class NativeWebDriver:
         ]
         if screenshot.artifact is not None:
             LOG.info(
-                "event=native_browser_screenshot session=%s task=%s step=%d origin=%s "
-                "bytes=%d sha256=%s",
+                "event=native_browser_screenshot session=%s task=%s step=%d origin=%s bytes=%d sha256=%s",
                 self.session_id,
                 self._task.task_id if self._task is not None else "unknown",
                 self._step,
@@ -485,7 +578,16 @@ class NativeWebDriver:
         elif name == "mouse_move":
             pyautogui.moveTo(*point)
         elif name == "type":
-            pyautogui.write(str(spec.get("text", "")), interval=0.01)
+            text = str(spec.get("text", ""))
+            LOG.info(
+                "event=native_browser_type session=%s task=%s step=%d characters=%d unicode=%s",
+                self.session_id,
+                self._task.task_id if self._task is not None else "unknown",
+                self._step,
+                len(text),
+                not text.isascii(),
+            )
+            _type_browser_text(pyautogui, text)
         elif name == "key_press":
             keys = [str(key).lower() for key in spec.get("keys") or []]
             if not keys:

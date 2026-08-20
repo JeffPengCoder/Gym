@@ -88,6 +88,120 @@ def test_parses_native_computer_and_terminal_tool_calls() -> None:
     assert action.arguments["calls"][0]["arguments"]["actions"][0]["action"] == "left_click"
     assert action.terminal is True
     assert action.answer == "done"
+    assert action.metadata["native_parse"]["recovered"] is False
+
+
+def test_native_robust_mode_decodes_actions_string_and_records_recovery() -> None:
+    action = parse_native_tool_calls(
+        [
+            {
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "computer",
+                "arguments": '{"actions":"[{\\"action\\":\\"left_click\\",\\"coordinate\\":[0.25,0.75]}]"}',
+            }
+        ],
+        recovery="decode_string",
+    )
+
+    assert action.arguments["calls"][0]["arguments"]["actions"][0]["action"] == "left_click"
+    assert action.metadata["native_parse"]["recovered"] is True
+    assert action.metadata["native_parse"]["calls"][0]["recovery_mode"] == "decoded_inner_string"
+
+
+def test_native_robust_mode_repairs_only_one_missing_closing_bracket() -> None:
+    action = parse_native_tool_calls(
+        [
+            {
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "computer",
+                "arguments": (
+                    '{"actions":"[{\\"action\\":\\"left_click\\",'
+                    '\\"coordinate\\":[0.325,0.5155]},'
+                    '{\\"action\\":\\"type\\",\\"text\\":\\"Stockholm\\"}"}'
+                ),
+            }
+        ],
+        recovery="repair_single_closing_bracket",
+    )
+
+    actions = action.arguments["calls"][0]["arguments"]["actions"]
+    assert [item["action"] for item in actions] == ["left_click", "type"]
+    assert action.metadata["native_parse"]["calls"][0]["recovery_mode"] == "closed_one_missing_bracket"
+
+
+def test_native_alignment_mode_still_rejects_actions_string() -> None:
+    with pytest.raises(ActionParseError, match="non-empty actions list"):
+        parse_native_tool_calls(
+            [
+                {
+                    "type": "function_call",
+                    "name": "computer",
+                    "arguments": '{"actions":"[{\\"action\\":\\"wait\\",\\"duration\\":1}]"}',
+                }
+            ]
+        )
+
+
+def test_native_recovery_rejects_non_local_json_damage() -> None:
+    with pytest.raises(ActionParseError, match="not eligible"):
+        parse_native_tool_calls(
+            [
+                {
+                    "type": "function_call",
+                    "name": "computer",
+                    "arguments": '{"actions":"[{\\"action\\":\\"left_click\\",\\"coordinate\\":[0.2,0.3}"}',
+                }
+            ],
+            recovery="repair_single_closing_bracket",
+        )
+
+
+def test_native_parser_validates_complete_batch_and_batch_limit() -> None:
+    with pytest.raises(ActionParseError, match=r"action\[1\].*coordinate"):
+        parse_native_tool_calls(
+            [
+                {
+                    "type": "function_call",
+                    "name": "computer",
+                    "arguments": (
+                        '{"actions":['
+                        '{"action":"left_click","coordinate":[0.2,0.3]},'
+                        '{"action":"left_click","coordinate":[2,3]}]}'
+                    ),
+                }
+            ]
+        )
+    with pytest.raises(ActionParseError, match="2-action batch limit"):
+        parse_native_tool_calls(
+            [
+                {
+                    "type": "function_call",
+                    "name": "computer",
+                    "arguments": (
+                        '{"actions":['
+                        '{"action":"wait","duration":1},'
+                        '{"action":"wait","duration":1},'
+                        '{"action":"wait","duration":1}]}'
+                    ),
+                }
+            ],
+            max_computer_actions=2,
+        )
+
+
+@pytest.mark.parametrize(
+    "name,arguments,match",
+    [
+        ("navigate", '{"url":"example.com"}', "must use http"),
+        ("tabs_focus", '{"tab_id":-1}', "non-negative integer"),
+        ("terminate", '{"status":"done"}', "success or failure"),
+    ],
+)
+def test_native_parser_validates_tool_arguments(name, arguments, match) -> None:
+    with pytest.raises(ActionParseError, match=match):
+        parse_native_tool_calls([{"type": "function_call", "name": name, "arguments": arguments}])
 
 
 @pytest.mark.parametrize(

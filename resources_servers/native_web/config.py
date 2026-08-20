@@ -19,6 +19,8 @@ class NativeWebResourcesServerConfig(BrowserGymWebResourcesServerConfig):
     viewport_width: int = Field(default=1920, ge=640)
     viewport_height: int = Field(default=1080, ge=480)
     action_delay_seconds: float = Field(default=2.0, ge=0, le=30)
+    terminate_on_action_error: bool = True
+    max_computer_actions: int = Field(default=20, ge=1, le=100)
     browser_proxy_env: str = "WA_BROWSER_PROXY_SERVER"
     captcha_api_key_env: str = "CAPSOLVER_API_KEY"
     captcha_provider_env: str = "WA_CAPTCHA_PROVIDER"

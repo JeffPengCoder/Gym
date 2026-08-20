@@ -128,6 +128,7 @@ class WebAction(BaseModel):
     terminal: bool = False
     answer: Optional[str] = None
     raw_model_output: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class WebStepResult(BaseModel):

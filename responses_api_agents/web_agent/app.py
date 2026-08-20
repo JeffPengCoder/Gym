@@ -54,6 +54,13 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     webvoyager_judge_server: Optional[ResourcesServerRef] = None
     max_steps: int = Field(default=15, ge=1, le=200)
     max_parse_retries: int = Field(default=2, ge=0, le=10)
+    native_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict"
+    native_max_computer_actions: int = Field(default=20, ge=1, le=100)
+    native_parse_retry_feedback: bool = False
+    native_parse_retry_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    repeated_action_warning_threshold: int = Field(default=0, ge=0, le=20)
+    repeated_action_window: int = Field(default=5, ge=1, le=50)
+    max_consecutive_execution_failures: int = Field(default=3, ge=1, le=20)
     model_turn_max_retries: int = Field(default=0, ge=0, le=10)
     model_retry_delay_secs: float = Field(default=1.0, ge=0.0, le=60.0)
     max_image_history: int = Field(default=3, ge=1, le=20)
@@ -123,10 +130,51 @@ def _extract_output_text(response: NeMoGymResponse) -> str:
     return "\n".join(part for part in parts if part).strip()
 
 
-def _parse_response_action(response: NeMoGymResponse, profile: WebActionProfile):
+def _parse_response_action(
+    response: NeMoGymResponse,
+    profile: WebActionProfile,
+    *,
+    native_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict",
+    native_max_computer_actions: int = 20,
+):
     if profile == WebActionProfile.NATIVE_TOOLCALL:
-        return parse_native_tool_calls(response.output)
+        return parse_native_tool_calls(
+            response.output,
+            recovery=native_action_recovery,
+            max_computer_actions=native_max_computer_actions,
+        )
     return parse_model_action(_extract_output_text(response), profile)
+
+
+def _native_parse_retry_messages(response: NeMoGymResponse, error: ActionParseError) -> list[Any]:
+    """Return parser feedback without copying the current screenshot."""
+
+    invalid_items: list[dict[str, Any]] = []
+    for item in response.output:
+        item_type = getattr(item, "type", None)
+        if item_type == "function_call":
+            invalid_items.append(
+                {
+                    "type": "function_call",
+                    "name": getattr(item, "name", ""),
+                    "arguments": getattr(item, "arguments", ""),
+                }
+            )
+        elif item_type == "message":
+            invalid_items.append({"type": "message", "content": _extract_output_text(response)})
+    invalid_text = json.dumps(invalid_items, ensure_ascii=False, separators=(",", ":"))[-8000:]
+    return [
+        NeMoGymEasyInputMessage(role="assistant", content=invalid_text or "<empty model response>"),
+        NeMoGymEasyInputMessage(
+            role="user",
+            content=(
+                f"The previous browser tool response was invalid: {str(error)[-2000:]}. "
+                "Return a corrected call using only the declared tools. For browser clicks, typing, "
+                "keys, scrolling, dragging, or waiting, call `computer` and make "
+                "`arguments.actions` a JSON array of action objects, not a quoted string."
+            ),
+        ),
+    ]
 
 
 def _http_error_payload(exc: Exception) -> dict[str, Any]:
@@ -233,6 +281,32 @@ def _action_call_names(action: Any) -> str:
     calls = getattr(action, "arguments", {}).get("calls", [])
     names = [str(call.get("name", "unknown")) for call in calls if isinstance(call, dict)]
     return ",".join(names) or getattr(action, "name", "unknown")
+
+
+def _native_recovery_modes(action: Any) -> str:
+    metadata = getattr(action, "metadata", {})
+    records = metadata.get("native_parse", {}).get("calls", []) if isinstance(metadata, dict) else []
+    modes = [str(record.get("recovery_mode", "strict")) for record in records if isinstance(record, dict)]
+    return ",".join(modes) or "strict"
+
+
+def _repeatable_action_signature(action: Any) -> str | None:
+    if getattr(action, "terminal", False):
+        return None
+    calls = getattr(action, "arguments", {}).get("calls", [])
+    if not calls:
+        return None
+    if all(
+        isinstance(call, dict)
+        and call.get("name") == "computer"
+        and all(
+            isinstance(item, dict) and item.get("action") == "wait"
+            for item in (call.get("arguments") or {}).get("actions", [])
+        )
+        for call in calls
+    ):
+        return None
+    return json.dumps(calls, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _redact_old_images(
@@ -390,7 +464,9 @@ class WebAgent(SimpleResponsesAPIAgent):
         environment_steps = 0
         model_turns = 0
         execution_failures = 0
+        consecutive_execution_failures = 0
         verifier_result: WebVerifierResult | None = None
+        recent_action_signatures: deque[str] = deque(maxlen=self.config.repeated_action_window)
 
         base_body = body.responses_create_params.model_copy(deep=True)
         if isinstance(base_body.input, str):
@@ -409,8 +485,7 @@ class WebAgent(SimpleResponsesAPIAgent):
             seeded = True
             observation = seed_data.observation
             LOG.info(
-                "event=web_seed_complete benchmark=%s task=%s session=%s origin=%s screenshot=%s "
-                "elapsed_seconds=%.3f",
+                "event=web_seed_complete benchmark=%s task=%s session=%s origin=%s screenshot=%s elapsed_seconds=%.3f",
                 task.benchmark.value,
                 task.task_id,
                 seed_data.session_id,
@@ -432,23 +507,29 @@ class WebAgent(SimpleResponsesAPIAgent):
             rollout_finished = False
             for step_index in range(self.config.max_steps):
                 action = None
+                parse_feedback: list[Any] = []
                 for parse_attempt in range(self.config.max_parse_retries + 1):
                     model_input = _redact_old_images(
-                        list(base_body.input) + trajectory,
+                        list(base_body.input) + trajectory + parse_feedback,
                         self.config.max_image_history,
                         redact_observation_text=self.config.redact_old_visual_observations,
                         append_redaction_notice=task.action_profile != WebActionProfile.NATIVE_TOOLCALL,
                     )
-                    model_body = base_body.model_copy(update={"input": model_input})
+                    model_updates: dict[str, Any] = {"input": model_input}
+                    if parse_attempt > 0 and self.config.native_parse_retry_temperature is not None:
+                        model_updates["temperature"] = self.config.native_parse_retry_temperature
+                    model_body = base_body.model_copy(update=model_updates)
                     LOG.info(
                         "event=web_model_turn_start benchmark=%s task=%s step=%d parse_attempt=%d "
-                        "input_items=%d input_images=%d",
+                        "input_items=%d input_images=%d retry_feedback=%s temperature=%s",
                         task.benchmark.value,
                         task.task_id,
                         step_index,
                         parse_attempt,
                         len(model_input),
                         _input_image_count(model_input),
+                        bool(parse_feedback),
+                        getattr(model_body, "temperature", None),
                     )
                     model_error: Exception | None = None
                     for model_attempt in range(self.config.model_turn_max_retries + 1):
@@ -511,19 +592,27 @@ class WebAgent(SimpleResponsesAPIAgent):
                     if task.action_profile != WebActionProfile.NATIVE_TOOLCALL:
                         trajectory.extend(model_response.output)
                     try:
-                        action = _parse_response_action(model_response, task.action_profile)
+                        action = _parse_response_action(
+                            model_response,
+                            task.action_profile,
+                            native_action_recovery=self.config.native_action_recovery,
+                            native_max_computer_actions=self.config.native_max_computer_actions,
+                        )
                         if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
                             # The reference runner adds only a successfully
                             # parsed assistant tool-call turn to history.
                             trajectory.extend(model_response.output)
                         LOG.info(
-                            "event=web_action_parsed benchmark=%s task=%s step=%d action=%s calls=%s terminal=%s",
+                            "event=web_action_parsed benchmark=%s task=%s step=%d parse_attempt=%d "
+                            "action=%s calls=%s terminal=%s recovery_modes=%s",
                             task.benchmark.value,
                             task.task_id,
                             step_index,
+                            parse_attempt,
                             action.name,
                             _action_call_names(action),
                             action.terminal,
+                            _native_recovery_modes(action),
                         )
                         break
                     except ActionParseError as exc:
@@ -548,6 +637,8 @@ class WebAgent(SimpleResponsesAPIAgent):
                                 )
                             break
                         if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
+                            if self.config.native_parse_retry_feedback:
+                                parse_feedback = _native_parse_retry_messages(model_response, exc)
                             await asyncio.sleep(self.config.model_retry_delay_secs)
                         else:
                             trajectory.append(
@@ -592,6 +683,9 @@ class WebAgent(SimpleResponsesAPIAgent):
                 environment_steps += 1
                 if not step_data.execution_ok:
                     execution_failures += 1
+                    consecutive_execution_failures += 1
+                else:
+                    consecutive_execution_failures = 0
                 observation = step_data.observation
                 terminated = step_data.terminated
                 truncated = step_data.truncated
@@ -614,6 +708,17 @@ class WebAgent(SimpleResponsesAPIAgent):
                 if action.terminal or terminated or truncated:
                     rollout_finished = True
                     break
+                if consecutive_execution_failures >= self.config.max_consecutive_execution_failures:
+                    LOG.warning(
+                        "event=web_execution_failure_limit benchmark=%s task=%s step=%d consecutive=%d",
+                        task.benchmark.value,
+                        task.task_id,
+                        step_index,
+                        consecutive_execution_failures,
+                    )
+                    truncated = True
+                    rollout_finished = True
+                    break
                 trajectory.append(
                     render_observation(
                         observation,
@@ -623,14 +728,40 @@ class WebAgent(SimpleResponsesAPIAgent):
                         action_prompt_profile=self.config.action_prompt_profile,
                     )
                 )
+                signature = _repeatable_action_signature(action)
+                if signature is not None:
+                    recent_action_signatures.append(signature)
+                    occurrences = sum(item == signature for item in recent_action_signatures)
+                    if (
+                        self.config.repeated_action_warning_threshold > 0
+                        and occurrences >= self.config.repeated_action_warning_threshold
+                    ):
+                        LOG.warning(
+                            "event=web_repeated_action_warning benchmark=%s task=%s step=%d occurrences=%d window=%d",
+                            task.benchmark.value,
+                            task.task_id,
+                            step_index,
+                            occurrences,
+                            len(recent_action_signatures),
+                        )
+                        trajectory.append(
+                            NeMoGymEasyInputMessage(
+                                role="user",
+                                content=(
+                                    "Recovery check: the same non-trivial browser action has repeated "
+                                    f"{occurrences} times in the last {len(recent_action_signatures)} actions. "
+                                    "Re-read the latest screenshot and choose a different verifiable action "
+                                    "unless the page is visibly progressing."
+                                ),
+                            )
+                        )
 
             if not rollout_finished:
                 truncated = True
 
             evaluate_started = time.monotonic()
             LOG.info(
-                "event=web_environment_evaluate_start benchmark=%s task=%s final_answer_present=%s "
-                "screenshots=%d",
+                "event=web_environment_evaluate_start benchmark=%s task=%s final_answer_present=%s screenshots=%d",
                 task.benchmark.value,
                 task.task_id,
                 bool(final_answer),
@@ -795,8 +926,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                     raise
                 sleep_for = min(delay, self.config.judge_retry_max_delay_secs)
                 LOG.warning(
-                    "event=web_judge_retry benchmark=%s task=%s attempt=%d error_type=%s "
-                    "sleep_seconds=%.1f",
+                    "event=web_judge_retry benchmark=%s task=%s attempt=%d error_type=%s sleep_seconds=%.1f",
                     task.benchmark.value,
                     task.task_id,
                     attempt + 1,

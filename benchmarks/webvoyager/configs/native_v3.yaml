@@ -8,6 +8,13 @@ config_paths:
 
 native_webvoyager_resources:
   _inherit_from: native_web
+  resources_servers:
+    native_web:
+      # Robust evaluation keeps a failed UI action visible in the next
+      # observation so the policy can correct it. Alignment mode remains the
+      # default in the reusable native_web component.
+      terminate_on_action_error: false
+      max_computer_actions: 20
 
 native_webvoyager_judge:
   _inherit_from: webvoyager_native_v3_judge
@@ -24,6 +31,13 @@ native_webvoyager_agent:
         name: native_webvoyager_judge
       max_steps: 100
       max_parse_retries: 2
+      native_action_recovery: repair_single_closing_bracket
+      native_max_computer_actions: 20
+      native_parse_retry_feedback: true
+      native_parse_retry_temperature: 0.2
+      repeated_action_warning_threshold: 3
+      repeated_action_window: 5
+      max_consecutive_execution_failures: 3
       model_turn_max_retries: 2
       model_retry_delay_secs: 1.0
       max_image_history: 3
