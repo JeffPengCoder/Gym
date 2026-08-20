@@ -37,12 +37,19 @@ def test_native_v3_robust_evaluation_is_scoped_to_the_benchmark_profile() -> Non
     base_config = yaml.safe_load(
         (repo_root / "resources_servers/native_web/configs/native_web.yaml").read_text(encoding="utf-8")
     )["native_web"]["resources_servers"]["native_web"]
+    base_agent = yaml.safe_load(
+        (repo_root / "responses_api_agents/web_agent/configs/web_agent.yaml").read_text(encoding="utf-8")
+    )["web_agent"]["responses_api_agents"]["web_agent"]
 
     resources = config["native_webvoyager_resources"]["resources_servers"]["native_web"]
     agent = config["native_webvoyager_agent"]["responses_api_agents"]["web_agent"]
 
     assert base_config["terminate_on_action_error"] is True
     assert base_config["max_computer_actions"] == 20
+    assert base_agent["native_action_recovery"] == "strict"
+    assert base_agent["native_parse_retry_feedback"] is False
+    assert base_agent["native_parse_retry_temperature"] is None
+    assert base_agent["repeated_action_warning_threshold"] == 0
     assert resources["terminate_on_action_error"] is False
     assert resources["max_computer_actions"] == 20
     assert agent["native_action_recovery"] == "repair_single_closing_bracket"
