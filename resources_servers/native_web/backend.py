@@ -17,6 +17,7 @@ from urllib.parse import unquote, urlparse
 from nemo_gym.web.actions import parse_native_tool_calls
 from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.models import (
+    CAPTCHA_BUDGET_EXHAUSTED_STATUS,
     WebAction,
     WebArtifactRef,
     WebBenchmark,
@@ -73,6 +74,28 @@ PRINT_INTERCEPT_SCRIPT = """(() => {
 })();"""
 SPECIAL_TEXT_KEYS = {"\n": "enter", "\t": "tab"}
 SHIFT_TEXT_KEYS = {"<": ","}
+# The pinned native runner settles the initial start URL on domcontentloaded but
+# waits for `load` on every navigation the policy requests, so a tool-driven page
+# transition is screenshotted after its subresources land.
+RESET_WAIT_UNTIL = "domcontentloaded"
+NAVIGATION_WAIT_UNTIL = "load"
+# Transport-level navigation faults the reference runner retries in place. A
+# Playwright timeout is deliberately absent: it is a slow page, not a dropped
+# connection, and retrying it would multiply the wait.
+RETRYABLE_NAVIGATION_ERRORS = (
+    "net::ERR_EMPTY_RESPONSE",
+    "net::ERR_PROXY_CONNECTION_FAILED",
+    "net::ERR_TUNNEL_CONNECTION_FAILED",
+    "net::ERR_CONNECTION_CLOSED",
+    "net::ERR_CONNECTION_RESET",
+    "net::ERR_TIMED_OUT",
+)
+NAVIGATION_RETRY_DELAYS_S = (4, 4, 4, 8)
+
+
+def _is_retryable_navigation_error(exc: Exception) -> bool:
+    message = str(exc)
+    return "Page.goto:" in message and any(marker in message for marker in RETRYABLE_NAVIGATION_ERRORS)
 
 
 def _url_origin(url: str) -> str:
@@ -235,6 +258,10 @@ class NativeWebDriver:
         if proxy:
             context_kwargs["proxy"] = self._playwright_proxy(proxy)
         self._context = self._browser.new_context(**context_kwargs)
+        # One context-wide deadline, as the reference runner sets, instead of a
+        # per-navigation override. Every Playwright operation is then bounded.
+        self._context.set_default_timeout(self.config.default_timeout_ms)
+        self._context.set_default_navigation_timeout(self.config.default_timeout_ms)
         if proxy:
             try:
                 setattr(self._context, BROWSER_PROXY_CONFIG_ATTR, dict(context_kwargs["proxy"]))
@@ -258,7 +285,7 @@ class NativeWebDriver:
         self._captcha_budget_exhausted = False
         self._evidence.clear()
         if task.start_urls:
-            self._page.goto(task.start_urls[0], wait_until="domcontentloaded", timeout=120_000)
+            self._goto(self._page, task.start_urls[0], wait_until=RESET_WAIT_UNTIL)
         self._page.bring_to_front()
         time.sleep(self.config.action_delay_seconds)
         self._maybe_solve_captcha("initial")
@@ -374,15 +401,21 @@ class NativeWebDriver:
             _url_origin(self._observation.url) if self._observation is not None else "none",
             time.monotonic() - started,
         )
+        # An exhausted CAPTCHA budget is a site-access failure, not a policy
+        # outcome. The reference runner drops such a task from its scored set and
+        # re-runs it later, so report it under its own status instead of folding
+        # it into a normal action error that would still be judged.
+        if self._captcha_budget_exhausted:
+            info = {"action_error": self._last_error, "native_status": CAPTCHA_BUDGET_EXHAUSTED_STATUS}
+        elif self._last_error:
+            info = {"action_error": self._last_error, "native_status": "error"}
+        else:
+            info = {"native_status": "done" if action.terminal else "running"}
         return WebStepResult(
             observation=self._observation,
             execution_ok=execution_ok,
             terminated=terminated,
-            info=(
-                {"action_error": self._last_error, "native_status": "error"}
-                if self._last_error
-                else {"native_status": "done" if action.terminal else "running"}
-            ),
+            info=info,
         )
 
     def evaluate(self, final_answer: str | None = None) -> WebVerifierResult:
@@ -575,6 +608,37 @@ class NativeWebDriver:
     def _configure_page(page: Any) -> None:
         page.on("dialog", lambda dialog: dialog.accept())
 
+    def _goto(self, page: Any, url: str, *, wait_until: str) -> Any:
+        """Navigate, retrying the transport faults the reference runner retries.
+
+        Only ``page.goto`` is retried. The reference runner leaves history
+        navigation to a single attempt, and a retried ``go_back`` would move
+        through history twice.
+        """
+
+        attempts = len(NAVIGATION_RETRY_DELAYS_S) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return page.goto(url, wait_until=wait_until)
+            except Exception as exc:
+                if attempt >= attempts or not _is_retryable_navigation_error(exc):
+                    raise
+                delay_seconds = NAVIGATION_RETRY_DELAYS_S[attempt - 1]
+                LOG.warning(
+                    "event=native_browser_navigation_retry session=%s task=%s step=%d origin=%s "
+                    "attempt=%d/%d error_type=%s sleep_seconds=%d",
+                    self.session_id,
+                    self._task.task_id if self._task is not None else "unknown",
+                    self._step,
+                    _url_origin(url),
+                    attempt,
+                    attempts,
+                    type(exc).__name__,
+                    delay_seconds,
+                )
+                time.sleep(delay_seconds)
+        raise RuntimeError("navigation retry loop exited without a result")
+
     def _execute_call(self, name: str, arguments: dict[str, Any]) -> None:
         if name == "computer":
             for action in arguments["actions"]:
@@ -584,18 +648,18 @@ class NativeWebDriver:
             self._select_page(arguments.get("tab_id"))
             url = arguments["url"]
             if url == "back":
-                self._page.go_back(wait_until="domcontentloaded", timeout=120_000)
+                self._page.go_back(wait_until=NAVIGATION_WAIT_UNTIL)
             elif url == "forward":
-                self._page.go_forward(wait_until="domcontentloaded", timeout=120_000)
+                self._page.go_forward(wait_until=NAVIGATION_WAIT_UNTIL)
             else:
-                self._page.goto(url, wait_until="domcontentloaded", timeout=120_000)
+                self._goto(self._page, url, wait_until=NAVIGATION_WAIT_UNTIL)
             self._page.bring_to_front()
             return
         if name == "tabs_create":
             self._page = self._context.new_page()
             url = arguments.get("url", "about:blank")
             if url != "about:blank":
-                self._page.goto(url, wait_until="domcontentloaded", timeout=120_000)
+                self._goto(self._page, url, wait_until=NAVIGATION_WAIT_UNTIL)
             self._page.bring_to_front()
             return
         if name == "tabs_focus":

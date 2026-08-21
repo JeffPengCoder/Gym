@@ -57,8 +57,12 @@ def test_native_v3_robust_evaluation_is_scoped_to_the_benchmark_profile() -> Non
     assert agent["native_tool_alias_recovery"] == "webvoyager_v3"
     assert agent["native_parse_retry_feedback"] is True
     assert agent["native_parse_retry_temperature"] == 0.2
-    assert agent["repeated_action_warning_threshold"] == 3
     assert agent["max_consecutive_execution_failures"] == 3
+    # Every opt-in above repairs how an already-chosen action is decoded or
+    # executed. The repeat warning instead writes strategy advice into the
+    # policy's context, which the pinned reference never sends, so this profile
+    # leaves it off and keeps the trajectory comparable.
+    assert agent["repeated_action_warning_threshold"] == 0
 
 
 def test_native_summary_keeps_fixed_denominator_and_exposes_masked_failures() -> None:

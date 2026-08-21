@@ -19,6 +19,9 @@ class NativeWebResourcesServerConfig(BrowserGymWebResourcesServerConfig):
     viewport_width: int = Field(default=1920, ge=640)
     viewport_height: int = Field(default=1080, ge=480)
     action_delay_seconds: float = Field(default=2.0, ge=0, le=30)
+    # Context-wide Playwright deadline, matching the reference runner's
+    # PW_DEFAULT_TIMEOUT_MS. It bounds navigation and every other page operation.
+    default_timeout_ms: int = Field(default=45_000, ge=1_000, le=600_000)
     terminate_on_action_error: bool = True
     max_computer_actions: int = Field(default=20, ge=1, le=100)
     browser_proxy_env: str = "WA_BROWSER_PROXY_SERVER"

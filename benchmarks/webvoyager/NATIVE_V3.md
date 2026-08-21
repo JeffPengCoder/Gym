@@ -42,6 +42,24 @@ does not own model prompting or scoring.
   `vllm_model` config.
 - Judge: `gcp/google/gemini-3-flash-preview`, all trajectory screenshots,
   JSON `SUCCESS`/`FAILURE` verdict.
+- Browser timing: the start URL settles on `domcontentloaded`, every
+  policy-driven navigation settles on `load`, `page.goto` retries transport
+  faults after 4/4/4/8 s, and one 45 s context deadline bounds every Playwright
+  operation.
+- Policy transport: up to 20 attempts at 5 s for a single turn, so an unstable
+  endpoint does not mask a task the reference would have completed.
+
+The profile opts into bounded recovery for decoding and executing an action the
+policy already chose: inner-JSON and one-missing-bracket repair, unambiguous
+public-v3 tool aliases, parse-retry feedback at temperature 0.2, and a failed UI
+action left visible for correction. It deliberately does not enable the repeated
+-action hint, which would place harness-authored strategy in the policy's
+context that the pinned reference never sends.
+
+A browser that exhausts its CAPTCHA budget reports
+`native_status=captcha_budget_exhausted`; the agent masks that rollout as
+`failure_kind=captcha_budget_exhausted` rather than judging a forced stop, and
+the summarizer routes it to the cleanup wave.
 
 ## Required run inputs
 
@@ -56,6 +74,9 @@ does not own model prompting or scoring.
    tokenizer input.
 3. Start every native resource-server instance under a unique 1920x1080 Xvfb
    display. `max_sessions=1` is intentional: PyAutoGUI is display-global.
+   Install `xclip` in the browser image. PyAutoGUI cannot emit non-ASCII
+   characters, so the runtime pastes them through the X clipboard instead; a
+   missing `xclip` turns every non-ASCII `type` action into a step failure.
 4. Provide `WA_BROWSER_PROXY_SERVER` for the selected US-proxy domains.
 5. Provide `CAPSOLVER_API_KEY` and set `WA_CAPTCHA_PROVIDER=capsolver`. The
    built-in Turnstile/reCAPTCHA v2 integration is used unless an approved

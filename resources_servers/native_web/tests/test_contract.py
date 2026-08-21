@@ -13,9 +13,14 @@ import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.web.datasets import adapt_native_webvoyager_record
-from nemo_gym.web.models import WebAction, WebObservation, WebTask
+from nemo_gym.web.models import CAPTCHA_BUDGET_EXHAUSTED_STATUS, WebAction, WebObservation, WebTask
 from nemo_gym.web.native_webvoyager import NATIVE_WEBVOYAGER_SYSTEM_PROMPT, NATIVE_WEBVOYAGER_TOOLS
-from resources_servers.native_web.backend import NativeWebDriver, _type_browser_text
+from resources_servers.native_web.backend import (
+    NAVIGATION_RETRY_DELAYS_S,
+    NAVIGATION_WAIT_UNTIL,
+    NativeWebDriver,
+    _type_browser_text,
+)
 from resources_servers.native_web.config import NativeWebResourcesServerConfig
 from resources_servers.native_web.session_manager import NativeWebSessionManager
 from resources_servers.webvoyager_judge.prompts import NATIVE_WEBVOYAGER_JUDGE_PROMPT
@@ -341,3 +346,111 @@ def test_native_driver_terminates_without_a_second_solve_after_budget_exhaustion
     assert result.observation.last_action_error == (
         "RuntimeError: Captcha solver failed more than 0 times after VLM inference; aborting task at step 0"
     )
+    # The agent masks on this status instead of judging a forced stop.
+    assert result.info["native_status"] == CAPTCHA_BUDGET_EXHAUSTED_STATUS
+
+
+class _RecordingPage:
+    """Minimal Playwright page double that records navigation calls."""
+
+    def __init__(self, goto_errors: list[Exception] | None = None) -> None:
+        self.url = "https://example.test/"
+        self.goto_calls: list[tuple[str, str]] = []
+        self.history_calls: list[tuple[str, str]] = []
+        self._goto_errors = list(goto_errors or [])
+
+    def goto(self, url: str, wait_until: str = "load"):
+        self.goto_calls.append((url, wait_until))
+        if self._goto_errors:
+            raise self._goto_errors.pop(0)
+        return None
+
+    def go_back(self, wait_until: str = "load"):
+        self.history_calls.append(("back", wait_until))
+
+    def go_forward(self, wait_until: str = "load"):
+        self.history_calls.append(("forward", wait_until))
+
+    def bring_to_front(self) -> None:
+        return None
+
+
+def _navigation_driver() -> tuple[NativeWebDriver, _RecordingPage]:
+    driver = NativeWebDriver(_config(), "session-test", object())
+    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    page = _RecordingPage()
+    driver._page = page
+    return driver, page
+
+
+def test_policy_navigation_settles_on_load() -> None:
+    """The reference runner waits for `load` on every policy-driven navigation."""
+
+    driver, page = _navigation_driver()
+
+    driver._execute_call("navigate", {"url": "https://example.test/page"})
+    driver._execute_call("navigate", {"url": "back"})
+    driver._execute_call("navigate", {"url": "forward"})
+
+    assert NAVIGATION_WAIT_UNTIL == "load"
+    assert page.goto_calls == [("https://example.test/page", "load")]
+    assert page.history_calls == [("back", "load"), ("forward", "load")]
+
+
+def test_navigation_retries_transport_faults_then_succeeds(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("resources_servers.native_web.backend.time.sleep", sleeps.append)
+    driver = NativeWebDriver(_config(), "session-test", object())
+    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    page = _RecordingPage(
+        goto_errors=[
+            RuntimeError("Page.goto: net::ERR_CONNECTION_RESET at https://example.test/page"),
+            RuntimeError("Page.goto: net::ERR_EMPTY_RESPONSE at https://example.test/page"),
+        ]
+    )
+    driver._page = page
+
+    driver._execute_call("navigate", {"url": "https://example.test/page"})
+
+    assert len(page.goto_calls) == 3
+    assert sleeps == [NAVIGATION_RETRY_DELAYS_S[0], NAVIGATION_RETRY_DELAYS_S[1]]
+
+
+def test_navigation_does_not_retry_a_slow_page(monkeypatch) -> None:
+    """A Playwright timeout is a slow page, so retrying only multiplies the wait."""
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("resources_servers.native_web.backend.time.sleep", sleeps.append)
+    driver = NativeWebDriver(_config(), "session-test", object())
+    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    page = _RecordingPage(goto_errors=[RuntimeError("Page.goto: Timeout 45000ms exceeded")])
+    driver._page = page
+
+    with pytest.raises(RuntimeError, match="Timeout 45000ms exceeded"):
+        driver._execute_call("navigate", {"url": "https://example.test/page"})
+
+    assert len(page.goto_calls) == 1
+    assert sleeps == []
+
+
+def test_navigation_reraises_after_exhausting_retries(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("resources_servers.native_web.backend.time.sleep", sleeps.append)
+    driver = NativeWebDriver(_config(), "session-test", object())
+    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    attempts = len(NAVIGATION_RETRY_DELAYS_S) + 1
+    page = _RecordingPage(
+        goto_errors=[RuntimeError("Page.goto: net::ERR_TIMED_OUT") for _ in range(attempts)],
+    )
+    driver._page = page
+
+    with pytest.raises(RuntimeError, match="net::ERR_TIMED_OUT"):
+        driver._execute_call("navigate", {"url": "https://example.test/page"})
+
+    assert len(page.goto_calls) == attempts
+    assert sleeps == list(NAVIGATION_RETRY_DELAYS_S)
+
+
+def test_context_deadline_is_configurable_and_defaults_to_the_reference() -> None:
+    assert _config().default_timeout_ms == 45_000
+    assert _config(default_timeout_ms=90_000).default_timeout_ms == 90_000

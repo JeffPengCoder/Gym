@@ -36,11 +36,16 @@ native_webvoyager_agent:
       native_max_computer_actions: 20
       native_parse_retry_feedback: true
       native_parse_retry_temperature: 0.2
-      repeated_action_warning_threshold: 3
+      # Repeat detection stays observation-only. Injecting a recovery hint would
+      # place harness-authored strategy in the policy's context, which the pinned
+      # reference never sends and which a trained policy cannot rely on later.
+      repeated_action_warning_threshold: 0
       repeated_action_window: 5
       max_consecutive_execution_failures: 3
-      model_turn_max_retries: 2
-      model_retry_delay_secs: 1.0
+      # 20 policy attempts at 5 s, matching the reference runner, so an unstable
+      # endpoint does not mask samples the reference would have completed.
+      model_turn_max_retries: 19
+      model_retry_delay_secs: 5.0
       max_image_history: 3
       judge_max_screenshots: 200
       visual_observation_text: none

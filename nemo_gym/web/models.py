@@ -10,6 +10,12 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+# Wire value for ``WebStepResult.info["native_status"]`` when a browser runtime
+# has spent its CAPTCHA solving budget. The rollout is then a site-access
+# failure rather than a policy outcome, so agents mask it instead of judging it.
+CAPTCHA_BUDGET_EXHAUSTED_STATUS = "captcha_budget_exhausted"
+
+
 class WebBenchmark(StrEnum):
     WEBARENA = "webarena"
     VISUALWEBARENA = "visualwebarena"

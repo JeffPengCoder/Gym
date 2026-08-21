@@ -769,3 +769,55 @@ async def test_run_classifies_missing_evaluator_as_terminal_configuration_failur
     assert dumped["_ng_failure_terminal"] is True
     assert result.verifier_result.metadata["error_kind"] == "evaluator_configuration"
     agent._post_json.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_exhausted_captcha_budget_is_masked_instead_of_judged(caplog):
+    """A site the browser cannot reach makes the policy's work unmeasurable."""
+
+    agent = _agent(judge=True)
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [_seed("Allrecipes--0")],
+            "/v1/responses": [_model_response("Thought: keep going\nAction: Click [7]")],
+            "/step": [
+                {
+                    "operation_id": "step-0",
+                    "observation": _observation("https://example.test/challenge"),
+                    "execution_ok": False,
+                    "terminated": True,
+                    "info": {
+                        "action_error": "RuntimeError: Captcha solver failed more than 3 times",
+                        "native_status": "captcha_budget_exhausted",
+                    },
+                }
+            ],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": "Solve"},
+        web_task=WebTask(
+            benchmark=WebBenchmark.WEBVOYAGER,
+            task_id="Allrecipes--0",
+            intent="Find the answer",
+            start_urls=["https://example.test"],
+            action_profile="webvoyager_legacy",
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.responses_api_agents.web_agent"):
+        result = await agent.run(request, body)
+
+    assert result.mask_sample is True
+    assert result.failure_kind == "captcha_budget_exhausted"
+    assert result.reward == 0.0
+    assert result.task_success is False
+    # Judging a forced stop would score a site-access failure as a policy failure.
+    assert "/verify_webvoyager" not in [path for _server, path, _body in calls]
+    assert "/close" in [path for _server, path, _body in calls]
+    assert "event=web_environment_access_failed" in "\n".join(record.getMessage() for record in caplog.records)

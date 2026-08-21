@@ -35,6 +35,7 @@ from nemo_gym.web.api_models import (
     WebStepResponse,
 )
 from nemo_gym.web.models import (
+    CAPTCHA_BUDGET_EXHAUSTED_STATUS,
     WebActionProfile,
     WebArtifactRef,
     WebBenchmark,
@@ -62,7 +63,9 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     repeated_action_warning_threshold: int = Field(default=0, ge=0, le=20)
     repeated_action_window: int = Field(default=5, ge=1, le=50)
     max_consecutive_execution_failures: int = Field(default=3, ge=1, le=20)
-    model_turn_max_retries: int = Field(default=0, ge=0, le=10)
+    # The reference native runner retries one policy call up to 20 times before
+    # giving up, so the ceiling has to admit that budget.
+    model_turn_max_retries: int = Field(default=0, ge=0, le=32)
     model_retry_delay_secs: float = Field(default=1.0, ge=0.0, le=60.0)
     max_image_history: int = Field(default=3, ge=1, le=20)
     judge_max_screenshots: int = Field(default=3, ge=1, le=200)
@@ -475,6 +478,7 @@ class WebAgent(SimpleResponsesAPIAgent):
         execution_failures = 0
         consecutive_execution_failures = 0
         verifier_result: WebVerifierResult | None = None
+        environment_failure_kind: str | None = None
         recent_action_signatures: deque[str] = deque(maxlen=self.config.repeated_action_window)
 
         base_body = body.responses_create_params.model_copy(deep=True)
@@ -713,6 +717,19 @@ class WebAgent(SimpleResponsesAPIAgent):
                 )
                 if not (task.action_profile == WebActionProfile.NATIVE_TOOLCALL and terminated):
                     self._remember_evidence(observation, screenshot_history, url_history)
+                if step_data.info.get("native_status") == CAPTCHA_BUDGET_EXHAUSTED_STATUS:
+                    # The browser could not reach the site, so nothing the policy
+                    # did is measurable. Mask instead of scoring a forced stop.
+                    environment_failure_kind = CAPTCHA_BUDGET_EXHAUSTED_STATUS
+                    LOG.warning(
+                        "event=web_environment_access_failed benchmark=%s task=%s step=%d failure_kind=%s",
+                        task.benchmark.value,
+                        task.task_id,
+                        step_index,
+                        environment_failure_kind,
+                    )
+                    rollout_finished = True
+                    break
                 if action.terminal:
                     final_answer = action.answer
                 if action.terminal or terminated or truncated:
@@ -837,7 +854,7 @@ class WebAgent(SimpleResponsesAPIAgent):
         # browser before the potentially slow VLM call so one judged episode
         # does not occupy scarce browser/site capacity. WebArena-family native
         # evaluators still run above while their live page is available.
-        if task.benchmark == WebBenchmark.WEBVOYAGER:
+        if task.benchmark == WebBenchmark.WEBVOYAGER and environment_failure_kind is None:
             judge_started = time.monotonic()
             LOG.info(
                 "event=web_judge_start benchmark=%s task=%s screenshots=%d urls=%d final_answer_present=%s",
@@ -868,6 +885,11 @@ class WebAgent(SimpleResponsesAPIAgent):
 
         if last_model_response is None:
             raise RuntimeError("web rollout ended before the policy returned a response")
+        if environment_failure_kind is not None:
+            verifier_result = WebVerifierResult(
+                valid_sample=False,
+                failure_kind=environment_failure_kind,
+            )
         if verifier_result is None:
             verifier_result = WebVerifierResult(
                 valid_sample=False,
