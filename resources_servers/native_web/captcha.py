@@ -172,35 +172,37 @@ class CapSolverBrowserSolver:
         challenge_signal = self._challenge_signal(page)
         blocking_challenge = challenge_signal is not None
         challenge = self._challenge(page)
-        if challenge is None:
-            if blocking_challenge:
-                LOG.error(
-                    "event=captcha_unresolved provider=capsolver phase=%s origin=%s "
-                    "reason=site_key_missing signal=%s",
+        if not blocking_challenge:
+            if challenge is None:
+                LOG.debug(
+                    "event=captcha_scan provider=capsolver phase=%s origin=%s "
+                    "challenge=none status=clear",
                     phase,
                     origin,
-                    challenge_signal,
                 )
-                raise RuntimeError("CAPTCHA challenge detected but no supported site key was found")
-            LOG.debug(
-                "event=captcha_scan provider=capsolver phase=%s origin=%s challenge=none",
-                phase,
-                origin,
-            )
-            return False
-        kind, site_key = challenge
-        identity = (origin, kind, _fingerprint(site_key))
-        if identity in self._completed_challenges:
-            if not blocking_challenge:
+            else:
+                kind, site_key = challenge
                 LOG.debug(
                     "event=captcha_scan provider=capsolver phase=%s origin=%s challenge=%s "
-                    "status=completed_nonblocking site_key_sha256=%s",
+                    "status=nonblocking_background site_key_sha256=%s",
                     phase,
                     origin,
                     kind,
-                    identity[2],
+                    _fingerprint(site_key),
                 )
-                return False
+            return False
+        if challenge is None:
+            LOG.error(
+                "event=captcha_unresolved provider=capsolver phase=%s origin=%s "
+                "reason=site_key_missing signal=%s",
+                phase,
+                origin,
+                challenge_signal,
+            )
+            raise RuntimeError("CAPTCHA challenge detected but no supported site key was found")
+        kind, site_key = challenge
+        identity = (origin, kind, _fingerprint(site_key))
+        if identity in self._completed_challenges:
             LOG.warning(
                 "event=captcha_unresolved provider=capsolver phase=%s origin=%s challenge=%s "
                 "reason=repeated_after_solution site_key_sha256=%s",
@@ -214,10 +216,11 @@ class CapSolverBrowserSolver:
         task_type = str(task["type"])
         LOG.info(
             "event=captcha_detected provider=capsolver phase=%s origin=%s challenge=%s "
-            "site_key_sha256=%s task_type=%s",
+            "signal=%s site_key_sha256=%s task_type=%s",
             phase,
             origin,
             kind,
+            challenge_signal,
             _fingerprint(site_key),
             task_type,
         )

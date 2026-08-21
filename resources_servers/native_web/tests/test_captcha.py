@@ -52,6 +52,11 @@ class _Page:
         return {"fieldCount": 1, "callbacksCalled": 1}
 
 
+class _BlockingPage(_Page):
+    def title(self) -> str:
+        return "Welcome" if self.injected_token else "Just a moment..."
+
+
 class _Response:
     def __init__(self, payload: dict) -> None:
         self._payload = payload
@@ -90,7 +95,7 @@ def test_capsolver_success_logs_lifecycle_without_secrets(monkeypatch, caplog) -
     client = _Client(timeout=30.0)
     monkeypatch.setattr(captcha.httpx, "Client", lambda **_kwargs: client)
     monkeypatch.setattr(captcha.time, "sleep", lambda _seconds: None)
-    page = _Page()
+    page = _BlockingPage()
     solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
 
     with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.native_web.captcha"):
@@ -128,19 +133,21 @@ def test_capsolver_no_challenge_emits_debug_scan(caplog) -> None:
     assert "CAP-private-key" not in messages
 
 
-def test_capsolver_ignores_completed_nonblocking_widget(monkeypatch, caplog) -> None:
+def test_capsolver_ignores_nonblocking_widget_without_provider_request(monkeypatch, caplog) -> None:
     client = _Client(timeout=30.0)
     monkeypatch.setattr(captcha.httpx, "Client", lambda **_kwargs: client)
     monkeypatch.setattr(captcha.time, "sleep", lambda _seconds: None)
-    page = _Page()
+    blocking_page = _BlockingPage()
     solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
 
-    assert solver.maybe_solve(page, phase="after navigate") is True
+    assert solver.maybe_solve(blocking_page, phase="after navigate") is True
+    requests_after_real_challenge = list(client.requests)
     with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.native_web.captcha"):
-        assert solver.maybe_solve(page, phase="before post-action screenshot") is False
+        assert solver.maybe_solve(_Page(), phase="before post-action screenshot") is False
 
+    assert client.requests == requests_after_real_challenge
     messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert "status=completed_nonblocking" in messages
+    assert "status=nonblocking_background" in messages
     assert "event=captcha_unresolved" not in messages
 
 
