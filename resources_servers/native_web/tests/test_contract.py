@@ -350,6 +350,70 @@ def test_native_driver_terminates_without_a_second_solve_after_budget_exhaustion
     assert result.info["native_status"] == CAPTCHA_BUDGET_EXHAUSTED_STATUS
 
 
+def test_native_driver_returns_status_when_captcha_budget_exhausts_before_screenshot(
+    monkeypatch,
+) -> None:
+    class _FailingOnSecondCheckSolver:
+        calls = 0
+
+        def maybe_solve(self, _page, *, phase: str) -> bool:
+            self.calls += 1
+            if self.calls == 1:
+                assert phase == "after computer"
+                return False
+            assert phase == "before post-action screenshot"
+            raise TimeoutError("provider detail must not escape")
+
+    monkeypatch.setenv("WA_MAX_CAPTCHA_FAILURES", "0")
+    driver = NativeWebDriver(
+        _config(action_delay_seconds=0, terminate_on_action_error=False),
+        "session-test",
+        object(),
+    )
+    solver = _FailingOnSecondCheckSolver()
+    driver._captcha_solver = solver
+    driver._page = type("Page", (), {"url": "https://example.test/private?query=secret"})()
+    driver._task = WebTask(benchmark="webvoyager", task_id="ESPN--13")
+    driver._observation = WebObservation.model_validate(
+        {
+            "goal": [],
+            "screenshot": {"data_url": "data:image/png;base64,abc"},
+            "url": "https://example.test",
+        }
+    )
+    monkeypatch.setattr(driver, "_execute_call", lambda *_args: None)
+    monkeypatch.setattr(
+        driver,
+        "_capture",
+        lambda: driver._observation.model_copy(update={"last_action_error": driver._last_error}),
+    )
+
+    result = driver.step(
+        WebAction.model_validate(
+            {
+                "name": "computer",
+                "script": "",
+                "arguments": {
+                    "calls": [
+                        {
+                            "name": "computer",
+                            "arguments": {"actions": [{"action": "wait", "duration": 1}]},
+                        }
+                    ]
+                },
+            }
+        )
+    )
+
+    assert solver.calls == 2
+    assert result.execution_ok is False
+    assert result.terminated is True
+    assert result.info["native_status"] == CAPTCHA_BUDGET_EXHAUSTED_STATUS
+    assert result.observation.last_action_error == (
+        "RuntimeError: Captcha solver failed more than 0 times after VLM inference; aborting task at step 0"
+    )
+
+
 class _RecordingPage:
     """Minimal Playwright page double that records navigation calls."""
 

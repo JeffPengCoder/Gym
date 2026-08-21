@@ -379,7 +379,26 @@ class NativeWebDriver:
         else:
             time.sleep(self.config.action_delay_seconds)
             if not self._captcha_budget_exhausted:
-                self._maybe_solve_captcha("before post-action screenshot", failure_step=captcha_failure_step)
+                try:
+                    self._maybe_solve_captcha(
+                        "before post-action screenshot",
+                        failure_step=captcha_failure_step,
+                    )
+                except Exception as exc:
+                    # This lifecycle check runs after the tool-execution try
+                    # block above.  An exhausted CAPTCHA budget must still be
+                    # returned as a terminal task status; allowing the
+                    # exception to cross the HTTP boundary turns the intended
+                    # masked rollout into a resource-server 500 with no row.
+                    execution_ok = False
+                    self._last_error = f"{type(exc).__name__}: {exc}"
+                    LOG.exception(
+                        "event=native_browser_post_action_captcha_failed "
+                        "session=%s task=%s step=%d",
+                        self.session_id,
+                        self._task.task_id if self._task is not None else "unknown",
+                        self._step,
+                    )
             self._observation = self._capture()
         # The pinned native runner treats an exhausted CAPTCHA budget as a
         # task-level terminal error, even when ordinary action errors remain
