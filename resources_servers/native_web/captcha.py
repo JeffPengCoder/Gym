@@ -42,7 +42,6 @@ CHALLENGE_TEXT_MARKERS = (
     "complete the security check",
     "complete the captcha",
     "please verify that you are not a robot",
-    "i am not a robot",
     "protected by cloudflare",
 )
 CAPTCHA_FRAME_SELECTORS = (
@@ -155,7 +154,7 @@ class ModuleCaptchaSolver:
 
 
 class CapSolverBrowserSolver:
-    """Solve visible Turnstile/reCAPTCHA v2 widgets and inject the token."""
+    """Solve visible Turnstile/reCAPTCHA v2 and managed Cloudflare challenges."""
 
     CREATE_URL = "https://api.capsolver.com/createTask"
     RESULT_URL = "https://api.capsolver.com/getTaskResult"
@@ -191,6 +190,11 @@ class CapSolverBrowserSolver:
                     _fingerprint(site_key),
                 )
             return False
+        if challenge is None and challenge_signal is not None and self._is_managed_cloudflare_signal(challenge_signal):
+            # A managed Cloudflare page can hide its Turnstile site key.  The
+            # maintained native runner falls back to CapSolver's proxy-bound
+            # AntiCloudflareTask in this case, so preserve that behavior here.
+            challenge = ("cloudflare", challenge_signal)
         if challenge is None:
             LOG.error(
                 "event=captcha_unresolved provider=capsolver phase=%s origin=%s "
@@ -272,10 +276,17 @@ class CapSolverBrowserSolver:
                             f"CapSolver task failed: {result_payload.get('errorDescription', 'unknown error')}"
                         )
                     solution = result_payload.get("solution") or {}
-                    token = solution.get("token") or solution.get("gRecaptchaResponse")
-                    if not token:
-                        raise RuntimeError("CapSolver returned no browser token")
-                    injection = self._inject(page, kind, str(token))
+                    if kind == "cloudflare":
+                        injection = self._apply_cloudflare_solution(page, solution)
+                        try:
+                            page.reload(wait_until="domcontentloaded")
+                        except Exception:
+                            pass
+                    else:
+                        token = solution.get("token") or solution.get("gRecaptchaResponse")
+                        if not token:
+                            raise RuntimeError("CapSolver returned no browser token")
+                        injection = self._inject(page, kind, str(token))
                     self._completed_challenges.add(identity)
                     if blocking_challenge and not self._wait_for_challenge_clear(page):
                         raise RuntimeError("CAPTCHA solution was injected but the challenge page did not clear")
@@ -370,6 +381,22 @@ class CapSolverBrowserSolver:
                 pass
         return None
 
+    @staticmethod
+    def _is_managed_cloudflare_signal(signal: str) -> bool:
+        return any(
+            marker in signal
+            for marker in (
+                "title:just a moment",
+                "title:attention required",
+                "title:checking your browser",
+                "body:checking if the site connection is secure",
+                "body:performing security verification",
+                "body:protected by cloudflare",
+                "challenges.cloudflare.com",
+                "turnstile",
+            )
+        )
+
     @classmethod
     def _is_challenge_page(cls, page: Any) -> bool:
         return cls._challenge_signal(page) is not None
@@ -400,7 +427,7 @@ class CapSolverBrowserSolver:
         except ValueError:
             return False
 
-    def _proxy_fields(self, page: Any) -> dict[str, Any]:
+    def _proxy_config(self, page: Any) -> dict[str, str] | None:
         config = self._solver_proxy_config
         try:
             if config is None:
@@ -408,12 +435,18 @@ class CapSolverBrowserSolver:
         except Exception:
             config = None
         if not config:
-            return {}
+            return None
         if self._is_loopback_proxy(config):
             raise RuntimeError(
                 "CapSolver cannot reach the browser's loopback proxy; set "
                 "WA_CAPTCHA_PROXY_SERVER to the public endpoint for the same proxy"
             )
+        return dict(config)
+
+    def _proxy_fields(self, page: Any) -> dict[str, Any]:
+        config = self._proxy_config(page)
+        if config is None:
+            return {}
         parsed = urlparse(str(config.get("server", "")))
         try:
             port = parsed.port
@@ -433,6 +466,39 @@ class CapSolverBrowserSolver:
         return fields
 
     def _build_task(self, page: Any, kind: str, site_key: str) -> dict[str, Any]:
+        if kind == "cloudflare":
+            config = self._proxy_config(page)
+            if config is None:
+                raise RuntimeError("CapSolver AntiCloudflareTask requires the browser's public proxy")
+            parsed = urlparse(str(config.get("server", "")))
+            try:
+                port = parsed.port
+            except ValueError:
+                port = None
+            if not parsed.hostname or not port:
+                raise RuntimeError("CapSolver AntiCloudflareTask requires a valid proxy host and port")
+            proxy = f"{parsed.hostname}:{port}"
+            if config.get("username") and config.get("password"):
+                proxy = f"{proxy}:{config['username']}:{config['password']}"
+            task: dict[str, Any] = {
+                "type": "AntiCloudflareTask",
+                "websiteURL": page.url,
+                "proxy": proxy,
+            }
+            try:
+                user_agent = page.evaluate("() => navigator.userAgent")
+                if user_agent:
+                    task["userAgent"] = str(user_agent)
+            except Exception:
+                pass
+            try:
+                html = page.content()
+                if html:
+                    task["html"] = str(html)
+            except Exception:
+                pass
+            return task
+
         proxy_fields = self._proxy_fields(page)
         if kind == "turnstile":
             task_type = "AntiTurnstileTask" if proxy_fields else "AntiTurnstileTaskProxyLess"
@@ -444,6 +510,30 @@ class CapSolverBrowserSolver:
             "websiteKey": site_key,
             **proxy_fields,
         }
+
+    @staticmethod
+    def _apply_cloudflare_solution(page: Any, solution: dict[str, Any]) -> dict[str, int]:
+        raw_cookies = solution.get("cookies") or {}
+        token = solution.get("token")
+        if isinstance(raw_cookies, dict):
+            cookies = dict(raw_cookies)
+            if token and "cf_clearance" not in cookies:
+                cookies["cf_clearance"] = token
+            parsed = urlparse(page.url)
+            origin = f"{parsed.scheme}://{parsed.netloc}/"
+            records = [
+                {"name": str(name), "value": str(value), "url": origin}
+                for name, value in cookies.items()
+                if value
+            ]
+        elif isinstance(raw_cookies, list):
+            records = [dict(cookie) for cookie in raw_cookies if isinstance(cookie, dict)]
+        else:
+            records = []
+        if not records:
+            raise RuntimeError("CapSolver Cloudflare solution contained no cookies")
+        page.context.add_cookies(records)
+        return {"fieldCount": len(records), "callbacksCalled": 0}
 
     @classmethod
     def _wait_for_challenge_clear(cls, page: Any, *, timeout: float = 12.0) -> bool:

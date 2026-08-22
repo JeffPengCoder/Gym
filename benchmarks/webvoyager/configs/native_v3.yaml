@@ -50,8 +50,17 @@ native_webvoyager_agent:
       judge_max_screenshots: 200
       visual_observation_text: none
       redact_old_visual_observations: false
+      # A browser step can legitimately outlive the generic 180 s agent
+      # default while a proxied public site finishes navigation/challenge
+      # handling.  The first 552-task wave observed one valid step completing
+      # in 332.6 s after its caller had already timed out.
+      resources_request_timeout_secs: 420
       model_request_timeout_secs: 1200
-      judge_request_timeout_secs: 120
+      # The maintained native judge allows four 120 s provider attempts with
+      # three 5 s delays (495 s total).  This is the outer Gym resource-call
+      # timeout, so it must cover that full envelope rather than cancel and
+      # duplicate an in-flight judge request every 120 s.
+      judge_request_timeout_secs: 540
       judge_max_retries: 3
       judge_retry_initial_delay_secs: 5
       judge_retry_max_delay_secs: 5

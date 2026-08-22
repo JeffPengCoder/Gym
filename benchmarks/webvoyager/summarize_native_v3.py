@@ -88,15 +88,32 @@ def _jsonl_files(path: Path) -> list[Path]:
     return [path]
 
 
+def _summary_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Discard trajectory payloads that are irrelevant to score reconciliation.
+
+    Native WebVoyager rollout rows can contain many screenshots and reach tens
+    of megabytes each.  Keeping those rows alive while reading an entire wave
+    makes a fixed-size score summary consume memory proportional to the full
+    trajectory archive.  Reconciliation only needs the task identity and four
+    scalar result fields, so compact each row before retaining it.
+    """
+
+    return {
+        "task_id": task_id_from_row(row),
+        "task_success": row.get("task_success"),
+        "mask_sample": row.get("mask_sample"),
+        "failure_kind": row.get("failure_kind"),
+    }
+
+
 def load_rows(paths: list[Path]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in paths:
         for jsonl in _jsonl_files(path):
-            rows.extend(
-                json.loads(line)
-                for line in jsonl.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            )
+            with jsonl.open(encoding="utf-8") as stream:
+                for line in stream:
+                    if line.strip():
+                        rows.append(_summary_row(json.loads(line)))
     return rows
 
 

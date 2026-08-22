@@ -58,6 +58,8 @@ def test_native_v3_robust_evaluation_is_scoped_to_the_benchmark_profile() -> Non
     assert agent["native_parse_retry_feedback"] is True
     assert agent["native_parse_retry_temperature"] == 0.2
     assert agent["max_consecutive_execution_failures"] == 3
+    assert agent["resources_request_timeout_secs"] == 420
+    assert agent["judge_request_timeout_secs"] == 540
     # Every opt-in above repairs how an already-chosen action is decoded or
     # executed. The repeat warning instead writes strategy advice into the
     # policy's context, which the pinned reference never sends, so this profile
@@ -111,6 +113,33 @@ def test_native_summary_merges_worker_outputs_and_builds_exact_cleanup_input(tmp
     assert report["missing_task_ids"] == ["c"]
     assert report["success"] == 1
     assert [json.loads(line)["payload"] for line in cleanup.read_text().splitlines()] == ["c"]
+
+
+def test_native_summary_discards_large_trajectory_payloads_while_loading(tmp_path) -> None:
+    output = tmp_path / "worker-00" / "rollouts.jsonl"
+    output.parent.mkdir(parents=True)
+    output.write_text(
+        json.dumps(
+            {
+                "task_id": "a",
+                "task_success": False,
+                "mask_sample": True,
+                "failure_kind": "judge_unparseable",
+                "responses": [{"screenshots": ["large-payload"]}],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert load_rows([output]) == [
+        {
+            "task_id": "a",
+            "task_success": False,
+            "mask_sample": True,
+            "failure_kind": "judge_unparseable",
+        }
+    ]
 
 
 def test_native_summary_marks_duplicate_worker_results_non_comparable() -> None:

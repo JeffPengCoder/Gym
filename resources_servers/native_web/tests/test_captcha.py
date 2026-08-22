@@ -252,10 +252,22 @@ class _ChallengeBody:
         return "Checking if the site connection is secure"
 
 
+class _GenericChallengeBody:
+    def inner_text(self, *, timeout: int) -> str:
+        assert timeout == 1_000
+        return "Complete the captcha to continue"
+
+
 class _NormalBody:
     def inner_text(self, *, timeout: int) -> str:
         assert timeout == 1_000
         return "Sports news, scores, schedules, and highlights"
+
+
+class _ArticleBody:
+    def inner_text(self, *, timeout: int) -> str:
+        assert timeout == 1_000
+        return "The interviewee said, ‘I am not a robot,’ while describing the performance."
 
 
 class _FrameLocator(_Locator):
@@ -285,7 +297,7 @@ class _BackgroundCaptchaFramePage(_Page):
     def locator(self, selector: str):
         if selector == "body":
             return _NormalBody()
-        if selector.startswith("iframe"):
+        if selector.startswith("iframe") and "recaptcha" in selector:
             return _FrameLocator(visible=self._visible)
         return _Locator(None)
 
@@ -295,12 +307,119 @@ class _ChallengePage(_Page):
         super().__init__(site_key=None)
 
     def title(self) -> str:
-        return "Just a moment..."
+        return "Captcha required"
 
     def locator(self, selector: str):
         if selector == "body":
-            return _ChallengeBody()
+            return _GenericChallengeBody()
         return _Locator(None)
+
+
+class _ArticlePage(_Page):
+    def __init__(self) -> None:
+        super().__init__(site_key=None)
+
+    def title(self) -> str:
+        return "BBC interview"
+
+    def locator(self, selector: str):
+        if selector == "body":
+            return _ArticleBody()
+        return _Locator(None)
+
+
+class _CloudflareContext:
+    def __init__(self) -> None:
+        self.cookies: list[dict] = []
+
+    def add_cookies(self, cookies: list[dict]) -> None:
+        self.cookies.extend(cookies)
+
+
+class _CloudflarePage(_ChallengePage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.context = _CloudflareContext()
+        setattr(
+            self.context,
+            captcha.BROWSER_PROXY_CONFIG_ATTR,
+            {"server": "http://proxy.example:19407"},
+        )
+        self.reloaded = False
+
+    def title(self) -> str:
+        return "Welcome" if self.reloaded else "Just a moment..."
+
+    def locator(self, selector: str):
+        if selector == "body":
+            return _NormalBody() if self.reloaded else _ChallengeBody()
+        return _Locator(None)
+
+    def evaluate(self, script: str):
+        if "navigator.userAgent" in script:
+            return "test-browser-agent"
+        return None
+
+    def content(self) -> str:
+        return "<html><title>Just a moment...</title></html>"
+
+    def reload(self, *, wait_until: str) -> None:
+        assert wait_until == "domcontentloaded"
+        self.reloaded = True
+
+
+class _CloudflareClient(_Client):
+    def post(self, url: str, *, json: dict) -> _Response:
+        self.requests.append((url, json))
+        if url.endswith("createTask"):
+            return _Response({"taskId": "provider-task-secret"})
+        return _Response(
+            {
+                "status": "ready",
+                "solution": {"cookies": {"cf_clearance": "clearance-secret"}},
+            }
+        )
+
+
+def test_article_phrase_is_not_treated_as_a_blocking_captcha(caplog) -> None:
+    solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
+
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.native_web.captcha"):
+        assert solver.maybe_solve(_ArticlePage(), phase="after navigate") is False
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "status=clear" in messages
+    assert "event=captcha_unresolved" not in messages
+
+
+def test_capsolver_uses_proxy_bound_cloudflare_fallback_without_site_key(monkeypatch, caplog) -> None:
+    client = _CloudflareClient(timeout=30.0)
+    monkeypatch.setattr(captcha.httpx, "Client", lambda **_kwargs: client)
+    monkeypatch.setattr(captcha.time, "sleep", lambda _seconds: None)
+    page = _CloudflarePage()
+    solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
+
+    with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.native_web.captcha"):
+        assert solver.maybe_solve(page, phase="after navigate") is True
+
+    create_task = client.requests[0][1]["task"]
+    assert create_task["type"] == "AntiCloudflareTask"
+    assert create_task["websiteURL"] == page.url
+    assert create_task["proxy"] == "proxy.example:19407"
+    assert create_task["userAgent"] == "test-browser-agent"
+    assert page.reloaded is True
+    assert page.context.cookies == [
+        {
+            "name": "cf_clearance",
+            "value": "clearance-secret",
+            "url": "https://example.test/",
+        }
+    ]
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "challenge=cloudflare" in messages
+    assert "task_type=AntiCloudflareTask" in messages
+    for secret in ("CAP-private-key", "provider-task-secret", "clearance-secret"):
+        assert secret not in messages
 
 
 def test_capsolver_fails_closed_for_blocking_challenge_without_site_key(caplog) -> None:
