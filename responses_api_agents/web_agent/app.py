@@ -35,6 +35,7 @@ from nemo_gym.web.api_models import (
     WebStepResponse,
 )
 from nemo_gym.web.models import (
+    BROWSER_TARGET_CLOSED_STATUS,
     CAPTCHA_BUDGET_EXHAUSTED_STATUS,
     WebActionProfile,
     WebArtifactRef,
@@ -717,10 +718,11 @@ class WebAgent(SimpleResponsesAPIAgent):
                 )
                 if not (task.action_profile == WebActionProfile.NATIVE_TOOLCALL and terminated):
                     self._remember_evidence(observation, screenshot_history, url_history)
-                if step_data.info.get("native_status") == CAPTCHA_BUDGET_EXHAUSTED_STATUS:
+                native_status = step_data.info.get("native_status")
+                if native_status in {CAPTCHA_BUDGET_EXHAUSTED_STATUS, BROWSER_TARGET_CLOSED_STATUS}:
                     # The browser could not reach the site, so nothing the policy
                     # did is measurable. Mask instead of scoring a forced stop.
-                    environment_failure_kind = CAPTCHA_BUDGET_EXHAUSTED_STATUS
+                    environment_failure_kind = native_status
                     LOG.warning(
                         "event=web_environment_access_failed benchmark=%s task=%s step=%d failure_kind=%s",
                         task.benchmark.value,

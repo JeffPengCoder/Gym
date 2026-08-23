@@ -17,6 +17,7 @@ from urllib.parse import unquote, urlparse
 from nemo_gym.web.actions import parse_native_tool_calls
 from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.models import (
+    BROWSER_TARGET_CLOSED_STATUS,
     CAPTCHA_BUDGET_EXHAUSTED_STATUS,
     WebAction,
     WebArtifactRef,
@@ -36,6 +37,17 @@ from resources_servers.native_web.config import NativeWebResourcesServerConfig
 
 
 LOG = logging.getLogger("nemo_gym.resources_servers.native_web")
+
+
+class BrowserTargetClosedDuringCaptcha(RuntimeError):
+    """The browser target disappeared while CAPTCHA handling inspected it."""
+
+
+def _is_playwright_target_closed_error(exc: BaseException) -> bool:
+    """Recognize the pinned Playwright target-closed type without a private import."""
+
+    error_type = type(exc)
+    return error_type.__name__ == "TargetClosedError" and error_type.__module__.startswith("playwright.")
 
 
 CHROME_ARGS = [
@@ -207,6 +219,7 @@ class NativeWebDriver:
         self._last_captcha_failure_step: int | None = None
         self._captcha_failures = 0
         self._captcha_budget_exhausted = False
+        self._browser_target_closed = False
         self._evidence: deque[WebArtifactRef] = deque(maxlen=config.max_evidence_screenshots)
         self._captcha_solver = captcha_solver_from_environment()
 
@@ -283,6 +296,7 @@ class NativeWebDriver:
         self._last_captcha_failure_step = None
         self._captcha_failures = 0
         self._captcha_budget_exhausted = False
+        self._browser_target_closed = False
         self._evidence.clear()
         if task.start_urls:
             self._goto(self._page, task.start_urls[0], wait_until=RESET_WAIT_UNTIL)
@@ -377,8 +391,9 @@ class NativeWebDriver:
             if self._observation is None:
                 raise RuntimeError("terminal action has no prior observation")
         else:
-            time.sleep(self.config.action_delay_seconds)
-            if not self._captcha_budget_exhausted:
+            if not self._browser_target_closed:
+                time.sleep(self.config.action_delay_seconds)
+            if not self._captcha_budget_exhausted and not self._browser_target_closed:
                 try:
                     self._maybe_solve_captcha(
                         "before post-action screenshot",
@@ -393,13 +408,13 @@ class NativeWebDriver:
                     execution_ok = False
                     self._last_error = f"{type(exc).__name__}: {exc}"
                     LOG.exception(
-                        "event=native_browser_post_action_captcha_failed "
-                        "session=%s task=%s step=%d",
+                        "event=native_browser_post_action_captcha_failed session=%s task=%s step=%d",
                         self.session_id,
                         self._task.task_id if self._task is not None else "unknown",
                         self._step,
                     )
-            self._observation = self._capture()
+            if not self._browser_target_closed:
+                self._observation = self._capture()
         # The pinned native runner treats an exhausted CAPTCHA budget as a
         # task-level terminal error, even when ordinary action errors remain
         # policy-visible.  Do not give the agent more correction turns that
@@ -407,6 +422,7 @@ class NativeWebDriver:
         terminated = (
             action.terminal
             or self._captcha_budget_exhausted
+            or self._browser_target_closed
             or (not execution_ok and self.config.terminate_on_action_error)
         )
         LOG.info(
@@ -424,7 +440,9 @@ class NativeWebDriver:
         # outcome. The reference runner drops such a task from its scored set and
         # re-runs it later, so report it under its own status instead of folding
         # it into a normal action error that would still be judged.
-        if self._captcha_budget_exhausted:
+        if self._browser_target_closed:
+            info = {"action_error": self._last_error, "native_status": BROWSER_TARGET_CLOSED_STATUS}
+        elif self._captcha_budget_exhausted:
             info = {"action_error": self._last_error, "native_status": CAPTCHA_BUDGET_EXHAUSTED_STATUS}
         elif self._last_error:
             info = {"action_error": self._last_error, "native_status": "error"}
@@ -506,6 +524,20 @@ class NativeWebDriver:
         try:
             solved = self._captcha_solver.maybe_solve(self._page, phase=phase)
         except Exception as exc:
+            if _is_playwright_target_closed_error(exc):
+                self._browser_target_closed = True
+                LOG.error(
+                    "event=captcha_browser_target_closed session=%s task=%s step=%d phase=%s "
+                    "failure_budget_counted=false error_type=%s",
+                    self.session_id,
+                    self._task.task_id if self._task is not None else "unknown",
+                    self._step,
+                    phase,
+                    type(exc).__name__,
+                )
+                raise BrowserTargetClosedDuringCaptcha(
+                    f"browser target closed during CAPTCHA handling at phase {phase!r}"
+                ) from None
             # Match the native runner's failure boundary: a transient solver
             # timeout or a challenge that remains visible is not a resource
             # server crash. Keep the live page available to the agent and let

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
 import pytest
 
 from nemo_gym.web.actions import ActionParseError, parse_model_action, parse_native_tool_calls
@@ -165,6 +167,45 @@ def test_native_alias_recovery_is_opt_in_and_records_nested_click_conversion() -
     assert action.metadata["native_parse"]["recovered"] is True
 
 
+@pytest.mark.parametrize("duration,expected", [(-4, 0.0), (45, 30.0)])
+def test_native_alias_recovery_clamps_nested_wait_and_records_values(duration, expected) -> None:
+    item = {
+        "type": "function_call",
+        "call_id": "call-wait",
+        "name": "computer",
+        "arguments": json.dumps({"actions": [{"action": "wait", "duration": duration}]}),
+    }
+    with pytest.raises(ActionParseError, match=r"must be in \[0, 30\]"):
+        parse_native_tool_calls([item])
+
+    action = parse_native_tool_calls([item], alias_recovery="webvoyager_v3")
+
+    assert action.arguments["calls"][0]["arguments"]["actions"] == [{"action": "wait", "duration": expected}]
+    record = action.metadata["native_parse"]["calls"][0]
+    assert record["alias_recovery_modes"] == ["computer.wait_duration_clamped"]
+    assert record["alias_recovery_details"] == [
+        {
+            "field": "computer.actions[0].duration",
+            "original": duration,
+            "normalized": expected,
+            "minimum": 0,
+            "maximum": 30,
+        }
+    ]
+
+
+@pytest.mark.parametrize("duration", [True, "45", float("nan"), float("inf")])
+def test_native_alias_recovery_rejects_unsafe_nested_wait_values(duration) -> None:
+    item = {
+        "type": "function_call",
+        "name": "computer",
+        "arguments": json.dumps({"actions": [{"action": "wait", "duration": duration}]}),
+    }
+
+    with pytest.raises(ActionParseError):
+        parse_native_tool_calls([item], alias_recovery="webvoyager_v3")
+
+
 @pytest.mark.parametrize(
     "name,arguments,expected_action,expected_payload,expected_mode",
     [
@@ -219,6 +260,37 @@ def test_native_alias_recovery_wraps_unambiguous_top_level_actions(
     record = action.metadata["native_parse"]["calls"][0]
     assert record["original_tool"] == name
     assert record["alias_recovery_modes"] == [expected_mode]
+
+
+@pytest.mark.parametrize("duration,expected", [("-2", 0.0), (90, 30.0)])
+def test_native_alias_recovery_clamps_top_level_wait_and_records_values(duration, expected) -> None:
+    action = parse_native_tool_calls(
+        [
+            {
+                "type": "function_call",
+                "call_id": "call-wait",
+                "name": "wait",
+                "arguments": json.dumps({"duration": duration}),
+            }
+        ],
+        alias_recovery="webvoyager_v3",
+    )
+
+    assert action.arguments["calls"][0]["arguments"]["actions"] == [{"action": "wait", "duration": expected}]
+    record = action.metadata["native_parse"]["calls"][0]
+    assert record["alias_recovery_modes"] == [
+        "tool.wait_to_computer_wait",
+        "tool.wait_duration_clamped",
+    ]
+    assert record["alias_recovery_details"] == [
+        {
+            "field": "tool.wait.duration",
+            "original": duration,
+            "normalized": expected,
+            "minimum": 0,
+            "maximum": 30,
+        }
+    ]
 
 
 @pytest.mark.parametrize(

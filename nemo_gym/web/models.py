@@ -14,6 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # has spent its CAPTCHA solving budget. The rollout is then a site-access
 # failure rather than a policy outcome, so agents mask it instead of judging it.
 CAPTCHA_BUDGET_EXHAUSTED_STATUS = "captcha_budget_exhausted"
+# A Playwright page/context/browser closed while the CAPTCHA integration was
+# inspecting it. This is a retryable browser lifecycle failure, not a paid
+# solver failure and not a policy outcome.
+BROWSER_TARGET_CLOSED_STATUS = "browser_target_closed"
 
 
 class WebBenchmark(StrEnum):

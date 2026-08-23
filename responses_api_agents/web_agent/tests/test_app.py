@@ -12,7 +12,13 @@ from aiohttp import ClientResponseError
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
-from nemo_gym.web.models import WebActionProfile, WebBenchmark, WebTask
+from nemo_gym.web.models import (
+    BROWSER_TARGET_CLOSED_STATUS,
+    CAPTCHA_BUDGET_EXHAUSTED_STATUS,
+    WebActionProfile,
+    WebBenchmark,
+    WebTask,
+)
 from responses_api_agents.web_agent.app import (
     WebAgent,
     WebAgentConfig,
@@ -772,7 +778,24 @@ async def test_run_classifies_missing_evaluator_as_terminal_configuration_failur
 
 
 @pytest.mark.asyncio
-async def test_exhausted_captcha_budget_is_masked_instead_of_judged(caplog):
+@pytest.mark.parametrize(
+    "native_status,action_error",
+    [
+        (
+            CAPTCHA_BUDGET_EXHAUSTED_STATUS,
+            "RuntimeError: Captcha solver failed more than 3 times",
+        ),
+        (
+            BROWSER_TARGET_CLOSED_STATUS,
+            "BrowserTargetClosedDuringCaptcha: browser target closed",
+        ),
+    ],
+)
+async def test_environment_access_failure_is_masked_instead_of_judged(
+    caplog,
+    native_status,
+    action_error,
+):
     """A site the browser cannot reach makes the policy's work unmeasurable."""
 
     agent = _agent(judge=True)
@@ -788,8 +811,8 @@ async def test_exhausted_captcha_budget_is_masked_instead_of_judged(caplog):
                     "execution_ok": False,
                     "terminated": True,
                     "info": {
-                        "action_error": "RuntimeError: Captcha solver failed more than 3 times",
-                        "native_status": "captcha_budget_exhausted",
+                        "action_error": action_error,
+                        "native_status": native_status,
                     },
                 }
             ],
@@ -814,7 +837,7 @@ async def test_exhausted_captcha_budget_is_masked_instead_of_judged(caplog):
         result = await agent.run(request, body)
 
     assert result.mask_sample is True
-    assert result.failure_kind == "captcha_budget_exhausted"
+    assert result.failure_kind == native_status
     assert result.reward == 0.0
     assert result.task_success is False
     # Judging a forced stop would score a site-access failure as a policy failure.

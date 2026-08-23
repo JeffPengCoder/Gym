@@ -13,12 +13,19 @@ import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.web.datasets import adapt_native_webvoyager_record
-from nemo_gym.web.models import CAPTCHA_BUDGET_EXHAUSTED_STATUS, WebAction, WebObservation, WebTask
+from nemo_gym.web.models import (
+    BROWSER_TARGET_CLOSED_STATUS,
+    CAPTCHA_BUDGET_EXHAUSTED_STATUS,
+    WebAction,
+    WebObservation,
+    WebTask,
+)
 from nemo_gym.web.native_webvoyager import NATIVE_WEBVOYAGER_SYSTEM_PROMPT, NATIVE_WEBVOYAGER_TOOLS
 from resources_servers.native_web.backend import (
     NAVIGATION_RETRY_DELAYS_S,
     NAVIGATION_WAIT_UNTIL,
     NativeWebDriver,
+    _is_playwright_target_closed_error,
     _type_browser_text,
 )
 from resources_servers.native_web.config import NativeWebResourcesServerConfig
@@ -288,6 +295,99 @@ def test_native_driver_caps_captcha_failures_by_vlm_step(monkeypatch, caplog) ->
     assert "event=captcha_failure_budget_exhausted" in messages
     assert "provider detail must not escape" not in messages
     assert "private?query=secret" not in messages
+
+
+def test_native_driver_does_not_charge_target_closed_to_captcha_budget(caplog) -> None:
+    target_closed_error = type(
+        "TargetClosedError",
+        (Exception,),
+        {"__module__": "playwright._impl._errors"},
+    )
+
+    class _ClosedTargetSolver:
+        def maybe_solve(self, _page, *, phase: str) -> bool:
+            assert phase == "after computer"
+            raise target_closed_error("target detail must not escape")
+
+    driver = NativeWebDriver(_config(), "session-test", object())
+    driver._captcha_solver = _ClosedTargetSolver()
+    driver._page = type("Page", (), {"url": "https://example.test/private?query=secret"})()
+    driver._task = WebTask(benchmark="webvoyager", task_id="Google Map--35")
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.native_web"):
+        with pytest.raises(RuntimeError, match="browser target closed during CAPTCHA handling"):
+            driver._maybe_solve_captcha("after computer", failure_step=0)
+
+    assert _is_playwright_target_closed_error(target_closed_error("closed")) is True
+    assert driver._browser_target_closed is True
+    assert driver._captcha_failures == 0
+    assert driver._captcha_budget_exhausted is False
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=captcha_browser_target_closed" in messages
+    assert "failure_budget_counted=false" in messages
+    assert "event=captcha_failure_counted" not in messages
+    assert "target detail must not escape" not in messages
+    assert "private?query=secret" not in messages
+
+
+def test_native_driver_returns_retryable_status_when_captcha_target_closes(monkeypatch) -> None:
+    target_closed_error = type(
+        "TargetClosedError",
+        (Exception,),
+        {"__module__": "playwright._impl._errors"},
+    )
+
+    class _ClosedTargetSolver:
+        calls = 0
+
+        def maybe_solve(self, _page, *, phase: str) -> bool:
+            assert phase == "after computer"
+            self.calls += 1
+            raise target_closed_error("target detail must not escape")
+
+    driver = NativeWebDriver(
+        _config(action_delay_seconds=0, terminate_on_action_error=False),
+        "session-test",
+        object(),
+    )
+    solver = _ClosedTargetSolver()
+    driver._captcha_solver = solver
+    driver._page = type("Page", (), {"url": "https://example.test"})()
+    driver._task = WebTask(benchmark="webvoyager", task_id="Google Map--35")
+    driver._observation = WebObservation.model_validate(
+        {
+            "goal": [],
+            "screenshot": {"data_url": "data:image/png;base64,abc"},
+            "url": "https://example.test",
+        }
+    )
+    monkeypatch.setattr(driver, "_execute_call", lambda *_args: None)
+    monkeypatch.setattr(driver, "_capture", lambda: pytest.fail("closed target must not be captured"))
+
+    result = driver.step(
+        WebAction.model_validate(
+            {
+                "name": "computer",
+                "script": "",
+                "arguments": {
+                    "calls": [
+                        {
+                            "name": "computer",
+                            "arguments": {"actions": [{"action": "wait", "duration": 1}]},
+                        }
+                    ]
+                },
+            }
+        )
+    )
+
+    assert result.execution_ok is False
+    assert result.terminated is True
+    assert solver.calls == 1
+    assert driver._captcha_failures == 0
+    assert driver._captcha_budget_exhausted is False
+    assert result.info["native_status"] == BROWSER_TARGET_CLOSED_STATUS
+    assert "target detail must not escape" not in result.info["action_error"]
 
 
 def test_native_driver_terminates_without_a_second_solve_after_budget_exhaustion(monkeypatch) -> None:
