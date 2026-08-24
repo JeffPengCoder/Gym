@@ -82,6 +82,15 @@ class TestServerUtils:
         ]
         assert diagnostics["body"]["fields"]["screenshots"] == {"type": "array", "length": 2}
 
+        assert _validation_body_shape({"nested": {"secret": "not logged"}}) == {
+            "type": "object",
+            "field_count": 1,
+            "fields": {"nested": {"type": "object", "field_count": 1, "fields": ["secret"]}},
+        }
+        assert _validation_body_shape("secret") == {"type": "string", "length": 6}
+        assert _validation_body_shape(b"secret") == {"type": "bytes", "length": 6}
+        assert _validation_body_shape(42) == {"type": "int"}
+
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
         assert not nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()

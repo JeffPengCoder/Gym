@@ -3,17 +3,6 @@
 
 from nemo_gym.web.api_models import WebSeedSessionRequest, WebStepRequest
 from nemo_gym.web.models import WebAction, WebBenchmark, WebTask
-from resources_servers.browsergym_web.models import (
-    WebSeedSessionRequest as BrowserGymSeedSessionRequest,
-)
-from resources_servers.browsergym_web.models import (
-    WebStepRequest as BrowserGymStepRequest,
-)
-
-
-def test_browsergym_reexports_backend_neutral_wire_models() -> None:
-    assert BrowserGymSeedSessionRequest is WebSeedSessionRequest
-    assert BrowserGymStepRequest is WebStepRequest
 
 
 def test_backend_neutral_requests_preserve_task_and_operation_identity() -> None:

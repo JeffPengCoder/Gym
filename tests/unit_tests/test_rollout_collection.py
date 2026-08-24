@@ -147,6 +147,8 @@ class TestRolloutPopulationStatus:
             materialized[1] | {NG_FAILURE_CLASS_KEY: "benchmark_precondition", NG_TERMINAL_KEY: True},
             *(materialized[2] | {NG_FAILURE_CLASS_KEY: "retryable_infrastructure"} for _ in range(3)),
             materialized[3] | {NG_FAILURE_CLASS_KEY: "retryable_infrastructure"},
+            materialized[0] | {NG_FAILURE_CLASS_KEY: "ignored_completed"},
+            {TASK_INDEX_KEY_NAME: 99, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "ignored_unknown"},
         ]
         _failures_path_for(output).write_bytes(b"\n".join(orjson.dumps(row) for row in failures) + b"\n")
 
@@ -165,6 +167,24 @@ class TestRolloutPopulationStatus:
             "dispatch_complete": False,
             "scorable_complete": False,
         }
+
+    def test_missing_files_and_invalid_identity_rows_form_an_empty_complete_population(self, tmp_path: Path) -> None:
+        output = tmp_path / "rollouts.jsonl"
+        config = RolloutCollectionConfig(
+            agent_name="agent",
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(output),
+        )
+        config.materialized_jsonl_fpath.write_bytes(
+            orjson.dumps({TASK_INDEX_KEY_NAME: "not-an-int", ROLLOUT_INDEX_KEY_NAME: 0}) + b"\n"
+        )
+
+        status = _population_status_from_files(config)
+
+        assert status.expected == 0
+        assert status.completed == 0
+        assert status.status == "complete"
+        assert status.dispatch_complete is True
 
 
 class TestRolloutCollection:

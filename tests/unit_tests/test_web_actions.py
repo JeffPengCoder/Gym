@@ -5,7 +5,12 @@ import json
 
 import pytest
 
-from nemo_gym.web.actions import ActionParseError, parse_model_action, parse_native_tool_calls
+from nemo_gym.web.actions import (
+    ActionParseError,
+    _json_container_balance,
+    parse_model_action,
+    parse_native_tool_calls,
+)
 from nemo_gym.web.models import WebActionProfile
 
 
@@ -383,3 +388,155 @@ def test_native_parser_validates_tool_arguments(name, arguments, match) -> None:
 def test_rejects_unsafe_native_tool_calls(item, match) -> None:
     with pytest.raises(ActionParseError, match=match):
         parse_native_tool_calls([item])
+
+
+@pytest.mark.parametrize(
+    ("text", "match"),
+    [
+        ("", "did not contain an action"),
+        ("click('a')\nclick('b')\nclick('c')", "between 1 and 2"),
+        ("unknown('a')", "unsupported browser action"),
+        ("click(**{'bid': 'a'})", "expanded keyword"),
+        ("send_msg_to_user('done')\nclick('a')", "terminal action must be the final"),
+    ],
+)
+def test_browsergym_parser_rejects_invalid_call_shapes(text, match) -> None:
+    with pytest.raises(ActionParseError, match=match):
+        parse_model_action(text, WebActionProfile.BROWSERGYM_HIGHLEVEL)
+
+
+@pytest.mark.parametrize(
+    ("legacy", "expected_script"),
+    [
+        ("Scroll; up", "scroll(0, -500)"),
+        ("Scroll; down", "scroll(0, 500)"),
+        ("Wait", "noop()"),
+        ("GoBack", "go_back()"),
+        ("Google", "goto('https://www.google.com/')"),
+    ],
+)
+def test_legacy_webvoyager_control_actions(legacy, expected_script) -> None:
+    action = parse_model_action(legacy, WebActionProfile.WEBVOYAGER_LEGACY)
+    assert action.script == expected_script
+
+
+def test_json_container_balance_handles_escapes_and_early_closing() -> None:
+    assert _json_container_balance('[{"text":"a\\"b"}') == (1, 0, False)
+    assert _json_container_balance("]") == (-1, 0, False)
+
+
+def _native_item(name, arguments):
+    return {"type": "function_call", "name": name, "arguments": json.dumps(arguments)}
+
+
+@pytest.mark.parametrize(
+    ("item", "kwargs", "match"),
+    [
+        (_native_item("computer", {"actions": "not-json"}), {"recovery": "decode_string"}, "invalid JSON"),
+        (
+            _native_item("computer", {"actions": "[invalid"}),
+            {"recovery": "repair_single_closing_bracket"},
+            "remains invalid",
+        ),
+        (_native_item("computer", {"actions": ["click"]}), {}, "must be an object"),
+        (_native_item("computer", {"actions": [{"action": "left_click", "coordinate": [True, 0.2]}]}), {}, "number"),
+        (_native_item("computer", {"actions": [{"action": "left_click", "coordinate": [0.2]}]}), {}, "x and y"),
+        (_native_item("computer", {"actions": [{"action": "type", "text": 3}]}), {}, "text must be a string"),
+        (_native_item("computer", {"actions": [{"action": "key_press", "keys": []}]}), {}, "non-empty string list"),
+        (
+            _native_item("computer", {"actions": [{"action": "scroll", "scroll_parameters": None}]}),
+            {},
+            "must be an object",
+        ),
+        (
+            _native_item(
+                "computer",
+                {
+                    "actions": [
+                        {"action": "scroll", "scroll_parameters": {"scroll_direction": "around", "scroll_amount": 1}}
+                    ]
+                },
+            ),
+            {},
+            "direction is unsupported",
+        ),
+        (
+            _native_item(
+                "computer",
+                {
+                    "actions": [
+                        {"action": "scroll", "scroll_parameters": {"scroll_direction": "down", "scroll_amount": -1}}
+                    ]
+                },
+            ),
+            {},
+            "non-negative integer",
+        ),
+        (_native_item("navigate", {"url": ""}), {}, "non-empty string"),
+        (_native_item("navigate", {"url": "back", "tab_id": True}), {}, "tab_id"),
+        (_native_item("tabs_create", {"url": "file:///tmp/x"}), {}, "about:blank"),
+        (_native_item("terminate", {"status": "success", "answer": 3}), {}, "answer must be a string"),
+    ],
+)
+def test_native_parser_rejects_additional_invalid_shapes(item, kwargs, match) -> None:
+    with pytest.raises(ActionParseError, match=match):
+        parse_native_tool_calls([item], **kwargs)
+
+
+def test_native_parser_accepts_drag_scroll_and_default_arguments() -> None:
+    action = parse_native_tool_calls(
+        [
+            _native_item(
+                "computer",
+                {
+                    "actions": [
+                        {"action": "left_click_drag", "start_coordinate": [0.1, 0.2], "coordinate": [0.8, 0.9]},
+                        {
+                            "action": "scroll",
+                            "coordinate": [0.5, 0.5],
+                            "scroll_parameters": {"scroll_direction": "down", "scroll_amount": 2},
+                        },
+                    ]
+                },
+            ),
+            {"type": "function_call", "name": "tabs_create", "arguments": None},
+        ]
+    )
+    assert action.name == "native_tool_calls"
+
+
+def test_native_parser_rejects_transport_and_sequence_errors() -> None:
+    with pytest.raises(ActionParseError, match="did not contain"):
+        parse_native_tool_calls([{"type": "message", "content": "ignored"}])
+    with pytest.raises(ActionParseError, match="invalid JSON arguments"):
+        parse_native_tool_calls([{"type": "function_call", "name": "navigate", "arguments": "{"}])
+    with pytest.raises(ActionParseError, match="arguments must be an object"):
+        parse_native_tool_calls([{"type": "function_call", "name": "navigate", "arguments": "[]"}])
+    with pytest.raises(ActionParseError, match="1-call limit"):
+        parse_native_tool_calls(
+            [_native_item("navigate", {"url": "back"}), _native_item("navigate", {"url": "forward"})],
+            max_calls=1,
+        )
+    with pytest.raises(ActionParseError, match="terminate must be the final"):
+        parse_native_tool_calls(
+            [_native_item("terminate", {"status": "success"}), _native_item("navigate", {"url": "back"})]
+        )
+    with pytest.raises(ActionParseError, match="must be parsed from structured"):
+        parse_model_action("noop()", WebActionProfile.NATIVE_TOOLCALL)
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "match"),
+    [
+        ("click", {"x": "not-a-number", "y": 0.5}, "must be a number"),
+        ("left_click", {"coordinate": "not-json"}, "JSON coordinate array"),
+        ("left_click", {"coordinate": [0.5]}, "x and y"),
+        ("wait", {"duration": "not-a-number"}, "must be a number"),
+    ],
+)
+def test_native_alias_recovery_rejects_malformed_numeric_aliases(name, arguments, match) -> None:
+    with pytest.raises(ActionParseError, match=match):
+        parse_native_tool_calls(
+            [_native_item(name, arguments)],
+            alias_recovery="webvoyager_v3",
+        )

@@ -99,6 +99,7 @@ def test_composed_backend_is_protocol_compatible_and_keeps_roles_separate() -> N
     observation, info = backend.reset(_task())
     assert observation.url.endswith("/start")
     assert info == {"driver": "fake-native-visual"}
+    assert backend.observe() == observation
 
     result = backend.step(WebAction(name="click", script="click(10, 20)"))
     assert result.observation.last_action == "click(10, 20)"
@@ -138,3 +139,23 @@ def test_close_attempts_both_roles_when_driver_cleanup_fails() -> None:
         backend.close()
     assert driver.closed
     assert evaluator.closed
+
+
+def test_close_propagates_evaluator_cleanup_failure_and_clears_state() -> None:
+    driver = _Driver()
+    evaluator = _Evaluator()
+
+    def fail_close() -> None:
+        evaluator.closed = True
+        raise RuntimeError("evaluator cleanup failed")
+
+    evaluator.close = fail_close  # type: ignore[method-assign]
+    backend = ComposedWebBackend(driver, evaluator)
+    backend.reset(_task())
+
+    with pytest.raises(RuntimeError, match="evaluator cleanup failed"):
+        backend.close()
+    assert driver.closed
+    assert evaluator.closed
+    with pytest.raises(RuntimeError, match="backend is closed"):
+        backend.observe()

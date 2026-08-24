@@ -4,15 +4,8 @@
 from collections import OrderedDict
 
 from nemo_gym.web.models import WebBenchmark, WebObservation, WebTask
-from nemo_gym.web.session import (
-    BenchmarkPreconditionError,
-    CapacityUnavailableError,
-    SessionConflictError,
-    SessionNotFoundError,
-    WebSessionState,
-)
+from nemo_gym.web.session import WebSessionState
 from nemo_gym.web.site_pool import SiteLease
-from resources_servers.browsergym_web import session_manager as browsergym_sessions
 
 
 class _Backend:
@@ -30,13 +23,6 @@ class _Backend:
 
     def close(self):
         return None
-
-
-def test_browsergym_reexports_common_session_errors():
-    assert browsergym_sessions.SessionNotFoundError is SessionNotFoundError
-    assert browsergym_sessions.SessionConflictError is SessionConflictError
-    assert browsergym_sessions.CapacityUnavailableError is CapacityUnavailableError
-    assert browsergym_sessions.BenchmarkPreconditionError is BenchmarkPreconditionError
 
 
 def test_common_session_state_owns_idempotency_and_verifier_slots():
