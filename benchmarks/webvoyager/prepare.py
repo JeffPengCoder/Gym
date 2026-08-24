@@ -4,8 +4,8 @@
 
 from __future__ import annotations
 
-import os
 import hashlib
+import os
 from pathlib import Path
 
 from nemo_gym.web.datasets import (
@@ -39,10 +39,7 @@ def prepare_native(source: str | Path, output: str | Path) -> Path:
     source_path = Path(source)
     digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
     if digest != NATIVE_V3_SOURCE_SHA256:
-        raise ValueError(
-            "native WebVoyager source hash mismatch: "
-            f"expected {NATIVE_V3_SOURCE_SHA256}, got {digest}"
-        )
+        raise ValueError(f"native WebVoyager source hash mismatch: expected {NATIVE_V3_SOURCE_SHA256}, got {digest}")
     records = load_json_records(source_path)
     rows = [adapt_native_webvoyager_record(record) for record in records]
     if len(rows) != 552:

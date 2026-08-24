@@ -104,7 +104,10 @@ def test_rule_only_import_environment_restores_process_environment(monkeypatch):
     with visualwebarena_compat.rule_only_evaluator_import_environment(
         base_url="http://temporary.test/v1",
     ):
-        assert visualwebarena_compat.os.environ["OPENAI_API_KEY"] == "unused-for-rule-only-evaluator"  # pragma: allowlist secret
+        assert (
+            visualwebarena_compat.os.environ["OPENAI_API_KEY"]
+            == "unused-for-rule-only-evaluator"  # pragma: allowlist secret
+        )
         assert visualwebarena_compat.os.environ["OPENAI_BASE_URL"] == "http://temporary.test/v1"
         assert visualwebarena_compat.os.environ["OPENAI_API_BASE"] == "http://temporary.test/v1"
 

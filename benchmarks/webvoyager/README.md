@@ -7,7 +7,7 @@ to BrowserGym high-level calls. The final answer and latest screenshots are
 scored by the separate WebVoyager VLM judge.
 
 The maintained 552-task Nano Omni screenshot/tool-call route is a separate
-profile documented in [NATIVE_V3.md](NATIVE_V3.md). It uses headed Chromium,
+profile documented in [native-v3.md](native-v3.md). It uses headed Chromium,
 coordinate actions, the native Gemini judge contract, a US proxy, and
 CapSolver. Do not combine its 552-task score or runtime requirements with this
 legacy 643-task BrowserGym profile.

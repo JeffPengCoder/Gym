@@ -90,9 +90,17 @@ NATIVE_WEBVOYAGER_TOOLS: list[dict[str, Any]] = [
                                     "to coordinate), or `wait` (duration in seconds)."
                                 ),
                                 "enum": [
-                                    "left_click", "middle_click", "right_click", "double_click",
-                                    "triple_click", "mouse_move", "type", "key_press", "wait",
-                                    "scroll", "left_click_drag",
+                                    "left_click",
+                                    "middle_click",
+                                    "right_click",
+                                    "double_click",
+                                    "triple_click",
+                                    "mouse_move",
+                                    "type",
+                                    "key_press",
+                                    "wait",
+                                    "scroll",
+                                    "left_click_drag",
                                 ],
                             },
                             "coordinate": _COORDINATE_SCHEMA
@@ -153,8 +161,7 @@ NATIVE_WEBVOYAGER_TOOLS: list[dict[str, Any]] = [
                             "start_coordinate": _COORDINATE_SCHEMA
                             | {
                                 "description": (
-                                    "(x, y) relative starting coordinates in the [0, 1] range for "
-                                    "`left_click_drag`."
+                                    "(x, y) relative starting coordinates in the [0, 1] range for `left_click_drag`."
                                 )
                             },
                             "text": {

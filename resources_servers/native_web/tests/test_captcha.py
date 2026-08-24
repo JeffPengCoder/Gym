@@ -158,9 +158,7 @@ def test_capsolver_defers_completed_blocking_widget_without_crashing(caplog) -> 
 
     page = _CompletedBlockingPage()
     solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
-    solver._completed_challenges.add(
-        ("https://example.test", "turnstile", captcha._fingerprint("public-site-key"))
-    )
+    solver._completed_challenges.add(("https://example.test", "turnstile", captcha._fingerprint("public-site-key")))
 
     with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.native_web.captcha"):
         assert solver.maybe_solve(page, phase="before post-action screenshot") is False

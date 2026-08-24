@@ -174,8 +174,7 @@ class CapSolverBrowserSolver:
         if not blocking_challenge:
             if challenge is None:
                 LOG.debug(
-                    "event=captcha_scan provider=capsolver phase=%s origin=%s "
-                    "challenge=none status=clear",
+                    "event=captcha_scan provider=capsolver phase=%s origin=%s challenge=none status=clear",
                     phase,
                     origin,
                 )
@@ -197,8 +196,7 @@ class CapSolverBrowserSolver:
             challenge = ("cloudflare", challenge_signal)
         if challenge is None:
             LOG.error(
-                "event=captcha_unresolved provider=capsolver phase=%s origin=%s "
-                "reason=site_key_missing signal=%s",
+                "event=captcha_unresolved provider=capsolver phase=%s origin=%s reason=site_key_missing signal=%s",
                 phase,
                 origin,
                 challenge_signal,
@@ -241,7 +239,9 @@ class CapSolverBrowserSolver:
                 payload = response.json()
                 task_id = payload.get("taskId")
                 if not task_id:
-                    raise RuntimeError(f"CapSolver createTask failed: {payload.get('errorDescription', 'unknown error')}")
+                    raise RuntimeError(
+                        f"CapSolver createTask failed: {payload.get('errorDescription', 'unknown error')}"
+                    )
                 task_fingerprint = _fingerprint(str(task_id))
                 LOG.info(
                     "event=captcha_task_created provider=capsolver phase=%s origin=%s "
@@ -305,8 +305,7 @@ class CapSolverBrowserSolver:
                     return True
         except Exception:
             LOG.exception(
-                "event=captcha_solver_failed provider=capsolver phase=%s origin=%s "
-                "challenge=%s elapsed_seconds=%.3f",
+                "event=captcha_solver_failed provider=capsolver phase=%s origin=%s challenge=%s elapsed_seconds=%.3f",
                 phase,
                 origin,
                 kind,
@@ -522,9 +521,7 @@ class CapSolverBrowserSolver:
             parsed = urlparse(page.url)
             origin = f"{parsed.scheme}://{parsed.netloc}/"
             records = [
-                {"name": str(name), "value": str(value), "url": origin}
-                for name, value in cookies.items()
-                if value
+                {"name": str(name), "value": str(value), "url": origin} for name, value in cookies.items() if value
             ]
         elif isinstance(raw_cookies, list):
             records = [dict(cookie) for cookie in raw_cookies if isinstance(cookie, dict)]

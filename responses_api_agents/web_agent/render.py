@@ -151,9 +151,7 @@ def render_observation(
             f"- tab_count: {len(observation.tabs)}",
             "- available_tabs:",
         ]
-        tab_lines.extend(
-            f"  - tab_id: {tab.index}, title: {tab.title}, url: {tab.url}" for tab in observation.tabs
-        )
+        tab_lines.extend(f"  - tab_id: {tab.index}, title: {tab.title}, url: {tab.url}" for tab in observation.tabs)
         if not observation.tabs:
             tab_lines.append("  - (none)")
         text_parts.append("\n".join(tab_lines))
@@ -199,10 +197,10 @@ def render_observation(
     if step_index == 0:
         for image_url in [*_goal_images(observation.goal), *task.input_images]:
             content.append({"type": "input_image", "image_url": image_url, "detail": "high"})
-    if (
-        task.action_profile != WebActionProfile.NATIVE_TOOLCALL
-        and profile in {WebObservationProfile.SCREENSHOT, WebObservationProfile.SOM}
-    ):
+    if task.action_profile != WebActionProfile.NATIVE_TOOLCALL and profile in {
+        WebObservationProfile.SCREENSHOT,
+        WebObservationProfile.SOM,
+    }:
         screenshot = observation.screenshot
         if screenshot is not None and screenshot.data_url:
             content.append(

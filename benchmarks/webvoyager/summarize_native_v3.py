@@ -44,20 +44,14 @@ def summarize(
     unexpected_ids = sorted(set(by_task) - expected) if expected_task_ids is not None else []
     expected_rows = [by_task[task_id] for task_id in completed_ids]
     success = sum(bool(row.get("task_success")) for row in expected_rows)
-    invalid_ids = sorted(
-        task_id for task_id in completed_ids if bool(by_task[task_id].get("mask_sample"))
-    )
+    invalid_ids = sorted(task_id for task_id in completed_ids if bool(by_task[task_id].get("mask_sample")))
     invalid = len(invalid_ids)
     retry_ids = sorted(set(missing_ids) | set(invalid_ids))
     failures = Counter(
-        str(row.get("failure_kind") or "policy_failure")
-        for row in expected_rows
-        if not row.get("task_success")
+        str(row.get("failure_kind") or "policy_failure") for row in expected_rows if not row.get("task_success")
     )
     superseded = superseded_task_ids or set()
-    duplicate_ids = sorted(
-        task_id for task_id, count in duplicates.items() if count > 1 and task_id not in superseded
-    )
+    duplicate_ids = sorted(task_id for task_id, count in duplicates.items() if count > 1 and task_id not in superseded)
     superseded_ids = sorted(task_id for task_id, count in duplicates.items() if count > 1 and task_id in superseded)
     return {
         "expected": expected_count,
@@ -74,10 +68,7 @@ def summarize(
         "superseded_task_ids": superseded_ids,
         "failure_kinds": dict(sorted(failures.items())),
         "comparable": (
-            len(completed_ids) == expected_count
-            and invalid == 0
-            and not duplicate_ids
-            and not unexpected_ids
+            len(completed_ids) == expected_count and invalid == 0 and not duplicate_ids and not unexpected_ids
         ),
     }
 

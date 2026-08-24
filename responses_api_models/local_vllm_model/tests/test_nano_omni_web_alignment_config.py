@@ -7,10 +7,7 @@ import yaml
 
 
 CONFIG = (
-    Path(__file__).parents[1]
-    / "configs"
-    / "nvidia"
-    / "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment.yaml"
+    Path(__file__).parents[1] / "configs" / "nvidia" / "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment.yaml"
 )
 PROFILE = "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment"
 PUBLIC_MODEL = "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16"
