@@ -298,6 +298,7 @@ def test_native_alias_recovery_clamps_top_level_wait_and_records_values(duration
     [
         '{"target":"Buy button"}',
         '{"x":"500","y":"300"}',
+        '{"action":"double_click","coordinate":[0.4,0.6]}',
         '{"action":"type","coordinate":"[0.4,0.6]","text":"query"}',
     ],
 )

@@ -415,7 +415,7 @@ def _normalize_native_tool_alias(
         elif keys <= {"action", "coordinate"} and "coordinate" in arguments:
             declared_action = arguments.get("action")
             if declared_action not in {None, "click", "left_click"}:
-                return name, arguments, []
+                return name, arguments, [], []
             coordinate = _native_alias_coordinate(arguments["coordinate"], field="native click.coordinate")
             mode = f"tool.{name}_coordinate_to_computer_left_click"
         if coordinate is not None and mode is not None:
