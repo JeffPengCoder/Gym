@@ -26,7 +26,7 @@ def test_native_v3_policy_preserves_history_thinking() -> None:
     assert recipe_lock["policy_transport_endpoint"] == "/v1/chat/completions"
     assert recipe_lock["policy_chat_template_kwargs"] == kwargs
     assert recipe_lock["policy_chat_template_sha256"] == (
-        "41428e0c65e312c359df2495ef5284769a9520b15a693deda4c34a1538208faa"
+        "41428e0c65e312c359df2495ef5284769a9520b15a693deda4c34a1538208faa"  # pragma: allowlist secret
     )
 
 

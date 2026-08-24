@@ -91,7 +91,7 @@ def test_evaluator_environment_supports_openai_v0_and_v1(monkeypatch):
         base_url="http://judge.test/v1",
     )
 
-    assert visualwebarena_compat.os.environ["OPENAI_API_KEY"] == "test-only"
+    assert visualwebarena_compat.os.environ["OPENAI_API_KEY"] == "test-only"  # pragma: allowlist secret
     assert visualwebarena_compat.os.environ["OPENAI_BASE_URL"] == "http://judge.test/v1"
     assert visualwebarena_compat.os.environ["OPENAI_API_BASE"] == "http://judge.test/v1"
 

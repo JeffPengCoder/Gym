@@ -14,7 +14,7 @@ CONFIG = (
 )
 PROFILE = "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment"
 PUBLIC_MODEL = "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16"
-PUBLIC_REVISION = "24e67ea000b7c2837fc8f9488aa2008524fac8ba"
+PUBLIC_REVISION = "24e67ea000b7c2837fc8f9488aa2008524fac8ba"  # pragma: allowlist secret
 
 
 def _config() -> dict:

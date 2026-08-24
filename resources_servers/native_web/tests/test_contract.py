@@ -75,13 +75,13 @@ def test_native_dataset_row_binds_prompt_tools_and_runtime() -> None:
 def test_native_recipe_prompt_and_tool_hashes_are_pinned() -> None:
     tools = json.dumps(NATIVE_WEBVOYAGER_TOOLS, sort_keys=True, separators=(",", ":"))
     assert hashlib.sha256(NATIVE_WEBVOYAGER_SYSTEM_PROMPT.encode()).hexdigest() == (
-        "8332b42f09c577837b1e50bb5c04c857f8942eda6ea692b32eba38deb8cb0d36"
+        "8332b42f09c577837b1e50bb5c04c857f8942eda6ea692b32eba38deb8cb0d36"  # pragma: allowlist secret
     )
     assert hashlib.sha256(tools.encode()).hexdigest() == (
-        "12d525341f568cf3638e1b9dc99058fadf59e3bfa3719d9e88cb021e0e192f09"
+        "12d525341f568cf3638e1b9dc99058fadf59e3bfa3719d9e88cb021e0e192f09"  # pragma: allowlist secret
     )
     assert hashlib.sha256(NATIVE_WEBVOYAGER_JUDGE_PROMPT.encode()).hexdigest() == (
-        "d5548ef2bb6f0641bc9ff116fe721bf540d096502e2040890b2bf1c8560d3325"
+        "d5548ef2bb6f0641bc9ff116fe721bf540d096502e2040890b2bf1c8560d3325"  # pragma: allowlist secret
     )
 
 

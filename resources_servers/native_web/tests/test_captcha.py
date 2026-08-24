@@ -173,7 +173,10 @@ def test_capsolver_defers_completed_blocking_widget_without_crashing(caplog) -> 
 def test_capsolver_environment_selection_logs_presence_not_value(monkeypatch, caplog) -> None:
     monkeypatch.setenv("CAPSOLVER_API_KEY", "CAP-private-key")
     monkeypatch.setenv("WA_CAPTCHA_PROVIDER", "capsolver")
-    monkeypatch.setenv("WA_CAPTCHA_PROXY_SERVER", "http://proxy-user:proxy-password@proxy.example:19407")
+    monkeypatch.setenv(
+        "WA_CAPTCHA_PROXY_SERVER",
+        "http://proxy-user:proxy-password@proxy.example:19407",  # pragma: allowlist secret
+    )
 
     with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.native_web.captcha"):
         solver = captcha.captcha_solver_from_environment()
@@ -195,7 +198,7 @@ def test_capsolver_task_uses_the_browser_proxy_without_logging_credentials() -> 
         {
             "server": "http://proxy.example:19407",
             "username": "proxy-user",
-            "password": "proxy-password",
+            "password": "proxy-password",  # pragma: allowlist secret
         },
     )
 
@@ -209,7 +212,7 @@ def test_capsolver_task_uses_the_browser_proxy_without_logging_credentials() -> 
         "proxyAddress": "proxy.example",
         "proxyPort": 19407,
         "proxyLogin": "proxy-user",
-        "proxyPassword": "proxy-password",
+        "proxyPassword": "proxy-password",  # pragma: allowlist secret
     }
 
 
@@ -223,7 +226,7 @@ def test_capsolver_explicit_public_proxy_overrides_browser_loopback_proxy() -> N
 
     solver = captcha.CapSolverBrowserSolver(
         "CAP-private-key",
-        proxy_server="http://proxy-user:proxy-password@proxy.example:29407",
+        proxy_server="http://proxy-user:proxy-password@proxy.example:29407",  # pragma: allowlist secret
     )
     task = solver._build_task(page, "recaptcha", "public-site-key")
 
@@ -231,7 +234,7 @@ def test_capsolver_explicit_public_proxy_overrides_browser_loopback_proxy() -> N
     assert task["proxyAddress"] == "proxy.example"
     assert task["proxyPort"] == 29407
     assert task["proxyLogin"] == "proxy-user"
-    assert task["proxyPassword"] == "proxy-password"
+    assert task["proxyPassword"] == "proxy-password"  # pragma: allowlist secret
 
 
 def test_capsolver_rejects_browser_loopback_proxy_without_public_override() -> None:

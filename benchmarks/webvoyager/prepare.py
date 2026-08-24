@@ -19,8 +19,10 @@ from nemo_gym.web.datasets import (
 BENCHMARK_DIR = Path(__file__).resolve().parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "webvoyager_benchmark.jsonl"
 DEFAULT_SOURCE = BENCHMARK_DIR.parents[2] / "WebVoyager" / "data" / "WebVoyager_data.jsonl"
-NATIVE_V3_SOURCE_COMMIT = "6a2977939b157b0ab9de7799bb089c721f1ac115"
-NATIVE_V3_SOURCE_SHA256 = "f635a9b27fa1980a63b39bbf64ae8e9e766159cb70fa765451d3d3c0b948ff98"
+NATIVE_V3_SOURCE_COMMIT = "6a2977939b157b0ab9de7799bb089c721f1ac115"  # pragma: allowlist secret
+NATIVE_V3_SOURCE_SHA256 = (
+    "f635a9b27fa1980a63b39bbf64ae8e9e766159cb70fa765451d3d3c0b948ff98"  # pragma: allowlist secret
+)
 
 
 def prepare(source: str | Path | None = None, output: str | Path = OUTPUT_FPATH) -> Path:
