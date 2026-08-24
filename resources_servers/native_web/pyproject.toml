@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nemo-gym-native-web"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  # native_web reuses Gym's HTTP/session contract and imports the shared
+  # browsergym_web server scaffolding from the monorepo source tree.  Install
+  # the parent Gym runtime closure in this component venv so those imports do
+  # not accidentally depend on packages from the launcher environment.  The
+  # dev extra is intentionally excluded: it is not a server requirement and
+  # may upgrade browser packages independently of the pinned runtime image.
+  "nemo-gym",
+  "httpx",
+  "pillow",
+  # The qualified native evaluation image contains the Playwright 1.55
+  # browser bundle (Chromium 1187).  Python and browser revisions must match.
+  "playwright==1.55.0",
+  "pyautogui",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }

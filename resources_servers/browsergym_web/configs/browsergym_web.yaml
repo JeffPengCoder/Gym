@@ -26,5 +26,5 @@ browsergym_web:
       webarena_evaluator_model: null
       visualwebarena_evaluator_model: null
       evaluator_base_url: null
-      evaluator_api_key_env: OPENAI_API_KEY
+      evaluator_api_key_env: OPENAI_API_KEY  # pragma: allowlist secret
       allowed_benchmarks: [webarena, visualwebarena, webvoyager]

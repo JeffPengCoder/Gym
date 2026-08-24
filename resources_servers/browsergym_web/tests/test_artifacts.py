@@ -3,7 +3,12 @@
 
 import hashlib
 
-from resources_servers.browsergym_web.artifacts import WebArtifactStore
+from nemo_gym.web.artifacts import WebArtifactStore
+from resources_servers.browsergym_web.artifacts import WebArtifactStore as BrowserGymWebArtifactStore
+
+
+def test_browsergym_artifact_store_is_a_compatibility_export():
+    assert BrowserGymWebArtifactStore is WebArtifactStore
 
 
 def test_recording_artifacts_indexes_finalized_nonempty_files(tmp_path):

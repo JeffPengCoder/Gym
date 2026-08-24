@@ -14,6 +14,18 @@ web_agent:
       webvoyager_judge_server: null
       max_steps: 15
       max_parse_retries: 2
+      # Shared agent defaults preserve strict parsing and do not alter
+      # trajectories. Individual benchmark profiles opt into recovery.
+      native_action_recovery: strict
+      native_tool_alias_recovery: strict
+      native_max_computer_actions: 20
+      native_parse_retry_feedback: false
+      native_parse_retry_temperature: null
+      repeated_action_warning_threshold: 0
+      repeated_action_window: 5
+      max_consecutive_execution_failures: 3
+      model_turn_max_retries: 0
+      model_retry_delay_secs: 1.0
       max_image_history: 3
       judge_max_screenshots: 3
       visual_observation_text: full_axtree

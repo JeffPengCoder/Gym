@@ -26,6 +26,31 @@ def _block_text(block):
     return block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
 
 
+def test_native_render_is_screenshot_first_and_has_no_browsergym_grammar():
+    task = WebTask(
+        benchmark="webvoyager",
+        task_id="Allrecipes--0",
+        intent="Find a recipe",
+        runtime_profile="native_visual",
+        observation_profile="screenshot",
+        action_profile="native_toolcall",
+    )
+    observation = WebObservation(
+        goal=[{"type": "text", "text": "Find a recipe"}],
+        screenshot=WebImage(data_url="data:image/png;base64,AA=="),
+        url="https://example.com",
+    )
+
+    message = render_observation(observation, task, step_index=0)
+
+    assert _block_types(message) == ["input_image", "input_text"]
+    text = _block_text(message.content[1])
+    assert "# Task Instruction:" in text
+    assert "Step 1" in text
+    assert "BrowserGym" not in text
+    assert "Action:" not in text
+
+
 def test_a11y_profile_omits_page_screenshot():
     task = WebTask(
         benchmark=WebBenchmark.WEBARENA,

@@ -3,7 +3,7 @@
 
 import pytest
 
-from nemo_gym.web.models import WebBenchmark, WebObservationProfile, WebTask
+from nemo_gym.web.models import WebBenchmark, WebObservationProfile, WebRuntimeProfile, WebTask
 from resources_servers.browsergym_web.profiles import resolve_browsergym_profile
 
 
@@ -40,3 +40,14 @@ def test_webvoyager_uses_openended_task_and_external_verifier():
 def test_webvoyager_requires_a_start_url():
     with pytest.raises(ValueError, match="start URL"):
         resolve_browsergym_profile(WebTask(benchmark=WebBenchmark.WEBVOYAGER, task_id="missing-url"))
+
+
+def test_browsergym_does_not_silently_accept_native_visual_tasks():
+    task = WebTask(
+        benchmark=WebBenchmark.WEBARENA,
+        task_id="0",
+        runtime_profile=WebRuntimeProfile.NATIVE_VISUAL,
+    )
+
+    with pytest.raises(ValueError, match="unsupported runtime profile"):
+        resolve_browsergym_profile(task)

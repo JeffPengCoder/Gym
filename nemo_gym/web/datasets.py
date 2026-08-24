@@ -15,6 +15,7 @@ from nemo_gym.web.models import (
     WebObservationProfile,
     WebTask,
 )
+from nemo_gym.web.native_webvoyager import adapt_native_webvoyager_record as _adapt_native_webvoyager_record
 
 
 def _start_urls(value: Any) -> list[str]:
@@ -110,6 +111,12 @@ def adapt_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
         original_metadata=dict(record),
     )
     return gym_row(task)
+
+
+def adapt_native_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt the maintained 552-task population to the native Nano Omni route."""
+
+    return _adapt_native_webvoyager_record(record)
 
 
 def load_json_records(path: str | Path) -> list[dict[str, Any]]:

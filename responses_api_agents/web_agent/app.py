@@ -6,9 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
+from urllib.parse import urlparse
 
 from aiohttp import ClientResponseError
 from fastapi import Body, Request, Response
@@ -24,15 +27,27 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from nemo_gym.web.actions import ActionParseError, parse_model_action
-from nemo_gym.web.models import WebArtifactRef, WebBenchmark, WebObservation, WebTask, WebVerifierResult
-from resources_servers.browsergym_web.models import (
+from nemo_gym.web.actions import ActionParseError, parse_model_action, parse_native_tool_calls
+from nemo_gym.web.api_models import (
     WebCloseResponse,
     WebEvaluateResponse,
     WebSeedSessionResponse,
     WebStepResponse,
 )
+from nemo_gym.web.models import (
+    BROWSER_TARGET_CLOSED_STATUS,
+    CAPTCHA_BUDGET_EXHAUSTED_STATUS,
+    WebActionProfile,
+    WebArtifactRef,
+    WebBenchmark,
+    WebObservation,
+    WebTask,
+    WebVerifierResult,
+)
 from responses_api_agents.web_agent.render import parse_error_message, render_observation
+
+
+LOG = logging.getLogger("nemo_gym.responses_api_agents.web_agent")
 
 
 class WebAgentConfig(BaseResponsesAPIAgentConfig):
@@ -41,8 +56,20 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     webvoyager_judge_server: Optional[ResourcesServerRef] = None
     max_steps: int = Field(default=15, ge=1, le=200)
     max_parse_retries: int = Field(default=2, ge=0, le=10)
+    native_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict"
+    native_tool_alias_recovery: Literal["strict", "webvoyager_v3"] = "strict"
+    native_max_computer_actions: int = Field(default=20, ge=1, le=100)
+    native_parse_retry_feedback: bool = False
+    native_parse_retry_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    repeated_action_warning_threshold: int = Field(default=0, ge=0, le=20)
+    repeated_action_window: int = Field(default=5, ge=1, le=50)
+    max_consecutive_execution_failures: int = Field(default=3, ge=1, le=20)
+    # The reference native runner retries one policy call up to 20 times before
+    # giving up, so the ceiling has to admit that budget.
+    model_turn_max_retries: int = Field(default=0, ge=0, le=32)
+    model_retry_delay_secs: float = Field(default=1.0, ge=0.0, le=60.0)
     max_image_history: int = Field(default=3, ge=1, le=20)
-    judge_max_screenshots: int = Field(default=3, ge=1, le=20)
+    judge_max_screenshots: int = Field(default=3, ge=1, le=200)
     visual_observation_text: Literal["full_axtree", "som_only", "none"] = "full_axtree"
     action_prompt_profile: Literal["standard", "code_block"] = "standard"
     redact_old_visual_observations: bool = False
@@ -106,6 +133,56 @@ def _extract_output_text(response: NeMoGymResponse) -> str:
             if getattr(block, "type", None) == "output_text":
                 parts.append(str(getattr(block, "text", "")))
     return "\n".join(part for part in parts if part).strip()
+
+
+def _parse_response_action(
+    response: NeMoGymResponse,
+    profile: WebActionProfile,
+    *,
+    native_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict",
+    native_tool_alias_recovery: Literal["strict", "webvoyager_v3"] = "strict",
+    native_max_computer_actions: int = 20,
+):
+    if profile == WebActionProfile.NATIVE_TOOLCALL:
+        return parse_native_tool_calls(
+            response.output,
+            recovery=native_action_recovery,
+            alias_recovery=native_tool_alias_recovery,
+            max_computer_actions=native_max_computer_actions,
+        )
+    return parse_model_action(_extract_output_text(response), profile)
+
+
+def _native_parse_retry_messages(response: NeMoGymResponse, error: ActionParseError) -> list[Any]:
+    """Return parser feedback without copying the current screenshot."""
+
+    invalid_items: list[dict[str, Any]] = []
+    for item in response.output:
+        item_type = getattr(item, "type", None)
+        if item_type == "function_call":
+            invalid_items.append(
+                {
+                    "type": "function_call",
+                    "name": getattr(item, "name", ""),
+                    "arguments": getattr(item, "arguments", ""),
+                }
+            )
+        elif item_type == "message":
+            invalid_items.append({"type": "message", "content": _extract_output_text(response)})
+    invalid_text = json.dumps(invalid_items, ensure_ascii=False, separators=(",", ":"))[-8000:]
+    return [
+        NeMoGymEasyInputMessage(role="assistant", content=invalid_text or "<empty model response>"),
+        NeMoGymEasyInputMessage(
+            role="user",
+            content=(
+                f"The previous browser tool response was invalid: {str(error)[-2000:]}. "
+                "Return a corrected call using only the declared tools. For browser clicks, typing, "
+                "keys, scrolling, dragging, or waiting, call `computer` and make "
+                "`arguments.actions` a JSON array of action objects, not a quoted string."
+                " Use `left_click`, never `click`, as a computer action name."
+            ),
+        ),
+    ]
 
 
 def _http_error_payload(exc: Exception) -> dict[str, Any]:
@@ -185,11 +262,72 @@ def _merge_usage(total, response: NeMoGymResponse):
     return total
 
 
+def _url_origin(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        return "unknown"
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme or 'unknown'}://{parsed.hostname}{port}"
+
+
+def _input_image_count(items: list[Any]) -> int:
+    count = 0
+    for item in items:
+        content = getattr(item, "content", None)
+        if not isinstance(content, list):
+            continue
+        count += sum(
+            1
+            for block in content
+            if (isinstance(block, dict) and block.get("type") == "input_image")
+            or getattr(block, "type", None) == "input_image"
+        )
+    return count
+
+
+def _action_call_names(action: Any) -> str:
+    calls = getattr(action, "arguments", {}).get("calls", [])
+    names = [str(call.get("name", "unknown")) for call in calls if isinstance(call, dict)]
+    return ",".join(names) or getattr(action, "name", "unknown")
+
+
+def _native_recovery_modes(action: Any) -> str:
+    metadata = getattr(action, "metadata", {})
+    records = metadata.get("native_parse", {}).get("calls", []) if isinstance(metadata, dict) else []
+    modes: list[str] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        modes.append(str(record.get("recovery_mode", "strict")))
+        modes.extend(str(mode) for mode in record.get("alias_recovery_modes", []))
+    return ",".join(modes) or "strict"
+
+
+def _repeatable_action_signature(action: Any) -> str | None:
+    if getattr(action, "terminal", False):
+        return None
+    calls = getattr(action, "arguments", {}).get("calls", [])
+    if not calls:
+        return None
+    if all(
+        isinstance(call, dict)
+        and call.get("name") == "computer"
+        and all(
+            isinstance(item, dict) and item.get("action") == "wait"
+            for item in (call.get("arguments") or {}).get("actions", [])
+        )
+        for call in calls
+    ):
+        return None
+    return json.dumps(calls, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 def _redact_old_images(
     items: list[Any],
     max_image_history: int,
     *,
     redact_observation_text: bool = False,
+    append_redaction_notice: bool = True,
 ) -> list[Any]:
     """Keep only the newest N image-bearing messages in the next model call."""
 
@@ -224,7 +362,8 @@ def _redact_old_images(
                 or getattr(block, "type", None) == "input_image"
             )
         ]
-        retained.append({"type": "input_text", "text": "[Earlier screenshot omitted from context.]"})
+        if append_redaction_notice:
+            retained.append({"type": "input_text", "text": "[Earlier screenshot omitted from context.]"})
         item.content = retained
     return copied
 
@@ -238,27 +377,83 @@ class WebAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        model_response, model_payload = await self._post_json(
-            server_name=self.config.model_server.name,
-            url_path=self.url_path_for_request("/v1/responses", request),
-            json=body,
-            cookies=request.cookies,
-            timeout_secs=self.config.model_request_timeout_secs,
+        started = time.monotonic()
+        LOG.info(
+            "event=web_agent_responses_start model_server=%s input_items=%d tools=%d",
+            self.config.model_server.name,
+            len(body.input) if isinstance(body.input, list) else 1,
+            len(body.tools or []),
         )
+        try:
+            model_response, model_payload = await self._post_json(
+                server_name=self.config.model_server.name,
+                url_path=self.url_path_for_request("/v1/responses", request),
+                json=body,
+                cookies=request.cookies,
+                timeout_secs=self.config.model_request_timeout_secs,
+            )
+        except Exception:
+            LOG.exception(
+                "event=web_agent_responses_failed model_server=%s elapsed_seconds=%.3f",
+                self.config.model_server.name,
+                time.monotonic() - started,
+            )
+            raise
         result = NeMoGymResponse.model_validate(model_payload)
         for key, value in model_response.cookies.items():
             response.set_cookie(key, value)
+        LOG.info(
+            "event=web_agent_responses_complete model_server=%s output_items=%d elapsed_seconds=%.3f",
+            self.config.model_server.name,
+            len(result.output),
+            time.monotonic() - started,
+        )
         return result
 
     async def run(self, request: Request, body: WebAgentRunRequest) -> WebAgentRunResponse:
         task = _resolve_task(body)
         artifacts = _RunArtifacts()
+        started = time.monotonic()
+        LOG.info(
+            "event=web_rollout_start benchmark=%s task=%s runtime=%s action_profile=%s "
+            "max_steps=%d max_image_history=%d",
+            task.benchmark.value,
+            task.task_id,
+            task.runtime_profile.value,
+            task.action_profile.value,
+            self.config.max_steps,
+            self.config.max_image_history,
+        )
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 self._run_once(request, body, task, artifacts),
                 timeout=self.config.run_timeout_secs,
             )
+            LOG.info(
+                "event=web_rollout_complete benchmark=%s task=%s success=%s valid_sample=%s reward=%s "
+                "steps=%d model_turns=%d execution_failures=%d terminated=%s truncated=%s "
+                "failure_kind=%s elapsed_seconds=%.3f",
+                task.benchmark.value,
+                task.task_id,
+                result.task_success,
+                not result.mask_sample,
+                result.reward,
+                result.environment_steps,
+                result.model_turns,
+                result.execution_failures,
+                result.terminated,
+                result.truncated,
+                result.failure_kind or "none",
+                time.monotonic() - started,
+            )
+            return result
         except Exception as exc:  # noqa: BLE001 - one stalled browser must not abort the shard.
+            LOG.exception(
+                "event=web_rollout_failed benchmark=%s task=%s elapsed_seconds=%.3f",
+                task.benchmark.value,
+                task.task_id,
+                time.monotonic() - started,
+            )
             return self._failure_response(body, task, exc, artifacts)
 
     async def _run_once(
@@ -282,13 +477,18 @@ class WebAgent(SimpleResponsesAPIAgent):
         environment_steps = 0
         model_turns = 0
         execution_failures = 0
+        consecutive_execution_failures = 0
         verifier_result: WebVerifierResult | None = None
+        environment_failure_kind: str | None = None
+        recent_action_signatures: deque[str] = deque(maxlen=self.config.repeated_action_window)
 
         base_body = body.responses_create_params.model_copy(deep=True)
         if isinstance(base_body.input, str):
             base_body.input = [NeMoGymEasyInputMessage(role="user", content=base_body.input)]
 
         try:
+            seed_started = time.monotonic()
+            LOG.info("event=web_seed_start benchmark=%s task=%s", task.benchmark.value, task.task_id)
             seed_response, seed_payload = await self._seed_session(
                 task=task,
                 cookies=env_cookies,
@@ -298,6 +498,15 @@ class WebAgent(SimpleResponsesAPIAgent):
             env_cookies = seed_response.cookies
             seeded = True
             observation = seed_data.observation
+            LOG.info(
+                "event=web_seed_complete benchmark=%s task=%s session=%s origin=%s screenshot=%s elapsed_seconds=%.3f",
+                task.benchmark.value,
+                task.task_id,
+                seed_data.session_id,
+                _url_origin(observation.url),
+                bool(observation.screenshot),
+                time.monotonic() - seed_started,
+            )
             self._remember_evidence(observation, screenshot_history, url_history)
             base_body.input = list(base_body.input) + [
                 render_observation(
@@ -312,50 +521,168 @@ class WebAgent(SimpleResponsesAPIAgent):
             rollout_finished = False
             for step_index in range(self.config.max_steps):
                 action = None
+                parse_feedback: list[Any] = []
                 for parse_attempt in range(self.config.max_parse_retries + 1):
                     model_input = _redact_old_images(
-                        list(base_body.input) + trajectory,
+                        list(base_body.input) + trajectory + parse_feedback,
                         self.config.max_image_history,
                         redact_observation_text=self.config.redact_old_visual_observations,
+                        append_redaction_notice=task.action_profile != WebActionProfile.NATIVE_TOOLCALL,
                     )
-                    model_body = base_body.model_copy(update={"input": model_input})
-                    raw_model_response, model_payload = await self._post_json(
-                        server_name=self.config.model_server.name,
-                        url_path=self.url_path_for_run("/v1/responses", body),
-                        json=model_body,
-                        cookies=model_cookies,
-                        timeout_secs=self.config.model_request_timeout_secs,
+                    model_updates: dict[str, Any] = {"input": model_input}
+                    if parse_attempt > 0 and self.config.native_parse_retry_temperature is not None:
+                        model_updates["temperature"] = self.config.native_parse_retry_temperature
+                    model_body = base_body.model_copy(update=model_updates)
+                    LOG.info(
+                        "event=web_model_turn_start benchmark=%s task=%s step=%d parse_attempt=%d "
+                        "input_items=%d input_images=%d retry_feedback=%s temperature=%s",
+                        task.benchmark.value,
+                        task.task_id,
+                        step_index,
+                        parse_attempt,
+                        len(model_input),
+                        _input_image_count(model_input),
+                        bool(parse_feedback),
+                        getattr(model_body, "temperature", None),
                     )
+                    model_error: Exception | None = None
+                    for model_attempt in range(self.config.model_turn_max_retries + 1):
+                        model_started = time.monotonic()
+                        try:
+                            raw_model_response, model_payload = await self._post_json(
+                                server_name=self.config.model_server.name,
+                                url_path=self.url_path_for_run("/v1/responses", body),
+                                json=model_body,
+                                cookies=model_cookies,
+                                timeout_secs=self.config.model_request_timeout_secs,
+                            )
+                            model_error = None
+                            LOG.info(
+                                "event=web_model_request_complete benchmark=%s task=%s step=%d "
+                                "parse_attempt=%d model_attempt=%d elapsed_seconds=%.3f",
+                                task.benchmark.value,
+                                task.task_id,
+                                step_index,
+                                parse_attempt,
+                                model_attempt,
+                                time.monotonic() - model_started,
+                            )
+                            break
+                        except Exception as exc:  # Bounded native API parity retry.
+                            model_error = exc
+                            LOG.warning(
+                                "event=web_model_request_failed benchmark=%s task=%s step=%d parse_attempt=%d "
+                                "model_attempt=%d error_type=%s elapsed_seconds=%.3f retry=%s",
+                                task.benchmark.value,
+                                task.task_id,
+                                step_index,
+                                parse_attempt,
+                                model_attempt,
+                                type(exc).__name__,
+                                time.monotonic() - model_started,
+                                model_attempt < self.config.model_turn_max_retries,
+                            )
+                            if model_attempt >= self.config.model_turn_max_retries:
+                                raise
+                            await asyncio.sleep(self.config.model_retry_delay_secs)
+                    if model_error is not None:
+                        raise model_error
                     model_response = NeMoGymResponse.model_validate(model_payload)
                     model_cookies = raw_model_response.cookies
                     last_model_response = model_response
                     model_turns += 1
                     usage = _merge_usage(usage, model_response)
-                    trajectory.extend(model_response.output)
-                    model_text = _extract_output_text(model_response)
+                    LOG.info(
+                        "event=web_model_turn_complete benchmark=%s task=%s step=%d parse_attempt=%d "
+                        "output_items=%d input_tokens=%s output_tokens=%s",
+                        task.benchmark.value,
+                        task.task_id,
+                        step_index,
+                        parse_attempt,
+                        len(model_response.output),
+                        getattr(model_response.usage, "input_tokens", "unknown"),
+                        getattr(model_response.usage, "output_tokens", "unknown"),
+                    )
+                    if task.action_profile != WebActionProfile.NATIVE_TOOLCALL:
+                        trajectory.extend(model_response.output)
                     try:
-                        action = parse_model_action(model_text, task.action_profile)
+                        action = _parse_response_action(
+                            model_response,
+                            task.action_profile,
+                            native_action_recovery=self.config.native_action_recovery,
+                            native_tool_alias_recovery=self.config.native_tool_alias_recovery,
+                            native_max_computer_actions=self.config.native_max_computer_actions,
+                        )
+                        if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
+                            # The reference runner adds only a successfully
+                            # parsed assistant tool-call turn to history.
+                            trajectory.extend(model_response.output)
+                        LOG.info(
+                            "event=web_action_parsed benchmark=%s task=%s step=%d parse_attempt=%d "
+                            "action=%s calls=%s terminal=%s recovery_modes=%s",
+                            task.benchmark.value,
+                            task.task_id,
+                            step_index,
+                            parse_attempt,
+                            action.name,
+                            _action_call_names(action),
+                            action.terminal,
+                            _native_recovery_modes(action),
+                        )
                         break
                     except ActionParseError as exc:
+                        LOG.warning(
+                            "event=web_action_parse_failed benchmark=%s task=%s step=%d parse_attempt=%d "
+                            "error_type=%s error=%r terminal_attempt=%s",
+                            task.benchmark.value,
+                            task.task_id,
+                            step_index,
+                            parse_attempt,
+                            type(exc).__name__,
+                            str(exc)[:500],
+                            parse_attempt >= self.config.max_parse_retries,
+                        )
                         if parse_attempt >= self.config.max_parse_retries:
+                            if task.action_profile != WebActionProfile.NATIVE_TOOLCALL:
+                                trajectory.append(
+                                    NeMoGymEasyInputMessage(
+                                        role="user",
+                                        content=f"Action parsing failed permanently: {exc}",
+                                    )
+                                )
+                            break
+                        if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
+                            if self.config.native_parse_retry_feedback:
+                                parse_feedback = _native_parse_retry_messages(model_response, exc)
+                            await asyncio.sleep(self.config.model_retry_delay_secs)
+                        else:
                             trajectory.append(
-                                NeMoGymEasyInputMessage(
-                                    role="user",
-                                    content=f"Action parsing failed permanently: {exc}",
+                                parse_error_message(
+                                    exc,
+                                    action_prompt_profile=self.config.action_prompt_profile,
+                                    action_profile=task.action_profile,
                                 )
                             )
-                            break
-                        trajectory.append(
-                            parse_error_message(
-                                exc,
-                                action_prompt_profile=self.config.action_prompt_profile,
-                                action_profile=task.action_profile,
-                            )
-                        )
 
                 if action is None:
+                    LOG.warning(
+                        "event=web_rollout_no_action benchmark=%s task=%s step=%d model_turns=%d",
+                        task.benchmark.value,
+                        task.task_id,
+                        step_index,
+                        model_turns,
+                    )
                     break
 
+                environment_started = time.monotonic()
+                LOG.info(
+                    "event=web_environment_step_start benchmark=%s task=%s step=%d action=%s calls=%s",
+                    task.benchmark.value,
+                    task.task_id,
+                    step_index,
+                    action.name,
+                    _action_call_names(action),
+                )
                 step_response, step_payload = await self._post_json(
                     server_name=self.config.resources_server.name,
                     url_path="/step",
@@ -371,13 +698,54 @@ class WebAgent(SimpleResponsesAPIAgent):
                 environment_steps += 1
                 if not step_data.execution_ok:
                     execution_failures += 1
+                    consecutive_execution_failures += 1
+                else:
+                    consecutive_execution_failures = 0
                 observation = step_data.observation
-                self._remember_evidence(observation, screenshot_history, url_history)
                 terminated = step_data.terminated
                 truncated = step_data.truncated
+                LOG.info(
+                    "event=web_environment_step_complete benchmark=%s task=%s step=%d execution_ok=%s "
+                    "terminated=%s truncated=%s origin=%s elapsed_seconds=%.3f",
+                    task.benchmark.value,
+                    task.task_id,
+                    step_index,
+                    step_data.execution_ok,
+                    terminated,
+                    truncated,
+                    _url_origin(observation.url),
+                    time.monotonic() - environment_started,
+                )
+                if not (task.action_profile == WebActionProfile.NATIVE_TOOLCALL and terminated):
+                    self._remember_evidence(observation, screenshot_history, url_history)
+                native_status = step_data.info.get("native_status")
+                if native_status in {CAPTCHA_BUDGET_EXHAUSTED_STATUS, BROWSER_TARGET_CLOSED_STATUS}:
+                    # The browser could not reach the site, so nothing the policy
+                    # did is measurable. Mask instead of scoring a forced stop.
+                    environment_failure_kind = native_status
+                    LOG.warning(
+                        "event=web_environment_access_failed benchmark=%s task=%s step=%d failure_kind=%s",
+                        task.benchmark.value,
+                        task.task_id,
+                        step_index,
+                        environment_failure_kind,
+                    )
+                    rollout_finished = True
+                    break
                 if action.terminal:
                     final_answer = action.answer
                 if action.terminal or terminated or truncated:
+                    rollout_finished = True
+                    break
+                if consecutive_execution_failures >= self.config.max_consecutive_execution_failures:
+                    LOG.warning(
+                        "event=web_execution_failure_limit benchmark=%s task=%s step=%d consecutive=%d",
+                        task.benchmark.value,
+                        task.task_id,
+                        step_index,
+                        consecutive_execution_failures,
+                    )
+                    truncated = True
                     rollout_finished = True
                     break
                 trajectory.append(
@@ -389,10 +757,45 @@ class WebAgent(SimpleResponsesAPIAgent):
                         action_prompt_profile=self.config.action_prompt_profile,
                     )
                 )
+                signature = _repeatable_action_signature(action)
+                if signature is not None:
+                    recent_action_signatures.append(signature)
+                    occurrences = sum(item == signature for item in recent_action_signatures)
+                    if (
+                        self.config.repeated_action_warning_threshold > 0
+                        and occurrences >= self.config.repeated_action_warning_threshold
+                    ):
+                        LOG.warning(
+                            "event=web_repeated_action_warning benchmark=%s task=%s step=%d occurrences=%d window=%d",
+                            task.benchmark.value,
+                            task.task_id,
+                            step_index,
+                            occurrences,
+                            len(recent_action_signatures),
+                        )
+                        trajectory.append(
+                            NeMoGymEasyInputMessage(
+                                role="user",
+                                content=(
+                                    "Recovery check: the same non-trivial browser action has repeated "
+                                    f"{occurrences} times in the last {len(recent_action_signatures)} actions. "
+                                    "Re-read the latest screenshot and choose a different verifiable action "
+                                    "unless the page is visibly progressing."
+                                ),
+                            )
+                        )
 
             if not rollout_finished:
                 truncated = True
 
+            evaluate_started = time.monotonic()
+            LOG.info(
+                "event=web_environment_evaluate_start benchmark=%s task=%s final_answer_present=%s screenshots=%d",
+                task.benchmark.value,
+                task.task_id,
+                bool(final_answer),
+                len(screenshot_history),
+            )
             evaluate_response, evaluate_payload = await self._post_json(
                 server_name=self.config.resources_server.name,
                 url_path="/evaluate",
@@ -403,9 +806,19 @@ class WebAgent(SimpleResponsesAPIAgent):
             evaluation = WebEvaluateResponse.model_validate(evaluate_payload)
             env_cookies = evaluate_response.cookies
             verifier_result = evaluation.result
+            LOG.info(
+                "event=web_environment_evaluate_complete benchmark=%s task=%s valid_sample=%s "
+                "failure_kind=%s elapsed_seconds=%.3f",
+                task.benchmark.value,
+                task.task_id,
+                verifier_result.valid_sample,
+                verifier_result.failure_kind or "none",
+                time.monotonic() - evaluate_started,
+            )
 
         finally:
             if seeded:
+                close_started = time.monotonic()
                 try:
                     _close_response, close_payload = await self._post_json(
                         server_name=self.config.resources_server.name,
@@ -418,14 +831,41 @@ class WebAgent(SimpleResponsesAPIAgent):
                     if close_data.session_id is not None:
                         artifacts.session_id = close_data.session_id
                     artifacts.recordings = close_data.recording_artifacts
-                except Exception:  # noqa: BLE001 - cleanup must not replace a completed result.
-                    pass
+                    LOG.info(
+                        "event=web_session_close_complete benchmark=%s task=%s session=%s recordings=%d "
+                        "elapsed_seconds=%.3f",
+                        task.benchmark.value,
+                        task.task_id,
+                        artifacts.session_id or "unknown",
+                        len(artifacts.recordings),
+                        time.monotonic() - close_started,
+                    )
+                except Exception as exc:  # noqa: BLE001 - cleanup must not replace a completed result.
+                    LOG.warning(
+                        "event=web_session_close_failed benchmark=%s task=%s session=%s error_type=%s "
+                        "elapsed_seconds=%.3f",
+                        task.benchmark.value,
+                        task.task_id,
+                        artifacts.session_id or "unknown",
+                        type(exc).__name__,
+                        time.monotonic() - close_started,
+                        exc_info=True,
+                    )
 
         # The WebVoyager judge only consumes retained evidence. Release the
         # browser before the potentially slow VLM call so one judged episode
         # does not occupy scarce browser/site capacity. WebArena-family native
         # evaluators still run above while their live page is available.
-        if task.benchmark == WebBenchmark.WEBVOYAGER:
+        if task.benchmark == WebBenchmark.WEBVOYAGER and environment_failure_kind is None:
+            judge_started = time.monotonic()
+            LOG.info(
+                "event=web_judge_start benchmark=%s task=%s screenshots=%d urls=%d final_answer_present=%s",
+                task.benchmark.value,
+                task.task_id,
+                len(screenshot_history),
+                len(url_history),
+                bool(final_answer),
+            )
             verifier_result = await self._judge_webvoyager(
                 task=task,
                 final_answer=final_answer or "",
@@ -433,9 +873,25 @@ class WebAgent(SimpleResponsesAPIAgent):
                 urls=list(url_history),
                 body=body,
             )
+            LOG.info(
+                "event=web_judge_complete benchmark=%s task=%s valid_sample=%s success=%s reward=%s "
+                "failure_kind=%s elapsed_seconds=%.3f",
+                task.benchmark.value,
+                task.task_id,
+                verifier_result.valid_sample,
+                verifier_result.task_success,
+                verifier_result.reward,
+                verifier_result.failure_kind or "none",
+                time.monotonic() - judge_started,
+            )
 
         if last_model_response is None:
             raise RuntimeError("web rollout ended before the policy returned a response")
+        if environment_failure_kind is not None:
+            verifier_result = WebVerifierResult(
+                valid_sample=False,
+                failure_kind=environment_failure_kind,
+            )
         if verifier_result is None:
             verifier_result = WebVerifierResult(
                 valid_sample=False,
@@ -503,10 +959,13 @@ class WebAgent(SimpleResponsesAPIAgent):
                 if terminal or attempt >= self.config.judge_max_retries:
                     raise
                 sleep_for = min(delay, self.config.judge_retry_max_delay_secs)
-                print(
-                    f"[web-agent-judge-retry] {task.task_id}: attempt {attempt + 1} "
-                    f"failed with {type(exc).__name__}; retrying in {sleep_for:.1f}s",
-                    flush=True,
+                LOG.warning(
+                    "event=web_judge_retry benchmark=%s task=%s attempt=%d error_type=%s sleep_seconds=%.1f",
+                    task.benchmark.value,
+                    task.task_id,
+                    attempt + 1,
+                    type(exc).__name__,
+                    sleep_for,
                 )
                 await asyncio.sleep(sleep_for)
                 if delay > 0:
@@ -570,10 +1029,13 @@ class WebAgent(SimpleResponsesAPIAgent):
                 if remaining <= 0:
                     raise
                 sleep_for = min(delay, remaining)
-                print(
-                    f"[web-agent-seed-retry] {task.benchmark.value}/{task.task_id}: "
-                    f"HTTP {exc.status} on attempt {attempt}; retrying in {sleep_for:.1f}s",
-                    flush=True,
+                LOG.warning(
+                    "event=web_seed_retry benchmark=%s task=%s attempt=%d http_status=%d sleep_seconds=%.1f",
+                    task.benchmark.value,
+                    task.task_id,
+                    attempt,
+                    exc.status,
+                    sleep_for,
                 )
                 await asyncio.sleep(sleep_for)
                 if delay > 0:
@@ -608,9 +1070,15 @@ class WebAgent(SimpleResponsesAPIAgent):
             detail = f"{detail}; response_body={str(response_content).strip()}"
         detail = detail[:500]
         failure_class, terminal, failure_kind, failure_metadata = _failure_route(exc)
-        print(
-            f"[web-agent-{failure_class}] {task.benchmark.value}/{task.task_id}: {detail}",
-            flush=True,
+        LOG.error(
+            "event=web_rollout_classified_failure benchmark=%s task=%s failure_class=%s "
+            "failure_kind=%s terminal=%s error_type=%s",
+            task.benchmark.value,
+            task.task_id,
+            failure_class,
+            failure_kind,
+            terminal,
+            type(exc).__name__,
         )
         verifier_result = WebVerifierResult(
             valid_sample=False,

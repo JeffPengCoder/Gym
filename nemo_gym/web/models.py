@@ -10,6 +10,16 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+# Wire value for ``WebStepResult.info["native_status"]`` when a browser runtime
+# has spent its CAPTCHA solving budget. The rollout is then a site-access
+# failure rather than a policy outcome, so agents mask it instead of judging it.
+CAPTCHA_BUDGET_EXHAUSTED_STATUS = "captcha_budget_exhausted"
+# A Playwright page/context/browser closed while the CAPTCHA integration was
+# inspecting it. This is a retryable browser lifecycle failure, not a paid
+# solver failure and not a policy outcome.
+BROWSER_TARGET_CLOSED_STATUS = "browser_target_closed"
+
+
 class WebBenchmark(StrEnum):
     WEBARENA = "webarena"
     VISUALWEBARENA = "visualwebarena"
@@ -18,6 +28,7 @@ class WebBenchmark(StrEnum):
 
 class WebRuntimeProfile(StrEnum):
     BROWSERGYM = "browsergym"
+    NATIVE_VISUAL = "native_visual"
     SELENIUM = "selenium"
 
 
@@ -29,6 +40,7 @@ class WebObservationProfile(StrEnum):
 
 class WebActionProfile(StrEnum):
     BROWSERGYM_HIGHLEVEL = "browsergym_highlevel"
+    NATIVE_TOOLCALL = "native_toolcall"
     WEBVOYAGER_LEGACY = "webvoyager_legacy"
 
 
@@ -126,6 +138,7 @@ class WebAction(BaseModel):
     terminal: bool = False
     answer: Optional[str] = None
     raw_model_output: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class WebStepResult(BaseModel):

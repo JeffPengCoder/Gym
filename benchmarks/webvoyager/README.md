@@ -6,6 +6,12 @@ The first Gym profile runs the 643 official WebVoyager tasks through
 to BrowserGym high-level calls. The final answer and latest screenshots are
 scored by the separate WebVoyager VLM judge.
 
+The maintained 552-task Nano Omni screenshot/tool-call route is a separate
+profile documented in [NATIVE_V3.md](NATIVE_V3.md). It uses headed Chromium,
+coordinate actions, the native Gemini judge contract, a US proxy, and
+CapSolver. Do not combine its 552-task score or runtime requirements with this
+legacy 643-task BrowserGym profile.
+
 For evaluation and RL collection, judging is per episode: the agent releases
 the browser after retaining the final evidence, then obtains a binary reward
 before returning that rollout. There is no 643-task evaluation barrier in the

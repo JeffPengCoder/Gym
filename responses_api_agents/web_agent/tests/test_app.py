@@ -3,19 +3,28 @@
 
 import asyncio
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientResponseError
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage
+from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
-from nemo_gym.web.models import WebBenchmark, WebTask
+from nemo_gym.web.models import (
+    BROWSER_TARGET_CLOSED_STATUS,
+    CAPTCHA_BUDGET_EXHAUSTED_STATUS,
+    WebActionProfile,
+    WebBenchmark,
+    WebTask,
+)
 from responses_api_agents.web_agent.app import (
     WebAgent,
     WebAgentConfig,
     WebAgentRunRequest,
+    _native_parse_retry_messages,
+    _parse_response_action,
     _redact_old_images,
 )
 
@@ -39,6 +48,121 @@ def _model_response(text: str) -> dict:
         "tool_choice": "auto",
         "tools": [],
     }
+
+
+def _native_model_response(name: str, arguments: str) -> dict:
+    payload = _model_response("")
+    payload["output"] = [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": name,
+            "arguments": arguments,
+            "status": "completed",
+        }
+    ]
+    return payload
+
+
+def test_native_profile_reads_structured_function_calls_not_message_text():
+    payload = _model_response("")
+    payload["output"] = [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "tabs_focus",
+            "arguments": '{"tab_id": 2}',
+            "status": "completed",
+        }
+    ]
+
+    action = _parse_response_action(
+        NeMoGymResponse.model_validate(payload),
+        WebActionProfile.NATIVE_TOOLCALL,
+    )
+
+    assert action.name == "tabs_focus"
+    assert action.arguments["calls"][0]["arguments"] == {"tab_id": 2}
+
+
+def test_native_retry_feedback_contains_error_and_no_image() -> None:
+    response = NeMoGymResponse.model_validate(_native_model_response("click", '{"x":0.2,"y":0.3}'))
+
+    messages = _native_parse_retry_messages(response, ValueError("unsupported native browser tool: 'click'"))
+
+    assert [message.role for message in messages] == ["assistant", "user"]
+    assert "unsupported native browser tool" in messages[1].content
+    assert "Use `left_click`, never `click`" in messages[1].content
+    assert "arguments.actions" in messages[1].content
+    assert "input_image" not in json.dumps([message.model_dump() for message in messages])
+
+
+@pytest.mark.asyncio
+async def test_native_parse_retry_injects_feedback_and_retry_temperature() -> None:
+    agent = _agent(
+        parse_retries=1,
+        judge=True,
+        native_parse_retry_feedback=True,
+        native_parse_retry_temperature=0.2,
+        model_retry_delay_secs=0,
+    )
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [_seed("Allrecipes--0")],
+            "/v1/responses": [
+                _native_model_response("click", '{"coordinate":[0.2,0.3]}'),
+                _native_model_response("terminate", '{"status":"success","answer":"done"}'),
+            ],
+            "/step": [
+                {
+                    "operation_id": "step-0",
+                    "observation": _observation(),
+                    "execution_ok": True,
+                    "terminated": True,
+                }
+            ],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
+            "/verify_webvoyager": [
+                {
+                    "result": {
+                        "reward": 1.0,
+                        "raw_score": 1.0,
+                        "task_success": True,
+                        "valid_sample": True,
+                    }
+                }
+            ],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": [], "temperature": 0.1},
+        web_task=WebTask(
+            benchmark=WebBenchmark.WEBVOYAGER,
+            task_id="Allrecipes--0",
+            intent="Find a recipe",
+            start_urls=["https://example.test"],
+            runtime_profile="native_visual",
+            observation_profile="screenshot",
+            action_profile="native_toolcall",
+        ),
+    )
+
+    result = await agent.run(request, body)
+
+    model_bodies = [call_body for _server, path, call_body in calls if path == "/v1/responses"]
+    assert result.model_turns == 2
+    assert len(model_bodies) == 2
+    assert model_bodies[0].temperature == 0.1
+    assert model_bodies[1].temperature == 0.2
+    assert sum("input_image" in json.dumps(item.model_dump()) for item in model_bodies[1].input) == 1
+    assert any(
+        getattr(item, "role", None) == "user" and "arguments.actions" in str(item.content)
+        for item in model_bodies[1].input
+    )
 
 
 def _observation(url="https://example.test") -> dict:
@@ -261,7 +385,7 @@ async def test_action_parse_failure_is_retried_without_stepping_browser():
 
 
 @pytest.mark.asyncio
-async def test_webvoyager_routes_final_evidence_to_external_judge():
+async def test_webvoyager_routes_final_evidence_to_external_judge(caplog):
     agent = _agent(judge=True)
     calls = _wire(
         agent,
@@ -309,7 +433,8 @@ async def test_webvoyager_routes_final_evidence_to_external_judge():
         ),
     )
 
-    result = await agent.run(request, body)
+    with caplog.at_level(logging.INFO, logger="nemo_gym.responses_api_agents.web_agent"):
+        result = await agent.run(request, body)
 
     assert result.reward == 1.0
     judge_call = next(call for call in calls if call[1] == "/verify_webvoyager")
@@ -318,6 +443,19 @@ async def test_webvoyager_routes_final_evidence_to_external_judge():
     assert len(judge_call[2]["screenshots"]) == 2
     paths = [path for _server, path, _body in calls]
     assert paths.index("/evaluate") < paths.index("/close") < paths.index("/verify_webvoyager")
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    for event in (
+        "event=web_rollout_start",
+        "event=web_seed_complete",
+        "event=web_model_turn_complete",
+        "event=web_action_parsed",
+        "event=web_environment_step_complete",
+        "event=web_session_close_complete",
+        "event=web_judge_complete",
+        "event=web_rollout_complete",
+    ):
+        assert event in messages
+    assert "data:image/png;base64,abc" not in messages
 
 
 @pytest.mark.asyncio
@@ -637,3 +775,72 @@ async def test_run_classifies_missing_evaluator_as_terminal_configuration_failur
     assert dumped["_ng_failure_terminal"] is True
     assert result.verifier_result.metadata["error_kind"] == "evaluator_configuration"
     agent._post_json.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "native_status,action_error",
+    [
+        (
+            CAPTCHA_BUDGET_EXHAUSTED_STATUS,
+            "RuntimeError: Captcha solver failed more than 3 times",
+        ),
+        (
+            BROWSER_TARGET_CLOSED_STATUS,
+            "BrowserTargetClosedDuringCaptcha: browser target closed",
+        ),
+    ],
+)
+async def test_environment_access_failure_is_masked_instead_of_judged(
+    caplog,
+    native_status,
+    action_error,
+):
+    """A site the browser cannot reach makes the policy's work unmeasurable."""
+
+    agent = _agent(judge=True)
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [_seed("Allrecipes--0")],
+            "/v1/responses": [_model_response("Thought: keep going\nAction: Click [7]")],
+            "/step": [
+                {
+                    "operation_id": "step-0",
+                    "observation": _observation("https://example.test/challenge"),
+                    "execution_ok": False,
+                    "terminated": True,
+                    "info": {
+                        "action_error": action_error,
+                        "native_status": native_status,
+                    },
+                }
+            ],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": "Solve"},
+        web_task=WebTask(
+            benchmark=WebBenchmark.WEBVOYAGER,
+            task_id="Allrecipes--0",
+            intent="Find the answer",
+            start_urls=["https://example.test"],
+            action_profile="webvoyager_legacy",
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.responses_api_agents.web_agent"):
+        result = await agent.run(request, body)
+
+    assert result.mask_sample is True
+    assert result.failure_kind == native_status
+    assert result.reward == 0.0
+    assert result.task_success is False
+    # Judging a forced stop would score a site-access failure as a policy failure.
+    assert "/verify_webvoyager" not in [path for _server, path, _body in calls]
+    assert "/close" in [path for _server, path, _body in calls]
+    assert "event=web_environment_access_failed" in "\n".join(record.getMessage() for record in caplog.records)

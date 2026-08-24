@@ -12,9 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import socket
 from unittest.mock import AsyncMock, MagicMock
 
+from pydantic import BaseModel, Field, ValidationError
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
@@ -32,6 +34,8 @@ from nemo_gym.server_utils import (
     ServerClient,
     SimpleServer,
     _make_keepalive_socket_factory,
+    _validation_body_shape,
+    _validation_errors_for_log,
     initialize_ray,
 )
 
@@ -49,6 +53,35 @@ _TEST_ADDR_INFO = (
 
 
 class TestServerUtils:
+    def test_validation_diagnostics_report_shape_without_payload(self) -> None:
+        secret_image = "data:image/png;base64," + ("A" * 10_000)
+
+        class Payload(BaseModel):
+            screenshots: list[str] = Field(max_length=1)
+
+        try:
+            Payload(screenshots=[secret_image, secret_image])
+        except ValidationError as exc:
+            diagnostics = {
+                "errors": _validation_errors_for_log(exc),
+                "body": _validation_body_shape({"screenshots": [secret_image, secret_image]}),
+            }
+        else:  # pragma: no cover - guards the test fixture itself.
+            raise AssertionError("expected validation failure")
+
+        serialized = json.dumps(diagnostics)
+        assert secret_image not in serialized
+        assert "base64" not in serialized
+        assert diagnostics["errors"] == [
+            {
+                "type": "too_long",
+                "loc": ("screenshots",),
+                "msg": "List should have at most 1 item after validation, not 2",
+                "ctx": {"max_length": 1, "actual_length": 2},
+            }
+        ]
+        assert diagnostics["body"]["fields"]["screenshots"] == {"type": "array", "length": 2}
+
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
         assert not nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()

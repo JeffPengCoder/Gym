@@ -79,6 +79,53 @@ _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 
 
+def _validation_value_shape(value: Any) -> dict[str, Any]:
+    """Describe validation input without logging its potentially sensitive payload."""
+
+    if isinstance(value, dict):
+        return {
+            "type": "object",
+            "field_count": len(value),
+            "fields": sorted(str(key) for key in value)[:50],
+        }
+    if isinstance(value, (list, tuple, set)):
+        return {"type": "array", "length": len(value)}
+    if isinstance(value, (str, bytes, bytearray)):
+        return {"type": "string" if isinstance(value, str) else "bytes", "length": len(value)}
+    return {"type": type(value).__name__}
+
+
+def _validation_body_shape(body: Any) -> dict[str, Any]:
+    """Return top-level field names and value shapes, never field values."""
+
+    if not isinstance(body, dict):
+        return _validation_value_shape(body)
+    return {
+        "type": "object",
+        "field_count": len(body),
+        "fields": {str(key): _validation_value_shape(value) for key, value in list(body.items())[:50]},
+    }
+
+
+def _validation_errors_for_log(exc: RequestValidationError) -> list[dict[str, Any]]:
+    """Strip Pydantic's echoed ``input`` values while retaining actionable diagnostics."""
+
+    sanitized: list[dict[str, Any]] = []
+    for error in exc.errors():
+        item = {key: error[key] for key in ("type", "loc", "msg") if key in error}
+        context = error.get("ctx")
+        if isinstance(context, dict):
+            safe_context = {
+                str(key): value
+                for key, value in context.items()
+                if value is None or isinstance(value, (bool, int, float))
+            }
+            if safe_context:
+                item["ctx"] = safe_context
+        sanitized.append(item)
+    return sanitized
+
+
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit: int = 100 * 1024
     global_aiohttp_connector_limit_per_host: int = 1024
@@ -714,8 +761,8 @@ repr(e): {repr(e)}"""
         @app.exception_handler(RequestValidationError)
         async def validation_exception_handler(request: Request, exc):
             print(
-                f"""Hit validation exception! Errors: {json.dumps(exc.errors(), indent=4)}
-Full body: {json.dumps(exc.body, indent=4)}
+                f"""Hit validation exception! Errors: {json.dumps(_validation_errors_for_log(exc), indent=4)}
+Body shape: {json.dumps(_validation_body_shape(exc.body), indent=4)}
 """
             )
             return await request_validation_exception_handler(request, exc)

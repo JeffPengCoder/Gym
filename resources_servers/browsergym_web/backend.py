@@ -11,6 +11,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.models import (
     WebAction,
     WebArtifactRef,
@@ -22,7 +23,6 @@ from nemo_gym.web.models import (
     WebTask,
     WebVerifierResult,
 )
-from resources_servers.browsergym_web.artifacts import WebArtifactStore
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
 from resources_servers.browsergym_web.profiles import BrowserGymLaunchSpec, resolve_browsergym_profile
 from resources_servers.browsergym_web.visualwebarena_compat import (

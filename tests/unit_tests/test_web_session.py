@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from collections import OrderedDict
+
+from nemo_gym.web.models import WebBenchmark, WebObservation, WebTask
+from nemo_gym.web.session import (
+    BenchmarkPreconditionError,
+    CapacityUnavailableError,
+    SessionConflictError,
+    SessionNotFoundError,
+    WebSessionState,
+)
+from nemo_gym.web.site_pool import SiteLease
+from resources_servers.browsergym_web import session_manager as browsergym_sessions
+
+
+class _Backend:
+    def reset(self, task):
+        del task
+
+    def observe(self):
+        return WebObservation()
+
+    def step(self, action):
+        del action
+
+    def evaluate(self, final_answer=None):
+        del final_answer
+
+    def close(self):
+        return None
+
+
+def test_browsergym_reexports_common_session_errors():
+    assert browsergym_sessions.SessionNotFoundError is SessionNotFoundError
+    assert browsergym_sessions.SessionConflictError is SessionConflictError
+    assert browsergym_sessions.CapacityUnavailableError is CapacityUnavailableError
+    assert browsergym_sessions.BenchmarkPreconditionError is BenchmarkPreconditionError
+
+
+def test_common_session_state_owns_idempotency_and_verifier_slots():
+    task = WebTask(benchmark=WebBenchmark.WEBARENA, task_id="7")
+    state = WebSessionState(
+        session_id="session-7",
+        task=task,
+        backend=_Backend(),
+        site_lease=SiteLease(lease_id="test:7", isolated=True),
+        observation=WebObservation(url="about:blank"),
+        seed_info={},
+        created_at=1.0,
+        last_access_at=1.0,
+    )
+
+    assert state.operations == OrderedDict()
+    assert state.verifier_result is None
+    assert state.status == "ready"
