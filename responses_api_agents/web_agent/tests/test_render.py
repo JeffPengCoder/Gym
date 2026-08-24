@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
+
 from nemo_gym.web.models import (
     WebActionProfile,
     WebBenchmark,
@@ -10,6 +12,7 @@ from nemo_gym.web.models import (
     WebTask,
 )
 from responses_api_agents.web_agent.render import (
+    TASK_INPUT_IMAGE_REDACTION_NOTICE,
     compact_som_text,
     parse_error_message,
     render_observation,
@@ -86,6 +89,61 @@ def test_som_profile_includes_page_and_goal_images():
     message = render_observation(observation, task, step_index=0)
 
     assert _block_types(message) == ["input_text", "input_image", "input_image"]
+
+
+def test_native_visual_reference_image_is_loaded_from_explicit_root(tmp_path):
+    image = tmp_path / "images" / "reference.png"
+    image.parent.mkdir()
+    image.write_bytes(b"png-payload")
+    task = WebTask(
+        benchmark=WebBenchmark.VISUALWEBARENA,
+        task_id="0",
+        input_images=["images/reference.png"],
+        runtime_profile="native_visual",
+        observation_profile="screenshot",
+        action_profile="native_toolcall",
+    )
+
+    message = render_observation(
+        WebObservation(),
+        task,
+        step_index=0,
+        task_image_root=str(tmp_path),
+    )
+
+    assert _block_types(message) == ["input_text", "input_text", "input_image", "input_text"]
+    assert message.content[1]["text"] == "Task image 1 of 1:"
+    assert message.content[2]["image_url"] == "data:image/png;base64,cG5nLXBheWxvYWQ="
+
+    later = render_observation(
+        WebObservation(),
+        task,
+        step_index=1,
+        task_image_root=str(tmp_path),
+    )
+    assert _block_types(later) == ["input_text"]
+    assert "# Task Instruction:" in later.content[0]["text"]
+    assert TASK_INPUT_IMAGE_REDACTION_NOTICE in later.content[0]["text"]
+
+
+def test_native_visual_reference_image_cannot_escape_explicit_root(tmp_path):
+    outside = tmp_path.parent / "outside.png"
+    outside.write_bytes(b"not-readable-through-task-metadata")
+    task = WebTask(
+        benchmark=WebBenchmark.VISUALWEBARENA,
+        task_id="0",
+        input_images=["../outside.png"],
+        runtime_profile="native_visual",
+        action_profile="native_toolcall",
+    )
+
+    with pytest.raises(ValueError, match="outside task_image_root"):
+        render_observation(
+            WebObservation(),
+            task,
+            step_index=0,
+            task_image_root=str(tmp_path),
+        )
 
 
 def test_som_only_text_keeps_only_labelled_interactive_elements():

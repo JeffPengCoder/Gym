@@ -9,6 +9,7 @@ from typing import Any
 
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage
 from nemo_gym.web.models import WebActionProfile, WebObservation, WebObservationProfile, WebTask
+from nemo_gym.web.task_images import resolve_task_image_url
 
 
 BROWSERGYM_CODE_BLOCK_FORMAT = """## Action:
@@ -64,6 +65,9 @@ Action: Click [bid]"""
 
 
 VISUAL_OBSERVATION_TEXT_MODES = frozenset({"full_axtree", "som_only", "none"})
+TASK_INPUT_IMAGE_REDACTION_NOTICE = (
+    "Task images have been redacted from this turn and are available in the first user turn."
+)
 _BID_LINE = re.compile(r"^\s*\[[^\]]+\]\s+")
 _SOM_MARKER = re.compile(r",\s*som(?=,|$)")
 
@@ -131,6 +135,8 @@ def render_observation(
     step_index: int,
     visual_observation_text: str = "full_axtree",
     action_prompt_profile: str = "standard",
+    task_image_root: str | None = None,
+    max_task_image_bytes: int = 25 * 1024 * 1024,
 ) -> NeMoGymEasyInputMessage:
     """Build one model turn without leaking raw BrowserGym Python objects."""
 
@@ -142,8 +148,10 @@ def render_observation(
         profile = WebObservationProfile.A11Y if task.benchmark.value == "webarena" else WebObservationProfile.SOM
     if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
         text_parts = []
-        if step_index == 0:
+        if step_index == 0 or task.input_images:
             text_parts.append(f"# Task Instruction:\n\n{_goal_text(observation.goal, task.intent)}")
+        if step_index > 0 and task.input_images:
+            text_parts.append(TASK_INPUT_IMAGE_REDACTION_NOTICE)
         text_parts.append(f"You are currently on Step {step_index + 1}.")
         tab_lines = [
             "Tab Context:",
@@ -187,15 +195,48 @@ def render_observation(
     content: list[dict[str, Any]] = []
     # The native recipe places the current browser screenshot before text and
     # task-reference images. BrowserGym profiles retain their historical order.
+    image_references = [*_goal_images(observation.goal), *task.input_images] if step_index == 0 else []
     if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
         screenshot = observation.screenshot
         if screenshot is not None and screenshot.data_url:
             content.append({"type": "input_image", "image_url": screenshot.data_url, "detail": "high"})
-        content.append({"type": "input_text", "text": "\n\n".join(text_parts)})
+        if image_references:
+            # The pinned native agent places reference images between the task
+            # instruction and step/tab context, with a deterministic label for
+            # each image. Screenshot-history compaction recognizes the
+            # adjacent deterministic label and preserves the task image.
+            content.append({"type": "input_text", "text": text_parts[0]})
+            for index, image_reference in enumerate(image_references, start=1):
+                image_url = resolve_task_image_url(
+                    image_reference,
+                    image_root=task_image_root,
+                    max_bytes=max_task_image_bytes,
+                )
+                content.append(
+                    {
+                        "type": "input_text",
+                        "text": f"Task image {index} of {len(image_references)}:",
+                    }
+                )
+                content.append(
+                    {
+                        "type": "input_image",
+                        "image_url": image_url,
+                        "detail": "high",
+                    }
+                )
+            content.append({"type": "input_text", "text": "\n\n".join(text_parts[1:])})
+        else:
+            content.append({"type": "input_text", "text": "\n\n".join(text_parts)})
     else:
         content.append({"type": "input_text", "text": "\n\n".join(text_parts)})
-    if step_index == 0:
-        for image_url in [*_goal_images(observation.goal), *task.input_images]:
+    if step_index == 0 and task.action_profile != WebActionProfile.NATIVE_TOOLCALL:
+        for image_reference in image_references:
+            image_url = resolve_task_image_url(
+                image_reference,
+                image_root=task_image_root,
+                max_bytes=max_task_image_bytes,
+            )
             content.append({"type": "input_image", "image_url": image_url, "detail": "high"})
     if task.action_profile != WebActionProfile.NATIVE_TOOLCALL and profile in {
         WebObservationProfile.SCREENSHOT,

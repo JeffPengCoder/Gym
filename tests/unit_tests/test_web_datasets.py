@@ -6,6 +6,9 @@ import json
 import pytest
 
 from nemo_gym.web.datasets import (
+    adapt_native_visualwebarena_records,
+    adapt_native_webarena_record,
+    adapt_native_webarena_records,
     adapt_native_webvoyager_record,
     adapt_visualwebarena_records,
     adapt_webarena_record,
@@ -105,6 +108,77 @@ def test_webvoyager_uses_legacy_action_surface_over_browsergym():
 def test_native_webvoyager_adapter_is_exposed_through_dataset_api():
     row = adapt_native_webvoyager_record({"id": "Allrecipes--0", "ques": "Find a recipe"})
     assert row["web_task"]["runtime_profile"] == "native_visual"
+
+
+def test_native_webarena_uses_reference_numeric_task_id_and_shared_tools():
+    row = adapt_native_webarena_record(
+        {
+            "id": "webarena-17",
+            "ques": "Inspect an order",
+            "web_name": ["shopping_admin"],
+            "web": ["__SHOPPING_ADMIN__"],
+            "eval": {"eval_types": ["string_match"]},
+        }
+    )
+
+    assert row["web_task"]["task_id"] == "17"
+    assert row["web_task"]["runtime_profile"] == "native_visual"
+    assert row["web_task"]["verifier_profile"] == "native_webarena_classic"
+    assert row["responses_create_params"]["tools"]
+
+
+def test_native_webarena_batch_preserves_cross_task_collision_plan():
+    rows = adapt_native_webarena_records(
+        [
+            {
+                "id": f"webarena-{index}",
+                "ques": "Update the shared profile",
+                "web_name": ["gitlab"],
+                "web": ["__GITLAB__/byteblaze"],
+                "eval": {
+                    "eval_types": ["program_html"],
+                    "program_html": [
+                        {
+                            "url": "__GITLAB__/byteblaze",
+                            "locator": "document.body.innerText",
+                            "required_contents": {"must_include": ["updated"]},
+                        }
+                    ],
+                },
+            }
+            for index in range(2)
+        ]
+    )
+
+    for row in rows:
+        targets = row["web_task"]["task_kwargs"]["collision_plan"]["snapshot_adapters"]["program_html"]["targets"]
+        assert len(targets) == 1
+
+
+def test_native_visualwebarena_matches_reference_contiguous_ids_and_images():
+    rows = adapt_native_visualwebarena_records(
+        [
+            {
+                "id": "visualwebarena-577",
+                "ques": "First",
+                "web_name": ["reddit"],
+                "web": ["__REDDIT__"],
+                "eval": {},
+            },
+            {
+                "id": "visualwebarena-580",
+                "ques": "Second",
+                "web_name": ["shopping"],
+                "web": ["__SHOPPING__"],
+                "image": ["input-0.png", "input-1.png"],
+                "eval": {},
+            },
+        ]
+    )
+
+    assert [row["web_task"]["task_id"] for row in rows] == ["0", "1"]
+    assert rows[1]["web_task"]["input_images"] == ["input-0.png", "input-1.png"]
+    assert rows[1]["web_task"]["original_metadata"]["id"] == "visualwebarena-580"
 
 
 def test_write_jsonl_is_utf8_and_newline_delimited(tmp_path):

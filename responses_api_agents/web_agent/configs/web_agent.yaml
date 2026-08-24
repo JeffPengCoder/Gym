@@ -31,6 +31,11 @@ web_agent:
       visual_observation_text: full_axtree
       action_prompt_profile: standard
       redact_old_visual_observations: false
+      # Native VisualWebArena profiles override this with the same read-only
+      # task-image directory mounted into the resource server. Local image
+      # references are confined below this root before being sent to a model.
+      task_image_root: null
+      max_task_image_bytes: 26214400
       resources_request_timeout_secs: 180.0
       seed_request_timeout_secs: 1800.0
       seed_retry_initial_delay_secs: 2.0

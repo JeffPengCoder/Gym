@@ -10,10 +10,10 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from nemo_gym.web.models import WebBenchmark
-from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
+from nemo_gym.web.resource_config import WebResourcesServerConfig
 
 
-class NativeWebResourcesServerConfig(BrowserGymWebResourcesServerConfig):
+class NativeWebResourcesServerConfig(WebResourcesServerConfig):
     artifact_dir: str = "cache/native-web/artifacts"
     headless: bool = False
     viewport_width: int = Field(default=1920, ge=640)
@@ -24,6 +24,7 @@ class NativeWebResourcesServerConfig(BrowserGymWebResourcesServerConfig):
     default_timeout_ms: int = Field(default=45_000, ge=1_000, le=600_000)
     terminate_on_action_error: bool = True
     max_computer_actions: int = Field(default=20, ge=1, le=100)
+    record_video: bool = False
     browser_proxy_env: str = "WA_BROWSER_PROXY_SERVER"
     captcha_api_key_env: str = "CAPSOLVER_API_KEY"
     captcha_provider_env: str = "WA_CAPTCHA_PROVIDER"
@@ -31,6 +32,9 @@ class NativeWebResourcesServerConfig(BrowserGymWebResourcesServerConfig):
     require_captcha_solver: bool = False
     proxy_mode: Literal["webvoyager_domains", "always", "disabled"] = "webvoyager_domains"
     browser_channel: str | None = None
+    # Mounted by native VisualWebArena profiles for task and evaluator images.
+    task_image_root: str | None = None
+    max_task_image_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
     allowed_benchmarks: list[WebBenchmark] = Field(default_factory=lambda: [WebBenchmark.WEBVOYAGER])
     max_evidence_screenshots: int = Field(default=200, ge=1, le=500)
 

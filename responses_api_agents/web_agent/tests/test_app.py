@@ -285,6 +285,39 @@ def test_redact_old_visual_observation_removes_both_image_and_page_text():
     assert old.content[0]["text"] == "large page tree"
 
 
+def test_native_image_history_preserves_task_images_while_compacting_browser_screenshots():
+    first = NeMoGymEasyInputMessage(
+        role="user",
+        content=[
+            {"type": "input_image", "image_url": "data:image/png;base64,browser-0", "detail": "high"},
+            {"type": "input_text", "text": "Task image 1 of 1:"},
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,task",
+                "detail": "high",
+            },
+        ],
+    )
+    later = [
+        NeMoGymEasyInputMessage(
+            role="user",
+            content=[{"type": "input_image", "image_url": f"data:image/png;base64,browser-{index}", "detail": "high"}],
+        )
+        for index in range(1, 5)
+    ]
+
+    redacted = _redact_old_images(
+        [first, *later],
+        3,
+        append_redaction_notice=False,
+    )
+
+    assert [block["image_url"] for block in redacted[0].content if block.get("type") == "input_image"] == [
+        "data:image/png;base64,task"
+    ]
+    assert sum(block.get("type") == "input_image" for message in redacted for block in message.content) == 4
+
+
 @pytest.mark.parametrize("benchmark", [WebBenchmark.WEBARENA, WebBenchmark.VISUALWEBARENA])
 @pytest.mark.asyncio
 async def test_arena_family_rollout_uses_colocated_evaluator_and_closes_session(benchmark):

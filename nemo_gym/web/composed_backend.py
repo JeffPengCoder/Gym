@@ -36,6 +36,16 @@ class WebBrowserDriver(Protocol):
 class WebTaskEvaluator(Protocol):
     """Score a completed task without owning the browser lifecycle."""
 
+    def prepare(
+        self,
+        *,
+        task: WebTask,
+        observation: WebObservation,
+        browser_context: Any,
+    ) -> None:
+        """Capture evaluator state required before the policy starts acting."""
+        ...
+
     def evaluate(
         self,
         *,
@@ -66,7 +76,31 @@ class ComposedWebBackend:
     def reset(self, task: WebTask) -> tuple[WebObservation, dict[str, Any]]:
         if self._closed:
             raise RuntimeError("a closed web backend cannot be reset")
+        if self._task is not None:
+            # A session reset starts a new evaluator lifecycle. In particular,
+            # WebArena-family before-state snapshots must never survive into a
+            # retry of the same task. Drivers own their own reset cleanup.
+            self.evaluator.close()
+            self._task = None
+            self._observation = None
         observation, info = self.driver.reset(task)
+        try:
+            self.evaluator.prepare(
+                task=task,
+                observation=observation,
+                browser_context=self.driver.evaluation_context(),
+            )
+        except BaseException:
+            # A failed before-state capture leaves no valid rollout. Release
+            # the live browser and any partially prepared evaluator state
+            # immediately instead of retaining partial state. Cleanup errors
+            # must not hide the deterministic prepare failure.
+            for cleanup in (self.driver.close, self.evaluator.close):
+                try:
+                    cleanup()
+                except BaseException:
+                    pass
+            raise
         self._task = task
         self._observation = observation
         return observation, info

@@ -15,7 +15,12 @@ from nemo_gym.web.models import (
     WebObservationProfile,
     WebTask,
 )
-from nemo_gym.web.native_webvoyager import adapt_native_webvoyager_record as _adapt_native_webvoyager_record
+from nemo_gym.web.native_eval_collision import build_collision_plans
+from nemo_gym.web.native_visual import (
+    adapt_native_visualwebarena_record as _adapt_native_visualwebarena_record,
+)
+from nemo_gym.web.native_visual import adapt_native_webarena_record as _adapt_native_webarena_record
+from nemo_gym.web.native_visual import adapt_native_webvoyager_record as _adapt_native_webvoyager_record
 
 
 def _start_urls(value: Any) -> list[str]:
@@ -117,6 +122,44 @@ def adapt_native_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
     """Adapt the maintained 552-task population to the native Nano Omni route."""
 
     return _adapt_native_webvoyager_record(record)
+
+
+def adapt_native_webarena_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt the maintained 812-task population to the native visual route."""
+
+    return _adapt_native_webarena_record(record)
+
+
+def adapt_native_webarena_records(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Adapt a full selection and preserve its mutable-target collision plan."""
+
+    source_records = [dict(record) for record in records]
+    plans = build_collision_plans(source_records)
+    return [
+        _adapt_native_webarena_record(record, collision_plan=plan)
+        for record, plan in zip(source_records, plans, strict=True)
+    ]
+
+
+def adapt_native_visualwebarena_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt the maintained 908-task population to the native visual route."""
+
+    return _adapt_native_visualwebarena_record(record)
+
+
+def adapt_native_visualwebarena_records(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Match the reference runner's contiguous 0..N-1 VisualWebArena IDs."""
+
+    source_records = [dict(record) for record in records]
+    plans = build_collision_plans(source_records)
+    return [
+        _adapt_native_visualwebarena_record(
+            record,
+            task_index=index,
+            collision_plan=plan,
+        )
+        for index, (record, plan) in enumerate(zip(source_records, plans, strict=True))
+    ]
 
 
 def load_json_records(path: str | Path) -> list[dict[str, Any]]:

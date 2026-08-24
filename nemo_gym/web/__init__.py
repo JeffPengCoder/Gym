@@ -40,6 +40,8 @@ from nemo_gym.web.operation_runner import (
 from nemo_gym.web.session import (
     BenchmarkPreconditionError,
     CapacityUnavailableError,
+    EvaluatorConfigurationError,
+    EvaluatorInfrastructureError,
     SessionConflictError,
     SessionNotFoundError,
     WebSessionState,
@@ -53,6 +55,8 @@ __all__ = [
     "CapacityUnavailableError",
     "ComposedWebBackend",
     "DirectWebOperationRunner",
+    "EvaluatorConfigurationError",
+    "EvaluatorInfrastructureError",
     "LocalSiteLockPool",
     "SiteLease",
     "SitePool",

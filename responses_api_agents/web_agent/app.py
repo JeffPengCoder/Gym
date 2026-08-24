@@ -70,6 +70,10 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     model_retry_delay_secs: float = Field(default=1.0, ge=0.0, le=60.0)
     max_image_history: int = Field(default=3, ge=1, le=20)
     judge_max_screenshots: int = Field(default=3, ge=1, le=200)
+    # VisualWebArena JSONL stores relative reference-image paths. The agent
+    # resolves them only below this explicitly mounted, read-only directory.
+    task_image_root: str | None = None
+    max_task_image_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
     visual_observation_text: Literal["full_axtree", "som_only", "none"] = "full_axtree"
     action_prompt_profile: Literal["standard", "code_block"] = "standard"
     redact_old_visual_observations: bool = False
@@ -285,6 +289,29 @@ def _input_image_count(items: list[Any]) -> int:
     return count
 
 
+def _is_input_image_block(block: Any) -> bool:
+    return (isinstance(block, dict) and block.get("type") == "input_image") or (
+        getattr(block, "type", None) == "input_image"
+    )
+
+
+def _block_text(block: Any) -> str:
+    if isinstance(block, dict):
+        return str(block.get("text", ""))
+    return str(getattr(block, "text", ""))
+
+
+def _is_task_input_image_block(content: list[Any], index: int) -> bool:
+    if index < 1 or not _is_input_image_block(content[index]):
+        return False
+    label = _block_text(content[index - 1])
+    return label.startswith("Task image ") and " of " in label and label.endswith(":")
+
+
+def _is_browser_image_block(content: list[Any], index: int) -> bool:
+    return _is_input_image_block(content[index]) and not _is_task_input_image_block(content, index)
+
+
 def _action_call_names(action: Any) -> str:
     calls = getattr(action, "arguments", {}).get("calls", [])
     names = [str(call.get("name", "unknown")) for call in calls if isinstance(call, dict)]
@@ -337,16 +364,13 @@ def _redact_old_images(
         content = getattr(item, "content", None)
         if not isinstance(content, list):
             continue
-        if any(
-            (isinstance(block, dict) and block.get("type") == "input_image")
-            or getattr(block, "type", None) == "input_image"
-            for block in content
-        ):
+        if any(_is_browser_image_block(content, block_index) for block_index in range(len(content))):
             image_message_indices.append(index)
     for index in image_message_indices[:-max_image_history]:
         item = copied[index]
         content = getattr(item, "content", None)
-        if redact_observation_text:
+        has_task_images = any(_is_task_input_image_block(content, block_index) for block_index in range(len(content)))
+        if redact_observation_text and not has_task_images:
             item.content = [
                 {
                     "type": "input_text",
@@ -355,12 +379,7 @@ def _redact_old_images(
             ]
             continue
         retained = [
-            block
-            for block in content
-            if not (
-                (isinstance(block, dict) and block.get("type") == "input_image")
-                or getattr(block, "type", None) == "input_image"
-            )
+            block for block_index, block in enumerate(content) if not _is_browser_image_block(content, block_index)
         ]
         if append_redaction_notice:
             retained.append({"type": "input_text", "text": "[Earlier screenshot omitted from context.]"})
@@ -515,6 +534,8 @@ class WebAgent(SimpleResponsesAPIAgent):
                     step_index=0,
                     visual_observation_text=self.config.visual_observation_text,
                     action_prompt_profile=self.config.action_prompt_profile,
+                    task_image_root=self.config.task_image_root,
+                    max_task_image_bytes=self.config.max_task_image_bytes,
                 )
             ]
 
@@ -755,6 +776,8 @@ class WebAgent(SimpleResponsesAPIAgent):
                         step_index=step_index + 1,
                         visual_observation_text=self.config.visual_observation_text,
                         action_prompt_profile=self.config.action_prompt_profile,
+                        task_image_root=self.config.task_image_root,
+                        max_task_image_bytes=self.config.max_task_image_bytes,
                     )
                 )
                 signature = _repeatable_action_signature(action)

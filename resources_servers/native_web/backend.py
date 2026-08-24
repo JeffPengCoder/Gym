@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Mingjie-recipe-compatible headed Chromium driver for Gym web sessions."""
+"""Reference-recipe-compatible headed Chromium driver for Gym web sessions."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ import signal
 import subprocess
 import time
 from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -26,7 +28,6 @@ from nemo_gym.web.models import (
     WebStepResult,
     WebTab,
     WebTask,
-    WebVerifierResult,
 )
 from resources_servers.native_web.captcha import (
     BROWSER_PROXY_CONFIG_ATTR,
@@ -34,6 +35,7 @@ from resources_servers.native_web.captcha import (
     captcha_solver_from_environment,
 )
 from resources_servers.native_web.config import NativeWebResourcesServerConfig
+from resources_servers.native_web.site_auth import configured_site_urls, login_sites, resolve_start_urls
 
 
 LOG = logging.getLogger("nemo_gym.resources_servers.native_web")
@@ -41,6 +43,16 @@ LOG = logging.getLogger("nemo_gym.resources_servers.native_web")
 
 class BrowserTargetClosedDuringCaptcha(RuntimeError):
     """The browser target disappeared while CAPTCHA handling inspected it."""
+
+
+@dataclass(frozen=True, slots=True)
+class NativeBrowserEvaluationContext:
+    """Live process-local state exposed only to a colocated native evaluator."""
+
+    page: Any
+    browser_context: Any
+    evidence: tuple[WebArtifactRef, ...]
+    artifact_dir: Path | None = None
 
 
 def _is_playwright_target_closed_error(exc: BaseException) -> bool:
@@ -103,6 +115,10 @@ RETRYABLE_NAVIGATION_ERRORS = (
     "net::ERR_TIMED_OUT",
 )
 NAVIGATION_RETRY_DELAYS_S = (4, 4, 4, 8)
+# WebArena-family setup wraps initial navigation in three attempts for any
+# Playwright failure. This is separate from WebVoyager's transport-only retry
+# contract, which also applies to policy-driven public-web navigation.
+LOCAL_SETUP_RETRY_DELAYS_S = (1, 2)
 
 
 def _is_retryable_navigation_error(exc: Exception) -> bool:
@@ -237,8 +253,6 @@ class NativeWebDriver:
             self.config.viewport_height,
         )
         self.close()
-        if task.benchmark != WebBenchmark.WEBVOYAGER:
-            raise ValueError("native_web currently supports WebVoyager only")
         if not os.environ.get("DISPLAY"):
             raise ValueError("DISPLAY is required; run the native resource server under Xvfb")
 
@@ -284,8 +298,9 @@ class NativeWebDriver:
                     self.session_id,
                     task.task_id,
                 )
-        self._context.add_init_script(CAPTCHA_INTERCEPT_SCRIPT)
-        self._context.add_init_script(PRINT_INTERCEPT_SCRIPT)
+        if task.benchmark == WebBenchmark.WEBVOYAGER:
+            self._context.add_init_script(CAPTCHA_INTERCEPT_SCRIPT)
+            self._context.add_init_script(PRINT_INTERCEPT_SCRIPT)
         self._context.on("page", self._configure_page)
         self._page = self._context.new_page()
         self._task = task
@@ -298,11 +313,25 @@ class NativeWebDriver:
         self._captcha_budget_exhausted = False
         self._browser_target_closed = False
         self._evidence.clear()
-        if task.start_urls:
-            self._goto(self._page, task.start_urls[0], wait_until=RESET_WAIT_UNTIL)
+        site_urls = configured_site_urls(task)
+        login_sites(
+            task,
+            context=self._context,
+            site_urls=site_urls,
+            goto=lambda page, url: self._goto(page, url, wait_until=RESET_WAIT_UNTIL),
+        )
+        start_urls = resolve_start_urls(task, site_urls)
+        for index, start_url in enumerate(start_urls):
+            if index > 0:
+                self._page = self._context.new_page()
+            self._goto_task_start(self._page, start_url)
+            if task.benchmark != WebBenchmark.WEBVOYAGER:
+                time.sleep(1)
+                self._page.bring_to_front()
         self._page.bring_to_front()
         time.sleep(self.config.action_delay_seconds)
-        self._maybe_solve_captcha("initial")
+        if task.benchmark == WebBenchmark.WEBVOYAGER:
+            self._maybe_solve_captcha("initial")
         self._observation = self._capture()
         LOG.info(
             "event=native_browser_reset_complete session=%s task=%s origin=%s tabs=%d elapsed_seconds=%.3f",
@@ -318,6 +347,7 @@ class NativeWebDriver:
             "viewport": [self.config.viewport_width, self.config.viewport_height],
             "proxy_enabled": bool(proxy),
             "captcha_enabled": bool(self.config.captcha_solver()),
+            "site_login_enabled": task.benchmark != WebBenchmark.WEBVOYAGER,
         }
 
     def observe(self) -> WebObservation:
@@ -372,7 +402,7 @@ class NativeWebDriver:
                     call["name"],
                     time.monotonic() - call_started,
                 )
-                if call["name"] != "terminate":
+                if call["name"] != "terminate" and self._uses_webvoyager_access_helpers():
                     self._maybe_solve_captcha(f"after {call['name']}", failure_step=captcha_failure_step)
         except Exception as exc:  # A malformed/failed UI operation is policy-visible.
             execution_ok = False
@@ -393,7 +423,11 @@ class NativeWebDriver:
         else:
             if not self._browser_target_closed:
                 time.sleep(self.config.action_delay_seconds)
-            if not self._captcha_budget_exhausted and not self._browser_target_closed:
+            if (
+                self._uses_webvoyager_access_helpers()
+                and not self._captcha_budget_exhausted
+                and not self._browser_target_closed
+            ):
                 try:
                     self._maybe_solve_captcha(
                         "before post-action screenshot",
@@ -455,20 +489,14 @@ class NativeWebDriver:
             info=info,
         )
 
-    def evaluate(self, final_answer: str | None = None) -> WebVerifierResult:
-        LOG.info(
-            "event=native_browser_evaluate session=%s task=%s screenshots=%d final_answer_present=%s",
-            self.session_id,
-            self._task.task_id if self._task is not None else "unknown",
-            len(self._evidence),
-            bool(final_answer),
-        )
-        return WebVerifierResult(
-            valid_sample=False,
-            failure_kind="external_judge_required",
-            evidence=list(self._evidence),
-            verifier_version="native-webvoyager-gemini-v1",
-            metadata={"final_answer": final_answer or "", "screenshots": len(self._evidence)},
+    def evaluation_context(self) -> NativeBrowserEvaluationContext:
+        if self._task is None or self._page is None or self._context is None:
+            raise RuntimeError("native browser has not been reset")
+        return NativeBrowserEvaluationContext(
+            page=self._page,
+            browser_context=self._context,
+            evidence=tuple(self._evidence),
+            artifact_dir=self.artifacts.session_dir(self.session_id),
         )
 
     def close(self) -> None:
@@ -498,6 +526,11 @@ class NativeWebDriver:
             )
 
     def _proxy_for_task(self, task: WebTask) -> str:
+        # Proxy/CAPTCHA are WebVoyager access concerns. Local WebArena-family
+        # deployments must never start routing through a public proxy merely
+        # because a shared process received an overly broad override.
+        if task.benchmark != WebBenchmark.WEBVOYAGER:
+            return ""
         if self.config.proxy_mode == "disabled":
             return ""
         proxy = self.config.browser_proxy()
@@ -510,6 +543,9 @@ class NativeWebDriver:
             if any(start_url.startswith(prefix) for prefix in PROXY_START_URL_PREFIXES):
                 return proxy
         return ""
+
+    def _uses_webvoyager_access_helpers(self) -> bool:
+        return self._task is not None and self._task.benchmark == WebBenchmark.WEBVOYAGER
 
     def _maybe_solve_captcha(self, phase: str, *, failure_step: int | None = None) -> bool:
         if self.config.require_captcha_solver and not self.config.captcha_solver():
@@ -690,6 +726,33 @@ class NativeWebDriver:
                 time.sleep(delay_seconds)
         raise RuntimeError("navigation retry loop exited without a result")
 
+    def _goto_task_start(self, page: Any, url: str) -> Any:
+        """Apply the benchmark-specific initial-navigation retry envelope."""
+
+        if self._task is None or self._task.benchmark == WebBenchmark.WEBVOYAGER:
+            return self._goto(page, url, wait_until=RESET_WAIT_UNTIL)
+        attempts = len(LOCAL_SETUP_RETRY_DELAYS_S) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._goto(page, url, wait_until=RESET_WAIT_UNTIL)
+            except Exception as exc:
+                if attempt >= attempts:
+                    raise
+                delay_seconds = LOCAL_SETUP_RETRY_DELAYS_S[attempt - 1]
+                LOG.warning(
+                    "event=native_local_site_setup_retry session=%s task=%s origin=%s "
+                    "attempt=%d/%d error_type=%s sleep_seconds=%d",
+                    self.session_id,
+                    self._task.task_id,
+                    _url_origin(url),
+                    attempt,
+                    attempts,
+                    type(exc).__name__,
+                    delay_seconds,
+                )
+                time.sleep(delay_seconds)
+        raise RuntimeError("local site setup retry loop exited without a result")
+
     def _execute_call(self, name: str, arguments: dict[str, Any]) -> None:
         if name == "computer":
             for action in arguments["actions"]:
@@ -816,5 +879,13 @@ class NativeWebDriver:
         pyautogui.PAUSE = 0.0
 
 
-def native_backend_factory(config, session_id: str, artifacts: WebArtifactStore) -> NativeWebDriver:
-    return NativeWebDriver(config, session_id, artifacts)
+def native_backend_factory(config, session_id: str, artifacts: WebArtifactStore):
+    """Compose the native browser with benchmark-specific evaluation."""
+
+    from nemo_gym.web.composed_backend import ComposedWebBackend
+    from resources_servers.native_web.evaluators import NativeTaskEvaluator
+
+    return ComposedWebBackend(
+        NativeWebDriver(config, session_id, artifacts),
+        NativeTaskEvaluator(config=config),
+    )

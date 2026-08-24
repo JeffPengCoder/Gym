@@ -31,6 +31,14 @@ class BenchmarkPreconditionError(RuntimeError):
     """A deterministic task/environment setup failure for the deployment."""
 
 
+class EvaluatorConfigurationError(RuntimeError):
+    """A required model-backed evaluator is not configured for a task."""
+
+
+class EvaluatorInfrastructureError(RuntimeError):
+    """A benchmark evaluator or post-action environment operation failed."""
+
+
 @dataclass
 class WebSessionState:
     """Process-local state shared by BrowserGym and native web backends."""

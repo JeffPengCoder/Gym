@@ -17,18 +17,27 @@ from nemo_gym.web.models import (
     BROWSER_TARGET_CLOSED_STATUS,
     CAPTCHA_BUDGET_EXHAUSTED_STATUS,
     WebAction,
+    WebArtifactRef,
     WebObservation,
     WebTask,
 )
 from nemo_gym.web.native_webvoyager import NATIVE_WEBVOYAGER_SYSTEM_PROMPT, NATIVE_WEBVOYAGER_TOOLS
+from nemo_gym.web.session import EvaluatorConfigurationError
+from resources_servers.browsergym_web.app import BrowserGymWebResourcesServer
+from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
+from resources_servers.browsergym_web.session_manager import BrowserGymSessionManager
+from resources_servers.native_web.app import NativeWebResourcesServer
 from resources_servers.native_web.backend import (
+    LOCAL_SETUP_RETRY_DELAYS_S,
     NAVIGATION_RETRY_DELAYS_S,
     NAVIGATION_WAIT_UNTIL,
+    NativeBrowserEvaluationContext,
     NativeWebDriver,
     _is_playwright_target_closed_error,
     _type_browser_text,
 )
 from resources_servers.native_web.config import NativeWebResourcesServerConfig
+from resources_servers.native_web.evaluators import NativeTaskEvaluator
 from resources_servers.native_web.session_manager import NativeWebSessionManager
 from resources_servers.webvoyager_judge.prompts import NATIVE_WEBVOYAGER_JUDGE_PROMPT
 
@@ -91,6 +100,219 @@ def test_native_resource_rejects_browsergym_task() -> None:
         manager._validate_task(WebTask(benchmark="webvoyager", task_id="0"))
 
 
+def test_native_resource_rejects_mixed_verifier_profile() -> None:
+    manager = NativeWebSessionManager(_config(allowed_benchmarks=["webarena"]))
+    task = WebTask.model_validate(
+        {
+            "benchmark": "webarena",
+            "task_id": "0",
+            "runtime_profile": "native_visual",
+            "action_profile": "native_toolcall",
+            "verifier_profile": "browsergym_webarena",
+        }
+    )
+
+    with pytest.raises(ValueError, match="verifier_profile=native_webarena_classic"):
+        manager._validate_task(task)
+
+
+def test_native_and_browsergym_are_sibling_implementations() -> None:
+    assert not issubclass(NativeWebResourcesServer, BrowserGymWebResourcesServer)
+    assert not issubclass(NativeWebSessionManager, BrowserGymSessionManager)
+    assert not issubclass(NativeWebResourcesServerConfig, BrowserGymWebResourcesServerConfig)
+
+
+def test_native_webvoyager_evaluator_preserves_external_judge_evidence() -> None:
+    evidence = WebArtifactRef(
+        uri="artifact://session/step-0.png",
+        mime_type="image/png",
+        size_bytes=123,
+        sha256="0" * 64,
+    )
+    task = WebTask(
+        benchmark="webvoyager",
+        task_id="Allrecipes--0",
+        runtime_profile="native_visual",
+        action_profile="native_toolcall",
+    )
+    context = NativeBrowserEvaluationContext(
+        page=object(),
+        browser_context=object(),
+        evidence=(evidence,),
+    )
+    evaluator = NativeTaskEvaluator()
+    observation = WebObservation(url="https://example.test")
+
+    evaluator.prepare(task=task, observation=observation, browser_context=context)
+    result = evaluator.evaluate(
+        task=task,
+        observation=observation,
+        final_answer="done",
+        browser_context=context,
+    )
+
+    assert not result.valid_sample
+    assert result.failure_kind == "external_judge_required"
+    assert result.evidence == [evidence]
+    assert result.metadata == {"final_answer": "done", "screenshots": 1}
+
+
+def test_native_evaluator_fails_closed_when_benchmark_plugin_is_missing() -> None:
+    task = WebTask(
+        benchmark="webarena",
+        task_id="0",
+        runtime_profile="native_visual",
+        action_profile="native_toolcall",
+    )
+    context = NativeBrowserEvaluationContext(
+        page=object(),
+        browser_context=object(),
+        evidence=(),
+    )
+
+    with pytest.raises(EvaluatorConfigurationError, match="not installed"):
+        NativeTaskEvaluator().prepare(
+            task=task,
+            observation=WebObservation(),
+            browser_context=context,
+        )
+
+
+@pytest.mark.parametrize(
+    ("benchmark", "reference_answers", "answer", "verifier_version"),
+    [
+        (
+            "webarena",
+            {"exact_match": "expected"},
+            "expected",
+            "native-webarena-3b775dc",
+        ),
+        (
+            "visualwebarena",
+            {"required_values": [">= 3"]},
+            "4",
+            "native-visualwebarena-3b775dc",
+        ),
+    ],
+)
+def test_native_webarena_family_evaluator_scores_rule_only_tasks(
+    monkeypatch,
+    benchmark,
+    reference_answers,
+    answer,
+    verifier_version,
+) -> None:
+    # Classic exact_match has a judge fallback only when the deterministic
+    # comparison misses. A non-secret sentinel proves the preflight while this
+    # successful rule path makes no network request.
+    monkeypatch.setenv("WEBARENA_JUDGE_API_KEY", "test-only")
+    config = _config(allowed_benchmarks=[benchmark])
+    task = WebTask(
+        benchmark=benchmark,
+        task_id="0",
+        intent="Return the expected value",
+        runtime_profile="native_visual",
+        action_profile="native_toolcall",
+        original_metadata={
+            "id": f"{benchmark}-0",
+            "eval": {
+                "eval_types": ["string_match"],
+                "reference_answers": reference_answers,
+            },
+        },
+    )
+    context = NativeBrowserEvaluationContext(
+        page=object(),
+        browser_context=object(),
+        evidence=(),
+    )
+    observation = WebObservation()
+    evaluator = NativeTaskEvaluator(config=config)
+
+    evaluator.prepare(task=task, observation=observation, browser_context=context)
+    result = evaluator.evaluate(
+        task=task,
+        observation=observation,
+        final_answer=answer,
+        browser_context=context,
+    )
+
+    assert result.reward == 1.0
+    assert result.task_success
+    assert result.valid_sample
+    assert result.verifier_version == verifier_version
+
+
+def test_native_webarena_evaluator_merges_api_and_browser_snapshots(monkeypatch) -> None:
+    from resources_servers.native_web import reference_evaluation
+
+    monkeypatch.setenv("WEBARENA_JUDGE_API_KEY", "test-only")
+    api_snapshots = iter(
+        [
+            {"shopping_orders": [{"increment_id": "1"}]},
+            {"shopping_orders": [{"increment_id": "1"}, {"increment_id": "2"}]},
+        ]
+    )
+    browser_snapshots = iter(
+        [
+            {"program_html": [{"key": "shared", "value": "before"}]},
+            {"program_html": [{"key": "shared", "value": "after"}]},
+        ]
+    )
+    captured = {}
+    monkeypatch.setattr(reference_evaluation, "collect_snapshots", lambda _plan: next(api_snapshots))
+    monkeypatch.setattr(
+        reference_evaluation,
+        "collect_browser_snapshots_sync",
+        lambda _page, _plan: next(browser_snapshots),
+    )
+
+    def build_context(plan, before, after):
+        captured.update(plan=plan, before=before, after=after)
+        return {"snapshots": {"before": before, "after": after}}
+
+    monkeypatch.setattr(reference_evaluation, "build_snapshot_context", build_context)
+    monkeypatch.setattr(reference_evaluation, "evaluate_classic_task_sync", lambda *_args, **_kwargs: (1.0, "ok"))
+    collision_plan = {
+        "snapshot_adapters": {
+            "shopping_orders": {},
+            "program_html": {"targets": []},
+        },
+        "target_overrides": {},
+    }
+    task = WebTask(
+        benchmark="webarena",
+        task_id="0",
+        intent="Create an order",
+        runtime_profile="native_visual",
+        action_profile="native_toolcall",
+        task_kwargs={"collision_plan": collision_plan},
+        original_metadata={
+            "id": "webarena-0",
+            "eval": {"eval_types": ["string_match"], "reference_answers": {"exact_match": "done"}},
+        },
+    )
+    evaluator = NativeTaskEvaluator(config=_config(allowed_benchmarks=["webarena"]))
+    context = NativeBrowserEvaluationContext(page=object(), browser_context=object(), evidence=())
+
+    evaluator.prepare(task=task, observation=WebObservation(), browser_context=context)
+    evaluator.evaluate(
+        task=task,
+        observation=WebObservation(),
+        final_answer="done",
+        browser_context=context,
+    )
+
+    assert captured["before"] == {
+        "shopping_orders": [{"increment_id": "1"}],
+        "program_html": [{"key": "shared", "value": "before"}],
+    }
+    assert captured["after"] == {
+        "shopping_orders": [{"increment_id": "1"}, {"increment_id": "2"}],
+        "program_html": [{"key": "shared", "value": "after"}],
+    }
+
+
 def test_native_config_rejects_headless_execution() -> None:
     with pytest.raises(ValueError, match="headed Chromium"):
         _config(headless=True)
@@ -99,6 +321,15 @@ def test_native_config_rejects_headless_execution() -> None:
 def test_native_config_rejects_multiple_sessions_on_one_display() -> None:
     with pytest.raises(ValueError, match="max_sessions=1"):
         _config(max_sessions=2)
+
+
+def test_native_proxy_is_scoped_to_webvoyager_even_in_always_mode(monkeypatch) -> None:
+    monkeypatch.setenv("WA_BROWSER_PROXY_SERVER", "proxy.example.test:19407")
+    driver = NativeWebDriver(_config(proxy_mode="always"), "session-test", object())
+
+    assert driver._proxy_for_task(WebTask(benchmark="webarena", task_id="0")) == ""
+    assert driver._proxy_for_task(WebTask(benchmark="visualwebarena", task_id="0")) == ""
+    assert driver._proxy_for_task(WebTask(benchmark="webvoyager", task_id="GitHub--0")) == ("proxy.example.test:19407")
 
 
 def test_native_text_input_splits_special_keys() -> None:
@@ -613,6 +844,29 @@ def test_navigation_reraises_after_exhausting_retries(monkeypatch) -> None:
 
     assert len(page.goto_calls) == attempts
     assert sleeps == list(NAVIGATION_RETRY_DELAYS_S)
+
+
+def test_webarena_setup_retries_any_initial_navigation_failure(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("resources_servers.native_web.backend.time.sleep", sleeps.append)
+    driver = NativeWebDriver(_config(allowed_benchmarks=["webarena"]), "session-test", object())
+    driver._task = WebTask(
+        benchmark="webarena",
+        task_id="17",
+        runtime_profile="native_visual",
+        action_profile="native_toolcall",
+    )
+    page = _RecordingPage(
+        goto_errors=[
+            RuntimeError("Page.goto: Timeout 45000ms exceeded"),
+            RuntimeError("Page.goto: selector setup failed"),
+        ]
+    )
+
+    driver._goto_task_start(page, "http://webarena.test/start")
+
+    assert len(page.goto_calls) == 3
+    assert sleeps == list(LOCAL_SETUP_RETRY_DELAYS_S)
 
 
 def test_context_deadline_is_configurable_and_defaults_to_the_reference() -> None:

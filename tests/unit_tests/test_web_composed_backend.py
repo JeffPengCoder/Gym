@@ -48,8 +48,24 @@ class _Driver:
 
 class _Evaluator:
     def __init__(self) -> None:
+        self.prepared: list[dict[str, Any]] = []
         self.calls: list[dict[str, Any]] = []
         self.closed = False
+
+    def prepare(
+        self,
+        *,
+        task: WebTask,
+        observation: WebObservation,
+        browser_context: Any,
+    ) -> None:
+        self.prepared.append(
+            {
+                "task": task,
+                "observation": observation,
+                "browser_context": browser_context,
+            }
+        )
 
     def evaluate(
         self,
@@ -99,6 +115,7 @@ def test_composed_backend_is_protocol_compatible_and_keeps_roles_separate() -> N
     observation, info = backend.reset(_task())
     assert observation.url.endswith("/start")
     assert info == {"driver": "fake-native-visual"}
+    assert evaluator.prepared[0]["browser_context"] == {"task_id": "0"}
     assert backend.observe() == observation
 
     result = backend.step(WebAction(name="click", script="click(10, 20)"))
@@ -159,3 +176,38 @@ def test_close_propagates_evaluator_cleanup_failure_and_clears_state() -> None:
     assert evaluator.closed
     with pytest.raises(RuntimeError, match="backend is closed"):
         backend.observe()
+
+
+def test_prepare_failure_releases_live_driver_before_propagating() -> None:
+    driver = _Driver()
+    evaluator = _Evaluator()
+
+    def fail_prepare(**_kwargs) -> None:
+        raise RuntimeError("before-state capture failed")
+
+    evaluator.prepare = fail_prepare  # type: ignore[method-assign]
+    backend = ComposedWebBackend(driver, evaluator)
+
+    with pytest.raises(RuntimeError, match="before-state capture failed"):
+        backend.reset(_task())
+    assert driver.closed
+
+
+def test_reset_starts_a_fresh_evaluator_lifecycle() -> None:
+    driver = _Driver()
+    evaluator = _Evaluator()
+    close_count = 0
+
+    def track_close() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    evaluator.close = track_close  # type: ignore[method-assign]
+    backend = ComposedWebBackend(driver, evaluator)
+
+    backend.reset(_task())
+    backend.reset(_task())
+
+    assert close_count == 1
+    assert len(evaluator.prepared) == 2
+    assert evaluator.prepared[-1]["browser_context"] == {"task_id": "0"}

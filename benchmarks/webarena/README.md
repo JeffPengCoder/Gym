@@ -26,5 +26,27 @@ judge. Pass `webarena_evaluator_model=<model>` and
 missing model on one of those 118 tasks is a masked configuration failure, not
 a score of zero.
 
-The first implementation is single-session because a fresh browser context
-does not isolate mutable site state.
+The BrowserGym implementation is single-session because a fresh browser
+context does not isolate mutable site state.
+
+## Native Nano Omni route
+
+`configs/native_v3.yaml` selects the headed-Chromium/PyAutoGUI action surface
+and the pinned native WebArena evaluator without changing the BrowserGym
+profile above. Prepare its maintained 812-row population with:
+
+```bash
+export WEBARENA_NATIVE_SOURCE_JSONL=/path/to/webarena_benchmarks/webarena.jsonl
+python benchmarks/webarena/prepare_native_v3.py
+```
+
+The native prepare path accepts the 812-row `webarena.jsonl` from
+`jayl940712/webarena_benchmarks` commit
+`6a2977939b157b0ab9de7799bb089c721f1ac115` and verifies its SHA-256 before
+adapting any row. A different 812-row file is rejected rather than silently
+creating a different benchmark recipe.
+
+Before launch, provide the required `WA_*` site URLs, reset the self-hosted
+deployment, and inject the evaluator's `WEBARENA_JUDGE_*` environment through
+the resource-server secret boundary. One native process owns one X display;
+parallel workers require separate displays and a site-state isolation policy.

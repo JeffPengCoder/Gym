@@ -23,6 +23,7 @@ from nemo_gym.web.models import (
     WebTask,
     WebVerifierResult,
 )
+from nemo_gym.web.session import EvaluatorConfigurationError, EvaluatorInfrastructureError
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
 from resources_servers.browsergym_web.profiles import BrowserGymLaunchSpec, resolve_browsergym_profile
 from resources_servers.browsergym_web.visualwebarena_compat import (
@@ -31,14 +32,6 @@ from resources_servers.browsergym_web.visualwebarena_compat import (
     configure_webarena_evaluator_model,
     rule_only_evaluator_import_environment,
 )
-
-
-class EvaluatorConfigurationError(RuntimeError):
-    """A model-backed native evaluator is not configured for this task."""
-
-
-class EvaluatorInfrastructureError(RuntimeError):
-    """A native evaluator or post-action environment operation failed."""
 
 
 def _json_safe(value: Any) -> Any:
