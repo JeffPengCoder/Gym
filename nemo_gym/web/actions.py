@@ -65,6 +65,7 @@ NATIVE_CLICK_ACTIONS = frozenset(
         "triple_click",
     }
 )
+MAX_NATIVE_SCROLL_AMOUNT = 50
 NativeActionRecovery = Literal["strict", "decode_string", "repair_single_closing_bracket"]
 NativeToolAliasRecovery = Literal["strict", "webvoyager_v3"]
 

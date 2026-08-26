@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.web.models import WebTask
+from resources_servers.webvoyager_browser.backend import WebVoyagerBrowserDriver
 from resources_servers.webvoyager_browser.config import WebVoyagerBrowserResourcesServerConfig
 from resources_servers.webvoyager_browser.session_manager import WebVoyagerBrowserSessionManager
 
@@ -62,3 +63,14 @@ def test_component_packages_only_its_own_resource_boundary() -> None:
     assert project["tool"]["setuptools"]["packages"]["find"]["include"] == [
         "resources_servers.webvoyager_browser*"
     ]
+
+
+def test_domain_proxy_includes_google_search_duckduckgo_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("WA_BROWSER_PROXY_SERVER", "proxy.example.test:19407")
+    driver = WebVoyagerBrowserDriver(_config(), "session-test", object())
+
+    assert (
+        driver._proxy_for_task(_task(start_urls=["https://html.duckduckgo.com/html?q=weather"]))
+        == "proxy.example.test:19407"
+    )
+    assert driver._proxy_for_task(_task(start_urls=["https://github.com/openai"])) == ""

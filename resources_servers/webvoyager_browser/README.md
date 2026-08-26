@@ -5,7 +5,8 @@ native WebVoyager profile. It exposes Gym's common web session API while
 keeping WebVoyager-only behavior out of the WebArena/VisualWebArena runtime:
 
 - headed Chromium with Playwright lifecycle and PyAutoGUI coordinate actions;
-- selective or forced US proxy routing;
+- selective or forced US proxy routing, including the DuckDuckGo HTML fallback
+  used by rewritten Google Search tasks;
 - CAPTCHA detection and CapSolver integration;
 - WebVoyager init scripts, public-site navigation retries, and evidence capture.
 
@@ -27,3 +28,7 @@ Runtime credentials are read from the environment:
 
 Credentials, proxy authentication, CAPTCHA solution tokens, and complete URL
 paths are never logged.
+
+The native tool schema caps one scroll action at 50 wheel clicks, and the
+shared driver clamps the value again at execution time. This prevents malformed
+model output such as `scroll_amount=100000` from blocking a worker.

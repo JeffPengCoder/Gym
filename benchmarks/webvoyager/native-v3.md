@@ -82,7 +82,9 @@ the summarizer routes it to the cleanup wave.
    Install `xclip` in the browser image. PyAutoGUI cannot emit non-ASCII
    characters, so the runtime pastes them through the X clipboard instead; a
    missing `xclip` turns every non-ASCII `type` action into a step failure.
-4. Provide `WA_BROWSER_PROXY_SERVER` for the selected US-proxy domains.
+4. Provide `WA_BROWSER_PROXY_SERVER` for the selected US-proxy domains. The
+   reference list includes `html.duckduckgo.com`: Google Search tasks are
+   rewritten to that fallback, and direct access can time out outside NRT.
 5. Provide `CAPSOLVER_API_KEY` and set `WA_CAPTCHA_PROVIDER=capsolver`. The
    built-in Turnstile/reCAPTCHA v2 integration is used unless an approved
    `WA_CAPTCHA_SOLVER=module.path:factory` override is supplied.
@@ -95,6 +97,11 @@ the summarizer routes it to the cleanup wave.
    `/verify` route. Judge transport/schema failures use the shared
    `judge_failed` sidecar and retained response evidence supports judge-only
    reverification.
+
+The native tool contract limits a single scroll action to 50 wheel clicks, and
+the browser clamps the value again before calling PyAutoGUI. This matches the
+reference worker-safety guard and prevents extreme model-generated values from
+stalling a worker.
 
 Prepare the private benchmark composition with the same locked CLI used by the
 root repository:

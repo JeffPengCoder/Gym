@@ -18,7 +18,7 @@ from urllib.parse import unquote, urlparse
 
 from pydantic import Field, model_validator
 
-from nemo_gym.web.actions import parse_native_tool_calls
+from nemo_gym.web.actions import MAX_NATIVE_SCROLL_AMOUNT, parse_native_tool_calls
 from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.models import (
     WebAction,
@@ -693,8 +693,18 @@ class NativeBrowserDriver:
             time.sleep(float(spec.get("duration") or self.config.action_delay_seconds))
         elif name == "scroll":
             params = spec.get("scroll_parameters") or {}
-            amount = int(params.get("scroll_amount", 1))
+            requested_amount = int(params.get("scroll_amount", 1))
+            amount = max(0, min(requested_amount, MAX_NATIVE_SCROLL_AMOUNT))
             direction = params.get("scroll_direction", "down")
+            if amount != requested_amount:
+                LOG.warning(
+                    "event=native_browser_scroll_clamped session=%s task=%s step=%d requested=%d applied=%d",
+                    self.session_id,
+                    self._task.task_id if self._task is not None else "unknown",
+                    self._step,
+                    requested_amount,
+                    amount,
+                )
             if point is not None:
                 pyautogui.moveTo(*point)
             if direction in {"up", "down"}:

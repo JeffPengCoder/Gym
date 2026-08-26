@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
+from nemo_gym.web.actions import MAX_NATIVE_SCROLL_AMOUNT
 from nemo_gym.web.native_eval_collision import build_collision_plan
 
 
@@ -140,10 +141,10 @@ NATIVE_VISUAL_TOOLS: list[dict[str, Any]] = [
                                             "scroll_amount": {
                                                 "type": "integer",
                                                 "minimum": 0,
+                                                "maximum": MAX_NATIVE_SCROLL_AMOUNT,
                                                 "default": 1,
                                                 "description": (
-                                                    "Number of mouse wheel clicks to scroll in the requested "
-                                                    "direction. This value is uncapped."
+                                                    "Number of mouse wheel clicks to scroll in the requested direction."
                                                 ),
                                             },
                                             "scroll_direction": {

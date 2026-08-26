@@ -33,7 +33,9 @@ from resources_servers.webvoyager_browser.config import WebVoyagerBrowserResourc
 
 LOG = logging.getLogger("nemo_gym.resources_servers.webvoyager_browser")
 
-PROXY_START_URL_HOSTS = frozenset({"www.allrecipes.com", "www.amazon.com", "dictionary.cambridge.org"})
+PROXY_START_URL_HOSTS = frozenset(
+    {"www.allrecipes.com", "www.amazon.com", "dictionary.cambridge.org", "html.duckduckgo.com"}
+)
 PROXY_START_URL_PREFIXES = ("https://www.google.com/maps/",)
 NAVIGATION_RETRY_DELAYS_S = (4.0, 4.0, 4.0, 8.0)
 PRINT_INTERCEPT_SCRIPT = """(() => {

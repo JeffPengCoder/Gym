@@ -6,12 +6,15 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.web.actions import MAX_NATIVE_SCROLL_AMOUNT
 from nemo_gym.web.datasets import adapt_native_webvoyager_record
 from nemo_gym.web.models import (
     BROWSER_TARGET_CLOSED_STATUS,
@@ -107,7 +110,7 @@ def test_native_recipe_prompt_and_tool_hashes_are_pinned() -> None:
         "8332b42f09c577837b1e50bb5c04c857f8942eda6ea692b32eba38deb8cb0d36"  # pragma: allowlist secret
     )
     assert hashlib.sha256(tools.encode()).hexdigest() == (
-        "12d525341f568cf3638e1b9dc99058fadf59e3bfa3719d9e88cb021e0e192f09"  # pragma: allowlist secret
+        "48b135165e158eb0837f0ff6606e978a8a08ee70a1c41e35b2bc33c891af3d54"  # pragma: allowlist secret
     )
     assert hashlib.sha256(NATIVE_WEBVOYAGER_JUDGE_PROMPT.encode()).hexdigest() == (
         "d5548ef2bb6f0641bc9ff116fe721bf540d096502e2040890b2bf1c8560d3325"  # pragma: allowlist secret
@@ -376,6 +379,36 @@ def test_native_text_input_splits_special_keys() -> None:
         ("hotkey", "shift", ","),
         ("write", "c", 0.01),
     ]
+
+
+def test_native_scroll_schema_and_runtime_clamp_excessive_amount(monkeypatch, caplog) -> None:
+    computer_tool = next(tool for tool in NATIVE_WEBVOYAGER_TOOLS if tool["name"] == "computer")
+    amount_schema = computer_tool["parameters"]["properties"]["actions"]["items"]["properties"][
+        "scroll_parameters"
+    ]["anyOf"][0]["properties"]["scroll_amount"]
+    assert amount_schema["maximum"] == MAX_NATIVE_SCROLL_AMOUNT
+
+    calls: list[int] = []
+    pyautogui = SimpleNamespace(
+        scroll=calls.append,
+        hscroll=calls.append,
+    )
+    monkeypatch.setitem(sys.modules, "pyautogui", pyautogui)
+    monkeypatch.setattr("nemo_gym.web.native_browser.time.sleep", lambda _seconds: None)
+    driver = NativeWebDriver(_config(), "session-test", object())
+    driver._task = WebTask(benchmark="webarena", task_id="14")
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.web.native_browser"):
+        driver._execute_computer(
+            {
+                "action": "scroll",
+                "scroll_parameters": {"scroll_direction": "down", "scroll_amount": 100_000},
+            }
+        )
+
+    assert calls == [-MAX_NATIVE_SCROLL_AMOUNT]
+    assert "event=native_browser_scroll_clamped" in caplog.text
+    assert "requested=100000 applied=50" in caplog.text
 
 
 def test_native_text_input_uses_clipboard_for_unicode(monkeypatch) -> None:
