@@ -15,15 +15,62 @@ legacy 643-task BrowserGym profile.
 For evaluation and RL collection, judging is per episode: the agent releases
 the browser after retaining the final evidence, then obtains a binary reward
 before returning that rollout. There is no 643-task evaluation barrier in the
-Gym path. Rollout concurrency supplies parallelism across episodes; judge
-retries reuse the captured evidence and do not repeat live-site actions.
+Gym path. Rollout concurrency supplies parallelism across episodes. Judging
+uses the standard Gym resources-server `/verify` endpoint; judge-call failures
+are routed to the failure sidecar and can be retried with `gym eval reverify`
+from retained evidence without repeating live-site actions.
 
-The default source is `../WebVoyager/data/WebVoyager_data.jsonl`. Set
-`WEBVOYAGER_SOURCE_JSONL` for another checkout and run:
+Create the locked root CLI environment from the repository root. `uv lock
+--check` verifies that the committed lock is current; `--frozen` prevents a
+run from silently resolving a different dependency graph:
 
 ```bash
-gym eval prepare --benchmark webvoyager
+uv lock --check
+uv sync --frozen --extra dev
+./.venv/bin/gym eval prepare --benchmark webvoyager
 ```
+
+The last command is Gym's standard dataset-only preparation API. The default
+source is `../WebVoyager/data/WebVoyager_data.jsonl`; set
+`WEBVOYAGER_SOURCE_JSONL` when the source checkout lives elsewhere.
+
+For an OSWorld-style runnable composition, invoke the script directly. It
+validates/prepares the selected profile and writes a private mode-`0600`,
+gitignored `benchmarks/webvoyager/env.yaml`. Credentials remain process
+environment variables referenced by that file:
+
+```bash
+export POLICY_BASE_URL="https://policy.example/v1"
+export POLICY_API_KEY="..."
+export POLICY_MODEL_NAME="policy-model"
+export WEBARENA_JUDGE_BASE_URL="https://judge.example/v1"
+export WEBARENA_JUDGE_API_KEY="..."
+export WEBARENA_JUDGE_MODEL="judge-model"
+
+./.venv/bin/python benchmarks/webvoyager/prepare.py --profile legacy --force-env
+```
+
+Run the complete lifecycle in one process; `gym eval run` starts the configured
+servers and shuts them down when collection ends:
+
+```bash
+cd benchmarks/webvoyager
+../../.venv/bin/gym eval run
+```
+
+For repeated runs, prefetch once and keep the servers foregrounded:
+
+```bash
+cd benchmarks/webvoyager
+../../.venv/bin/gym env prefetch
+../../.venv/bin/gym env start
+```
+
+In a second terminal, from the same directory, run
+`../../.venv/bin/gym eval run --no-serve`. Stop the foreground `gym env start`
+with Ctrl-C after the last run; Gym currently has no separate `env stop`
+command. Externally managed vLLM, public-site proxy, and site services are not
+owned or stopped by Gym.
 
 The benchmark targets live public sites, so results are time-sensitive and
 less reproducible than the self-hosted Arena benchmarks. Configure a
@@ -42,10 +89,10 @@ contains `policy_base_url`, `policy_api_key`, and `policy_model_name`; never
 commit it. Using the policy as judge is only appropriate for integration smoke.
 
 ```bash
-PINNED_GYM=/path/to/locked/gym
+GYM_ROOT=/path/to/Gym
 PRIVATE_CONFIG=/path/to/private/inferencehub-env.yaml
 
-"$PINNED_GYM" eval run \
+"$GYM_ROOT/.venv/bin/gym" eval run \
   --config benchmarks/webvoyager/config.yaml \
   --config "$PRIVATE_CONFIG" \
   --config benchmarks/webvoyager/configs/inferencehub_same_model.yaml \
@@ -60,9 +107,10 @@ PRIVATE_CONFIG=/path/to/private/inferencehub-env.yaml
   --max-output-tokens 1000
 ```
 
-Use a locked CLI environment. A fresh root-level `uv run gym` can resolve a
-different Ray version from the component environments and fail before task
-execution; such a run is an infrastructure failure, not a zero reward.
+Do not replace the locked `.venv/bin/gym` command with an unconstrained
+root-level `uv run gym`; a newly resolved Ray version can differ from component
+environments and fail before task execution. Such a run is infrastructure
+failure, not zero reward.
 
 The original Selenium runtime is intentionally not included in this first
 version. It can be added later behind the same common protocol without changing

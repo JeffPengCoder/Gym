@@ -17,9 +17,9 @@ Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment:
       extra_body:
         temperature: 0.1
         top_p: 0.95
-        # The pinned native client omits max_tokens and therefore inherits the
-        # checkpoint's 16K generation limit. Pin the equivalent Responses
-        # value so a different server generation_config cannot lower it.
+        # The pinned native client sends max_tokens=16384 on every policy
+        # request. Pin the equivalent Responses value so the wire contract is
+        # independent of a server-side generation_config default.
         max_output_tokens: 16384
         chat_template_kwargs:
           truncate_history_thinking: false

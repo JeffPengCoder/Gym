@@ -16,5 +16,8 @@ webvoyager_native_v3_judge:
         top_p: 1.0
       max_screenshots: 200
       require_screenshot: true
+      # Stay below the agent's 540 s resource-call envelope so timeout errors
+      # are classified by the standard judge failure boundary.
+      judge_call_timeout_secs: 510
       judge_profile: native_v3
       verifier_version: native-webvoyager-gemini-v1

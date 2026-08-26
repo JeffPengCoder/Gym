@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -11,11 +12,9 @@ import re
 import time
 from urllib.parse import urlparse
 
-from fastapi import FastAPI
-
 from nemo_gym.base_resources_server import SimpleResourcesServer
+from nemo_gym.judge import call_judge, reraise_judge_errors
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.web.models import WebVerifierResult
 from resources_servers.webvoyager_judge.config import WebVoyagerJudgeConfig
 from resources_servers.webvoyager_judge.models import (
@@ -102,12 +101,7 @@ def parse_native_verdict(text: str) -> tuple[bool, dict[str, str]] | None:
 class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
     config: WebVoyagerJudgeConfig
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.post("/verify_webvoyager")(self.verify_webvoyager)
-        return app
-
-    async def verify_webvoyager(self, body: WebVoyagerJudgeRequest) -> WebVoyagerJudgeResponse:
+    async def _judge_evidence(self, body: WebVoyagerJudgeRequest) -> WebVoyagerJudgeResponse:
         started = time.monotonic()
         native = self.config.judge_profile == "native_v3"
         LOG.info(
@@ -182,13 +176,18 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
             len(screenshots),
         )
         try:
-            raw_response = await self.server_client.post(
-                server_name=self.config.judge_model_server.name,
-                url_path="/v1/responses",
-                json=params,
+            judge_response = await reraise_judge_errors(
+                asyncio.wait_for(
+                    call_judge(
+                        self.server_client,
+                        server_name=self.config.judge_model_server.name,
+                        url_path="/v1/responses",
+                        json=params,
+                        response_model=NeMoGymResponse,
+                    ),
+                    timeout=self.config.judge_call_timeout_secs,
+                )
             )
-            await raise_for_status(raw_response)
-            judge_response = NeMoGymResponse.model_validate(await get_response_json(raw_response))
         except Exception:
             LOG.exception(
                 "event=webvoyager_judge_model_failed task=%s model_server=%s elapsed_seconds=%.3f",
@@ -218,7 +217,9 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
                 hashlib.sha256(judge_text.encode("utf-8")).hexdigest()[:12],
             )
             result = WebVerifierResult(
-                valid_sample=False,
+                # A response was received successfully; malformed verdict text
+                # is therefore a benchmark outcome rather than infrastructure.
+                valid_sample=True,
                 failure_kind="judge_unparseable",
                 verifier_version=self.config.verifier_version,
                 metadata={"judge_text": judge_text},
@@ -257,7 +258,7 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
         self,
         body: WebVoyagerStandardVerifyRequest,
     ) -> WebVoyagerStandardVerifyResponse:
-        judged = await self.verify_webvoyager(
+        judged = await self._judge_evidence(
             WebVoyagerJudgeRequest(
                 task=body.web_task,
                 final_answer=body.final_answer,
@@ -267,8 +268,9 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
         )
         result = judged.result
         return WebVoyagerStandardVerifyResponse.model_validate(
-            body.model_dump()
-            | {
+            {
+                "responses_create_params": body.responses_create_params,
+                "response": body.response,
                 "reward": result.reward if result.valid_sample else 0.0,
                 "raw_score": result.raw_score,
                 "task_success": result.task_success,
@@ -276,6 +278,7 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
                 "failure_kind": result.failure_kind,
                 "judge_text": judged.judge_text,
                 "verifier_metadata": result.metadata,
+                "verifier_version": result.verifier_version,
             }
         )
 

@@ -1,15 +1,15 @@
 # Native visual web resource server
 
-This is the native Nano Omni backend for WebArena, VisualWebArena, and
-WebVoyager. It is a sibling of `browsergym_web`, not a subclass or replacement:
-both implement Gym's common session/step/evaluate protocol, while preserving
-different benchmark action and evaluator semantics.
+This is the native Nano Omni backend for WebArena and VisualWebArena. It is a
+sibling of `browsergym_web`, not a subclass or replacement: both implement
+Gym's common session/step/evaluate protocol while preserving different action
+and evaluator semantics. Native WebVoyager public-site behavior lives in the
+dedicated `resources_servers/webvoyager_browser` component.
 
 Playwright owns Chromium contexts, pages, navigation, and tabs. PyAutoGUI owns
 visible coordinate input and full-display screenshots. The Responses agent
 owns the model loop. Benchmark evaluators are selected separately:
 
-- WebVoyager returns browser evidence to the post-close Gemini judge;
 - WebArena evaluates string, URL, and `program_html` targets against the live
   self-hosted sites;
 - VisualWebArena adds page-image/VQA/SSIM evaluation;
@@ -35,14 +35,8 @@ the Python server starts. It intentionally fails before creating a browser if
 clipboard input and the fonts required by the benchmark pages; these are OS
 packages and are intentionally not hidden behind Python dependencies.
 
-With `CAPSOLVER_API_KEY` and `WA_CAPTCHA_PROVIDER=capsolver`, the built-in
-solver handles visible Turnstile and reCAPTCHA v2 widgets. A reviewed custom
-solver can instead be injected through
-`WA_CAPTCHA_SOLVER=module.path:factory`; the factory returns an object exposing
-`maybe_solve(page, phase=...)`.
-
-CAPTCHA/proxy helpers are scoped to WebVoyager. Local WebArena-family tasks use
-the `WA_SHOPPING`, `WA_REDDIT`, `WA_GITLAB`, `WA_WIKIPEDIA`, `WA_MAP`,
+Local WebArena-family tasks use the `WA_SHOPPING`, `WA_REDDIT`, `WA_GITLAB`,
+`WA_WIKIPEDIA`, `WA_MAP`,
 `WA_CLASSIFIEDS`, and related deployment URLs, plus the public benchmark login
 accounts (overridable with `WA_<SITE>_USERNAME/PASSWORD`). Tasks requiring a
 model-backed local evaluator also require `WEBARENA_JUDGE_API_KEY`; model,
@@ -63,16 +57,10 @@ browser screenshots, matching the pinned native agent.
 
 Profiles:
 
-- `resources_servers/native_web/configs/native_web.yaml`: WebVoyager;
 - `resources_servers/native_web/configs/native_webarena.yaml`: WebArena;
 - `resources_servers/native_web/configs/native_visualwebarena.yaml`:
   VisualWebArena.
 
-The server logs redacted lifecycle events through the
-`nemo_gym.resources_servers.native_web` and
-`nemo_gym.resources_servers.native_web.captcha` loggers. Enable Gym verbose
-logging for challenge scans. INFO records detections, provider task creation,
-successful injection, browser actions, screenshots and failures; DEBUG also
-records scans where no challenge was present. Keys, proxy credentials,
-provider task IDs, solution tokens, screenshot payloads and URL query strings
-are never logged.
+The server logs redacted lifecycle events through
+`nemo_gym.resources_servers.native_web`. Screenshot payloads, credentials, and
+complete URL paths are never logged.

@@ -33,12 +33,17 @@ from resources_servers.native_web.backend import (
     NAVIGATION_WAIT_UNTIL,
     NativeBrowserEvaluationContext,
     NativeWebDriver,
-    _is_playwright_target_closed_error,
     _type_browser_text,
 )
 from resources_servers.native_web.config import NativeWebResourcesServerConfig
 from resources_servers.native_web.evaluators import NativeTaskEvaluator
 from resources_servers.native_web.session_manager import NativeWebSessionManager
+from resources_servers.webvoyager_browser.backend import (
+    WebVoyagerBrowserDriver,
+    _is_playwright_target_closed_error,
+)
+from resources_servers.webvoyager_browser.config import WebVoyagerBrowserResourcesServerConfig
+from resources_servers.webvoyager_browser.evaluators import WebVoyagerEvidenceEvaluator
 from resources_servers.webvoyager_judge.prompts import NATIVE_WEBVOYAGER_JUDGE_PROMPT
 
 
@@ -49,6 +54,21 @@ def _config(**updates) -> NativeWebResourcesServerConfig:
     return NativeWebResourcesServerConfig.model_validate(
         {
             "name": "native",
+            "host": "localhost",
+            "port": 8010,
+            "entrypoint": "app.py",
+            "domain": "agent",
+            "num_workers": 1,
+            "headless": False,
+            **updates,
+        }
+    )
+
+
+def _webvoyager_config(**updates) -> WebVoyagerBrowserResourcesServerConfig:
+    return WebVoyagerBrowserResourcesServerConfig.model_validate(
+        {
+            "name": "webvoyager-browser",
             "host": "localhost",
             "port": 8010,
             "entrypoint": "app.py",
@@ -96,7 +116,7 @@ def test_native_recipe_prompt_and_tool_hashes_are_pinned() -> None:
 
 def test_native_resource_rejects_browsergym_task() -> None:
     manager = NativeWebSessionManager(_config())
-    with pytest.raises(ValueError, match="runtime_profile=native_visual"):
+    with pytest.raises(ValueError, match="benchmark 'webvoyager' is disabled"):
         manager._validate_task(WebTask(benchmark="webvoyager", task_id="0"))
 
 
@@ -140,7 +160,7 @@ def test_native_webvoyager_evaluator_preserves_external_judge_evidence() -> None
         browser_context=object(),
         evidence=(evidence,),
     )
-    evaluator = NativeTaskEvaluator()
+    evaluator = WebVoyagerEvidenceEvaluator()
     observation = WebObservation(url="https://example.test")
 
     evaluator.prepare(task=task, observation=observation, browser_context=context)
@@ -323,12 +343,10 @@ def test_native_config_rejects_multiple_sessions_on_one_display() -> None:
         _config(max_sessions=2)
 
 
-def test_native_proxy_is_scoped_to_webvoyager_even_in_always_mode(monkeypatch) -> None:
+def test_webvoyager_browser_reads_proxy_in_always_mode(monkeypatch) -> None:
     monkeypatch.setenv("WA_BROWSER_PROXY_SERVER", "proxy.example.test:19407")
-    driver = NativeWebDriver(_config(proxy_mode="always"), "session-test", object())
+    driver = WebVoyagerBrowserDriver(_webvoyager_config(proxy_mode="always"), "session-test", object())
 
-    assert driver._proxy_for_task(WebTask(benchmark="webarena", task_id="0")) == ""
-    assert driver._proxy_for_task(WebTask(benchmark="visualwebarena", task_id="0")) == ""
     assert driver._proxy_for_task(WebTask(benchmark="webvoyager", task_id="GitHub--0")) == ("proxy.example.test:19407")
 
 
@@ -363,7 +381,7 @@ def test_native_text_input_splits_special_keys() -> None:
 def test_native_text_input_uses_clipboard_for_unicode(monkeypatch) -> None:
     calls = []
     monkeypatch.setattr(
-        "resources_servers.native_web.backend._paste_unicode",
+        "nemo_gym.web.native_browser._paste_unicode",
         lambda _pyautogui, text: calls.append(text),
     )
 
@@ -375,7 +393,7 @@ def test_native_text_input_uses_clipboard_for_unicode(monkeypatch) -> None:
 def test_native_action_error_can_be_returned_for_policy_recovery(monkeypatch) -> None:
     driver = NativeWebDriver(_config(terminate_on_action_error=False, action_delay_seconds=0), "session", object())
     driver._page = object()
-    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    driver._task = WebTask(benchmark="webarena", task_id="14")
     driver._observation = WebObservation.model_validate(
         {
             "goal": [],
@@ -384,7 +402,6 @@ def test_native_action_error_can_be_returned_for_policy_recovery(monkeypatch) ->
         }
     )
     monkeypatch.setattr(driver, "_execute_call", lambda *_args: (_ for _ in ()).throw(ValueError("bad action")))
-    monkeypatch.setattr(driver, "_maybe_solve_captcha", lambda _phase, **_kwargs: False)
     monkeypatch.setattr(
         driver,
         "_capture",
@@ -421,7 +438,7 @@ def test_native_action_error_can_be_returned_for_policy_recovery(monkeypatch) ->
 def test_native_driver_validates_entire_batch_before_side_effect(monkeypatch) -> None:
     driver = NativeWebDriver(_config(terminate_on_action_error=False, action_delay_seconds=0), "session", object())
     driver._page = object()
-    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    driver._task = WebTask(benchmark="webarena", task_id="14")
     driver._observation = WebObservation.model_validate(
         {
             "goal": [],
@@ -431,7 +448,6 @@ def test_native_driver_validates_entire_batch_before_side_effect(monkeypatch) ->
     )
     executed = []
     monkeypatch.setattr(driver, "_execute_computer", lambda action: executed.append(action))
-    monkeypatch.setattr(driver, "_maybe_solve_captcha", lambda _phase, **_kwargs: False)
     monkeypatch.setattr(
         driver,
         "_capture",
@@ -486,12 +502,12 @@ def test_native_driver_defers_transient_captcha_solver_error(caplog) -> None:
             assert phase == "before post-action screenshot"
             raise TimeoutError("provider detail must not escape")
 
-    driver = NativeWebDriver(_config(), "session-test", object())
+    driver = WebVoyagerBrowserDriver(_webvoyager_config(), "session-test", object())
     driver._captcha_solver = _FailingSolver()
     driver._page = type("Page", (), {"url": "https://example.test/private?query=secret"})()
     driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
 
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.native_web"):
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.webvoyager_browser"):
         assert driver._maybe_solve_captcha("before post-action screenshot") is False
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
@@ -508,12 +524,12 @@ def test_native_driver_caps_captcha_failures_by_vlm_step(monkeypatch, caplog) ->
             raise TimeoutError("provider detail must not escape")
 
     monkeypatch.setenv("WA_MAX_CAPTCHA_FAILURES", "1")
-    driver = NativeWebDriver(_config(), "session-test", object())
+    driver = WebVoyagerBrowserDriver(_webvoyager_config(), "session-test", object())
     driver._captcha_solver = _FailingSolver()
     driver._page = type("Page", (), {"url": "https://example.test/private?query=secret"})()
     driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
 
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.native_web"):
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.webvoyager_browser"):
         assert driver._maybe_solve_captcha("after computer", failure_step=0) is False
         assert driver._maybe_solve_captcha("before post-action screenshot", failure_step=0) is False
         with pytest.raises(RuntimeError, match="failed more than 1 times"):
@@ -540,12 +556,12 @@ def test_native_driver_does_not_charge_target_closed_to_captcha_budget(caplog) -
             assert phase == "after computer"
             raise target_closed_error("target detail must not escape")
 
-    driver = NativeWebDriver(_config(), "session-test", object())
+    driver = WebVoyagerBrowserDriver(_webvoyager_config(), "session-test", object())
     driver._captcha_solver = _ClosedTargetSolver()
     driver._page = type("Page", (), {"url": "https://example.test/private?query=secret"})()
     driver._task = WebTask(benchmark="webvoyager", task_id="Google Map--35")
 
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.native_web"):
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.webvoyager_browser"):
         with pytest.raises(RuntimeError, match="browser target closed during CAPTCHA handling"):
             driver._maybe_solve_captcha("after computer", failure_step=0)
 
@@ -576,8 +592,8 @@ def test_native_driver_returns_retryable_status_when_captcha_target_closes(monke
             self.calls += 1
             raise target_closed_error("target detail must not escape")
 
-    driver = NativeWebDriver(
-        _config(action_delay_seconds=0, terminate_on_action_error=False),
+    driver = WebVoyagerBrowserDriver(
+        _webvoyager_config(action_delay_seconds=0, terminate_on_action_error=False),
         "session-test",
         object(),
     )
@@ -631,8 +647,8 @@ def test_native_driver_terminates_without_a_second_solve_after_budget_exhaustion
             raise TimeoutError("provider detail must not escape")
 
     monkeypatch.setenv("WA_MAX_CAPTCHA_FAILURES", "0")
-    driver = NativeWebDriver(
-        _config(action_delay_seconds=0, terminate_on_action_error=False),
+    driver = WebVoyagerBrowserDriver(
+        _webvoyager_config(action_delay_seconds=0, terminate_on_action_error=False),
         "session-test",
         object(),
     )
@@ -696,8 +712,8 @@ def test_native_driver_returns_status_when_captcha_budget_exhausts_before_screen
             raise TimeoutError("provider detail must not escape")
 
     monkeypatch.setenv("WA_MAX_CAPTCHA_FAILURES", "0")
-    driver = NativeWebDriver(
-        _config(action_delay_seconds=0, terminate_on_action_error=False),
+    driver = WebVoyagerBrowserDriver(
+        _webvoyager_config(action_delay_seconds=0, terminate_on_action_error=False),
         "session-test",
         object(),
     )
@@ -772,7 +788,7 @@ class _RecordingPage:
 
 def _navigation_driver() -> tuple[NativeWebDriver, _RecordingPage]:
     driver = NativeWebDriver(_config(), "session-test", object())
-    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    driver._task = WebTask(benchmark="webarena", task_id="14")
     page = _RecordingPage()
     driver._page = page
     return driver, page
@@ -794,9 +810,9 @@ def test_policy_navigation_settles_on_load() -> None:
 
 def test_navigation_retries_transport_faults_then_succeeds(monkeypatch) -> None:
     sleeps: list[float] = []
-    monkeypatch.setattr("resources_servers.native_web.backend.time.sleep", sleeps.append)
+    monkeypatch.setattr("nemo_gym.web.native_browser.time.sleep", sleeps.append)
     driver = NativeWebDriver(_config(), "session-test", object())
-    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    driver._task = WebTask(benchmark="webarena", task_id="14")
     page = _RecordingPage(
         goto_errors=[
             RuntimeError("Page.goto: net::ERR_CONNECTION_RESET at https://example.test/page"),
@@ -815,9 +831,9 @@ def test_navigation_does_not_retry_a_slow_page(monkeypatch) -> None:
     """A Playwright timeout is a slow page, so retrying only multiplies the wait."""
 
     sleeps: list[float] = []
-    monkeypatch.setattr("resources_servers.native_web.backend.time.sleep", sleeps.append)
+    monkeypatch.setattr("nemo_gym.web.native_browser.time.sleep", sleeps.append)
     driver = NativeWebDriver(_config(), "session-test", object())
-    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    driver._task = WebTask(benchmark="webarena", task_id="14")
     page = _RecordingPage(goto_errors=[RuntimeError("Page.goto: Timeout 45000ms exceeded")])
     driver._page = page
 
@@ -830,9 +846,9 @@ def test_navigation_does_not_retry_a_slow_page(monkeypatch) -> None:
 
 def test_navigation_reraises_after_exhausting_retries(monkeypatch) -> None:
     sleeps: list[float] = []
-    monkeypatch.setattr("resources_servers.native_web.backend.time.sleep", sleeps.append)
+    monkeypatch.setattr("nemo_gym.web.native_browser.time.sleep", sleeps.append)
     driver = NativeWebDriver(_config(), "session-test", object())
-    driver._task = WebTask(benchmark="webvoyager", task_id="GitHub--14")
+    driver._task = WebTask(benchmark="webarena", task_id="14")
     attempts = len(NAVIGATION_RETRY_DELAYS_S) + 1
     page = _RecordingPage(
         goto_errors=[RuntimeError("Page.goto: net::ERR_TIMED_OUT") for _ in range(attempts)],

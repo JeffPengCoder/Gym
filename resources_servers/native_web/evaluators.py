@@ -11,10 +11,10 @@ from collections.abc import Mapping
 from typing import Protocol
 
 from nemo_gym.web.models import WebBenchmark, WebObservation, WebTask, WebVerifierResult
+from nemo_gym.web.native_browser import NativeBrowserEvaluationContext
 from nemo_gym.web.native_eval_collision import build_collision_plan, has_collision_mitigation
 from nemo_gym.web.session import EvaluatorConfigurationError
 from nemo_gym.web.task_images import resolve_local_task_image_path
-from resources_servers.native_web.backend import NativeBrowserEvaluationContext
 from resources_servers.native_web.config import NativeWebResourcesServerConfig
 from resources_servers.native_web.site_auth import configured_site_urls, resolve_site_templates
 
@@ -43,49 +43,6 @@ class NativeBenchmarkEvaluator(Protocol):
     ) -> WebVerifierResult: ...
 
     def close(self) -> None: ...
-
-
-class NativeWebVoyagerEvaluator:
-    """Return browser evidence for the post-close Gemini judge."""
-
-    def prepare(
-        self,
-        *,
-        task: WebTask,
-        observation: WebObservation,
-        browser_context: NativeBrowserEvaluationContext,
-    ) -> None:
-        del observation, browser_context
-        if task.benchmark != WebBenchmark.WEBVOYAGER:
-            raise EvaluatorConfigurationError(f"WebVoyager evaluator received benchmark {task.benchmark.value!r}")
-
-    def evaluate(
-        self,
-        *,
-        task: WebTask,
-        observation: WebObservation,
-        final_answer: str | None,
-        browser_context: NativeBrowserEvaluationContext,
-    ) -> WebVerifierResult:
-        del observation
-        evidence = list(browser_context.evidence)
-        LOG.info(
-            "event=native_evaluator_deferred benchmark=%s task=%s screenshots=%d final_answer_present=%s",
-            task.benchmark.value,
-            task.task_id,
-            len(evidence),
-            bool(final_answer),
-        )
-        return WebVerifierResult(
-            valid_sample=False,
-            failure_kind="external_judge_required",
-            evidence=evidence,
-            verifier_version="native-webvoyager-gemini-v1",
-            metadata={"final_answer": final_answer or "", "screenshots": len(evidence)},
-        )
-
-    def close(self) -> None:
-        return None
 
 
 def _task_needs_judge(task_config: dict) -> bool:
@@ -302,12 +259,11 @@ class NativeWebArenaFamilyEvaluator:
 
 
 class NativeTaskEvaluator:
-    """Select one benchmark evaluator without coupling it to browser mechanics.
+    """Select one local WebArena-family evaluator without browser coupling.
 
-    WebVoyager is judged by the agent after the browser is closed, using the
-    evidence returned by :class:`NativeWebVoyagerEvaluator`. WebArena-family
-    evaluators plug into this same two-phase lifecycle: ``prepare`` captures
-    before-state and ``evaluate`` scores against the still-live page.
+    WebArena-family evaluators plug into the two-phase lifecycle: ``prepare``
+    captures before-state and ``evaluate`` scores against the still-live page.
+    Native WebVoyager is owned by the dedicated ``webvoyager_browser`` server.
 
     The router deliberately fails closed when a benchmark evaluator has not
     been installed. Merely allowing a benchmark in server configuration must
@@ -321,9 +277,7 @@ class NativeTaskEvaluator:
         config: NativeWebResourcesServerConfig | None = None,
     ) -> None:
         if evaluators is None:
-            resolved_evaluators: dict[WebBenchmark, NativeBenchmarkEvaluator] = {
-                WebBenchmark.WEBVOYAGER: NativeWebVoyagerEvaluator(),
-            }
+            resolved_evaluators: dict[WebBenchmark, NativeBenchmarkEvaluator] = {}
             if config is not None:
                 for benchmark in (WebBenchmark.WEBARENA, WebBenchmark.VISUALWEBARENA):
                     if benchmark in config.allowed_benchmarks:

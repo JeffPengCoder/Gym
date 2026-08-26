@@ -14,7 +14,6 @@ native_visualwebarena_agent:
       resources_server:
         type: resources_servers
         name: native_visualwebarena
-      webvoyager_judge_server: null
       max_steps: 100
       max_parse_retries: 2
       native_action_recovery: repair_single_closing_bracket

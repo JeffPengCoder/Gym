@@ -12,7 +12,7 @@ continues to provide the public Selenium/BrowserGym-compatible baseline.
      -> Gym Responses boundary
         -> vLLM model proxy
            -> public Nano Omni v3 /v1/chat/completions endpoint (TP8)
-     -> native_web resource server
+     -> webvoyager_browser resource server
         -> one Xvfb display
         -> headed Chromium managed by Playwright
         -> visible coordinate actions executed by PyAutoGUI
@@ -21,7 +21,10 @@ continues to provide the public Selenium/BrowserGym-compatible baseline.
 
 The dataset, agent, browser and judge communicate through the common Gym web
 models. The agent never imports Playwright or PyAutoGUI, and the browser server
-does not own model prompting or scoring.
+does not own model prompting or scoring. `webvoyager_browser` owns only the
+public-site proxy, CAPTCHA, and WebVoyager navigation policy; reusable headed
+Chromium/PyAutoGUI mechanics remain shared with `native_web`, whose resource
+boundary is restricted to WebArena and VisualWebArena.
 
 ## Reproducibility contract
 
@@ -51,10 +54,12 @@ does not own model prompting or scoring.
 
 The profile opts into bounded recovery for decoding and executing an action the
 policy already chose: inner-JSON and one-missing-bracket repair, unambiguous
-public-v3 tool aliases, parse-retry feedback at temperature 0.2, and a failed UI
-action left visible for correction. It deliberately does not enable the repeated
--action hint, which would place harness-authored strategy in the policy's
-context that the pinned reference never sends.
+public-v3 tool aliases, and a failed UI action left visible for correction. Its
+three total action-parse attempts match the pinned reference: every attempt uses
+the same request and temperature 0.1, with no harness-authored feedback and a
+one-second delay after a parse failure. It also does not enable the repeated-
+action hint, which would place harness-authored strategy in the policy's context
+that the pinned reference never sends.
 
 A browser that exhausts its CAPTCHA budget reports
 `native_status=captcha_budget_exhausted`; the agent masks that rollout as
@@ -86,7 +91,29 @@ the summarizer routes it to the cleanup wave.
    instance. CapSolver runs outside the worker namespace and cannot use a
    browser proxy such as `127.0.0.1:19407`.
 6. Configure the judge endpoint/key through the standard Gym secret/config
-   channel.
+   channel. Episodes call the judge resources server through Gym's canonical
+   `/verify` route. Judge transport/schema failures use the shared
+   `judge_failed` sidecar and retained response evidence supports judge-only
+   reverification.
+
+Prepare the private benchmark composition with the same locked CLI used by the
+root repository:
+
+```bash
+cd /path/to/Gym
+uv lock --check
+uv sync --frozen --extra dev
+export WEBVOYAGER_SOURCE_JSONL=/path/to/pinned/webvoyager.jsonl
+./.venv/bin/python benchmarks/webvoyager/prepare.py \
+  --profile native_v3 \
+  --force-env
+```
+
+Then run one-shot with `../../.venv/bin/gym eval run` from
+`benchmarks/webvoyager`, or keep `gym env start` foregrounded and collect with
+`gym eval run --no-serve` from a second terminal. Native concurrency requires
+one isolated Gym process/X display per rollout; `prepare.py` rejects
+`--concurrency` greater than one for a single native resource server.
 
 The agent-facing route remains Gym's Responses API so the common rollout
 contract is unchanged. The `vllm_model` proxy converts the request to OpenAI
@@ -175,3 +202,19 @@ Run one task first, then one task from every retained domain, then a 32-task
 coverage subset, and only then all 552 tasks. Every report must distinguish
 policy failure from browser, proxy/captcha, model-server and judge failures;
 only a fully accounted denominator is comparable to a reference SR.
+
+## Full-population validation
+
+On 2026-08-26, a hash-sealed PR 2295 review candidate completed the maintained
+552-task population at **421/552 = 76.27% SR**. Reconciliation reported zero
+missing, duplicate, unexpected, invalid, or unresolved infrastructure rows and
+an empty retry set. The result was 7 successes below the previous 428/552 Gym
+control and 8 below the 429/552 maintained reference golden.
+
+The corrected-wave transport audit observed `max_tokens=16384`, temperature
+0.1, top-p 0.95, and `truncate_history_thinking=false` on every recorded
+outbound policy request. The final source generation also passed production
+agent/browser imports, 5 focused agent regressions, and all 14 CAPTCHA
+regressions in the target Linux/Enroot runtime. This evidence applies only to
+the maintained native 552-task profile; it does not claim equivalent coverage
+for the legacy 643-task BrowserGym route, WebArena, or VisualWebArena.

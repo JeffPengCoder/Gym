@@ -45,17 +45,6 @@ def test_missing_required_site_url_fails_before_browser_launch(monkeypatch) -> N
         configured_site_urls(_task())
 
 
-def test_webvoyager_does_not_require_local_site_environment() -> None:
-    task = _task(
-        benchmark="webvoyager",
-        sites=["Allrecipes"],
-        start_urls=["https://www.allrecipes.com/"],
-    )
-
-    assert configured_site_urls(task) == {}
-    assert resolve_start_urls(task, {}) == ["https://www.allrecipes.com/"]
-
-
 def test_evaluator_placeholders_require_and_resolve_nested_site_urls(monkeypatch) -> None:
     monkeypatch.setenv("WA_GITLAB", "http://sites.test:8023")
     task = _task(

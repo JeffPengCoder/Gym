@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import httpx
 
 
-LOG = logging.getLogger("nemo_gym.resources_servers.native_web.captcha")
+LOG = logging.getLogger("nemo_gym.resources_servers.webvoyager_browser.captcha")
 
 
 BROWSER_PROXY_CONFIG_ATTR = "_nemo_gym_browser_proxy_config"
@@ -427,14 +427,20 @@ class CapSolverBrowserSolver:
             return False
 
     def _proxy_config(self, page: Any) -> dict[str, str] | None:
-        config = self._solver_proxy_config
+        # CapSolver's proxy identity must match the browser context that
+        # received the challenge.  ``WA_CAPTCHA_PROXY_SERVER`` is only a
+        # public, provider-reachable replacement for an actual browser proxy
+        # (for example, when Chromium connects through a loopback tunnel).  It
+        # must not turn a direct browser session into a proxy-bound solver
+        # request: reCAPTCHA tokens are commonly tied to the request IP and
+        # such a mismatch can leave otherwise valid tasks polling forever.
         try:
-            if config is None:
-                config = getattr(page.context, BROWSER_PROXY_CONFIG_ATTR, None)
+            browser_config = getattr(page.context, BROWSER_PROXY_CONFIG_ATTR, None)
         except Exception:
-            config = None
-        if not config:
+            browser_config = None
+        if not browser_config:
             return None
+        config = self._solver_proxy_config or browser_config
         if self._is_loopback_proxy(config):
             raise RuntimeError(
                 "CapSolver cannot reach the browser's loopback proxy; set "

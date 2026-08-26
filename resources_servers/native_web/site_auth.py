@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
-from nemo_gym.web.models import WebBenchmark, WebTask
+from nemo_gym.web.models import WebTask
 
 
 LOG = logging.getLogger("nemo_gym.resources_servers.native_web")
@@ -52,8 +52,6 @@ DEFAULT_BENCHMARK_CREDENTIALS = {
 def configured_site_urls(task: WebTask) -> dict[str, str]:
     """Resolve only the site URLs required by this task."""
 
-    if task.benchmark == WebBenchmark.WEBVOYAGER:
-        return {}
     urls: dict[str, str] = {}
     missing: list[str] = []
     for site in sorted(_required_sites(task)):
@@ -152,8 +150,6 @@ def login_sites(
 ) -> None:
     """Log into required local benchmark sites using a disposable page."""
 
-    if task.benchmark == WebBenchmark.WEBVOYAGER:
-        return
     for site in task.sites:
         credentials = benchmark_credentials(site)
         if credentials is None:

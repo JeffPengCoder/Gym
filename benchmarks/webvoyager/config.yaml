@@ -22,10 +22,10 @@ webvoyager_benchmark_agent:
     web_agent:
       resources_server:
         type: resources_servers
-        name: webvoyager_benchmark_resources_server
-      webvoyager_judge_server:
-        type: resources_servers
         name: webvoyager_benchmark_judge
+      environment_server:
+        type: resources_servers
+        name: webvoyager_benchmark_resources_server
       # Match upstream WebVoyager's compact SoM prompt and its default policy
       # context of one current screenshot/observation. Judge evidence remains 3.
       visual_observation_text: som_only

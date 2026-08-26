@@ -7,7 +7,7 @@ import logging
 
 import pytest
 
-from resources_servers.native_web import captcha
+from resources_servers.webvoyager_browser import captcha
 
 
 class _Locator:
@@ -98,7 +98,7 @@ def test_capsolver_success_logs_lifecycle_without_secrets(monkeypatch, caplog) -
     page = _BlockingPage()
     solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
 
-    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.native_web.captcha"):
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.webvoyager_browser.captcha"):
         assert solver.maybe_solve(page, phase="initial") is True
 
     assert page.injected_token == "captcha-solution-secret"
@@ -124,7 +124,7 @@ def test_capsolver_no_challenge_emits_debug_scan(caplog) -> None:
     page = _Page(site_key=None)
     solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
 
-    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.native_web.captcha"):
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.webvoyager_browser.captcha"):
         assert solver.maybe_solve(page, phase="after wait") is False
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
@@ -142,7 +142,7 @@ def test_capsolver_ignores_nonblocking_widget_without_provider_request(monkeypat
 
     assert solver.maybe_solve(blocking_page, phase="after navigate") is True
     requests_after_real_challenge = list(client.requests)
-    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.native_web.captcha"):
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.webvoyager_browser.captcha"):
         assert solver.maybe_solve(_Page(), phase="before post-action screenshot") is False
 
     assert client.requests == requests_after_real_challenge
@@ -160,7 +160,7 @@ def test_capsolver_defers_completed_blocking_widget_without_crashing(caplog) -> 
     solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
     solver._completed_challenges.add(("https://example.test", "turnstile", captcha._fingerprint("public-site-key")))
 
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.native_web.captcha"):
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.webvoyager_browser.captcha"):
         assert solver.maybe_solve(page, phase="before post-action screenshot") is False
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
@@ -176,7 +176,7 @@ def test_capsolver_environment_selection_logs_presence_not_value(monkeypatch, ca
         "http://proxy-user:proxy-password@proxy.example:19407",  # pragma: allowlist secret
     )
 
-    with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.native_web.captcha"):
+    with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.webvoyager_browser.captcha"):
         solver = captcha.captcha_solver_from_environment()
 
     assert isinstance(solver, captcha.CapSolverBrowserSolver)
@@ -233,6 +233,22 @@ def test_capsolver_explicit_public_proxy_overrides_browser_loopback_proxy() -> N
     assert task["proxyPort"] == 29407
     assert task["proxyLogin"] == "proxy-user"
     assert task["proxyPassword"] == "proxy-password"  # pragma: allowlist secret
+
+
+def test_capsolver_explicit_proxy_is_ignored_for_direct_browser_context() -> None:
+    page = _Page()
+    solver = captcha.CapSolverBrowserSolver(
+        "CAP-private-key",
+        proxy_server="http://proxy-user:proxy-password@proxy.example:29407",  # pragma: allowlist secret
+    )
+
+    task = solver._build_task(page, "recaptcha", "public-site-key")
+
+    assert task == {
+        "type": "ReCaptchaV2TaskProxyLess",
+        "websiteURL": page.url,
+        "websiteKey": "public-site-key",
+    }
 
 
 def test_capsolver_rejects_browser_loopback_proxy_without_public_override() -> None:
@@ -385,7 +401,7 @@ class _CloudflareClient(_Client):
 def test_article_phrase_is_not_treated_as_a_blocking_captcha(caplog) -> None:
     solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
 
-    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.native_web.captcha"):
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.webvoyager_browser.captcha"):
         assert solver.maybe_solve(_ArticlePage(), phase="after navigate") is False
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
@@ -400,7 +416,7 @@ def test_capsolver_uses_proxy_bound_cloudflare_fallback_without_site_key(monkeyp
     page = _CloudflarePage()
     solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
 
-    with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.native_web.captcha"):
+    with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.webvoyager_browser.captcha"):
         assert solver.maybe_solve(page, phase="after navigate") is True
 
     create_task = client.requests[0][1]["task"]
@@ -426,7 +442,7 @@ def test_capsolver_uses_proxy_bound_cloudflare_fallback_without_site_key(monkeyp
 def test_capsolver_fails_closed_for_blocking_challenge_without_site_key(caplog) -> None:
     solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
 
-    with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.native_web.captcha"):
+    with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.webvoyager_browser.captcha"):
         with pytest.raises(RuntimeError, match="no supported site key"):
             solver.maybe_solve(_ChallengePage(), phase="initial")
 
@@ -439,7 +455,7 @@ def test_capsolver_fails_closed_for_blocking_challenge_without_site_key(caplog) 
 def test_capsolver_ignores_hidden_background_captcha_frame(caplog) -> None:
     solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
 
-    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.native_web.captcha"):
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.resources_servers.webvoyager_browser.captcha"):
         assert solver.maybe_solve(_BackgroundCaptchaFramePage(visible=False), phase="after navigate") is False
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
@@ -451,7 +467,7 @@ def test_capsolver_ignores_hidden_background_captcha_frame(caplog) -> None:
 def test_capsolver_treats_visible_captcha_frame_as_blocking(caplog) -> None:
     solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
 
-    with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.native_web.captcha"):
+    with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.webvoyager_browser.captcha"):
         with pytest.raises(RuntimeError, match="no supported site key"):
             solver.maybe_solve(_BackgroundCaptchaFramePage(visible=True), phase="after navigate")
 

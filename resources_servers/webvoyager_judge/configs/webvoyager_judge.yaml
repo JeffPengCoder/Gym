@@ -18,4 +18,5 @@ webvoyager_judge:
         temperature: 0
       max_screenshots: 3
       require_screenshot: true
+      judge_call_timeout_secs: 270
       verifier_version: webvoyager-llm-judge-v1

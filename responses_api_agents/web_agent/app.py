@@ -34,6 +34,7 @@ from nemo_gym.web.api_models import (
     WebSeedSessionResponse,
     WebStepResponse,
 )
+from nemo_gym.web.judge_evidence import compact_webvoyager_judge_evidence
 from nemo_gym.web.models import (
     BROWSER_TARGET_CLOSED_STATUS,
     CAPTCHA_BUDGET_EXHAUSTED_STATUS,
@@ -49,11 +50,38 @@ from responses_api_agents.web_agent.render import parse_error_message, render_ob
 
 LOG = logging.getLogger("nemo_gym.responses_api_agents.web_agent")
 
+_MODEL_LOG_CONTEXT_HEADERS = {
+    "adapter": "x-nemo-gym-log-adapter",
+    "task_id": "x-nemo-gym-log-task-id",
+    "domain": "x-nemo-gym-log-domain",
+    "step": "x-nemo-gym-log-step",
+    "parse_attempt": "x-nemo-gym-log-parse-attempt",
+}
+
+
+def _model_log_context_headers(task: WebTask, step: int, parse_attempt: int) -> dict[str, str]:
+    """Attach non-secret rollout identity to transport logs without changing the model body."""
+
+    values = {
+        "adapter": "web_agent",
+        "task_id": task.task_id,
+        "domain": task.benchmark.value,
+        "step": step,
+        "parse_attempt": parse_attempt,
+    }
+    return {
+        _MODEL_LOG_CONTEXT_HEADERS[field]: str(value).replace("\r", "").replace("\n", "")[:1024]
+        for field, value in values.items()
+    }
+
 
 class WebAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
+    # Browser execution and verification are the same resource for
+    # WebArena/VisualWebArena. WebVoyager supplies a dedicated browser here and
+    # keeps ``resources_server`` as the canonical verifier used by Gym.
+    environment_server: Optional[ResourcesServerRef] = None
     model_server: ModelServerRef
-    webvoyager_judge_server: Optional[ResourcesServerRef] = None
     max_steps: int = Field(default=15, ge=1, le=200)
     max_parse_retries: int = Field(default=2, ge=0, le=10)
     native_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict"
@@ -61,6 +89,7 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     native_max_computer_actions: int = Field(default=20, ge=1, le=100)
     native_parse_retry_feedback: bool = False
     native_parse_retry_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    native_parse_retry_delay_secs: float = Field(default=0.0, ge=0.0, le=60.0)
     repeated_action_warning_threshold: int = Field(default=0, ge=0, le=20)
     repeated_action_window: int = Field(default=5, ge=1, le=50)
     max_consecutive_execution_failures: int = Field(default=3, ge=1, le=20)
@@ -83,9 +112,6 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     seed_retry_max_delay_secs: float = Field(default=30.0, ge=0.0)
     model_request_timeout_secs: float = Field(default=600.0, gt=0.0)
     judge_request_timeout_secs: float = Field(default=300.0, gt=0.0)
-    judge_max_retries: int = Field(default=2, ge=0, le=10)
-    judge_retry_initial_delay_secs: float = Field(default=1.0, ge=0.0)
-    judge_retry_max_delay_secs: float = Field(default=10.0, ge=0.0)
     close_request_timeout_secs: float = Field(default=30.0, gt=0.0)
     run_timeout_secs: float = Field(default=1800.0, gt=0.0)
 
@@ -157,6 +183,19 @@ def _parse_response_action(
     return parse_model_action(_extract_output_text(response), profile)
 
 
+def _incomplete_model_reason(response: NeMoGymResponse) -> str | None:
+    """Return the normalized Responses API incomplete reason, if present."""
+
+    if getattr(response, "status", None) != "incomplete":
+        return None
+    details = getattr(response, "incomplete_details", None)
+    if isinstance(details, dict):
+        reason = details.get("reason")
+    else:
+        reason = getattr(details, "reason", None)
+    return str(reason) if reason else "unknown"
+
+
 def _native_parse_retry_messages(response: NeMoGymResponse, error: ActionParseError) -> list[Any]:
     """Return parser feedback without copying the current screenshot."""
 
@@ -202,6 +241,24 @@ def _http_error_payload(exc: Exception) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _is_model_context_overflow(exc: Exception) -> bool:
+    """Recognize deterministic vLLM context-limit failures, including wrapped 5xx responses."""
+
+    if not isinstance(exc, ClientResponseError):
+        return False
+    response_content = getattr(exc, "response_content", None)
+    if isinstance(response_content, bytes):
+        response_content = response_content.decode("utf-8", errors="replace")
+    haystack = " ".join((str(exc), str(response_content or ""))).lower()
+    return (
+        "decoder prompt" in haystack
+        and "longer than the maximum model length" in haystack
+    ) or (
+        "maximum context length" in haystack
+        and ("tokens" in haystack or "token" in haystack)
+    )
+
+
 def _failure_route(exc: Exception) -> tuple[str, bool, str, dict[str, Any]]:
     """Map a bounded exception to sidecar retry and terminal semantics."""
 
@@ -216,6 +273,9 @@ def _failure_route(exc: Exception) -> tuple[str, bool, str, dict[str, Any]]:
     payload = _http_error_payload(exc)
     error_kind = payload.get("error_kind")
     retryable = payload.get("retryable")
+    if _is_model_context_overflow(exc):
+        metadata["error_kind"] = "model_context_overflow"
+        failure_kind = "model_context_overflow"
     if isinstance(error_kind, str):
         metadata["error_kind"] = error_kind
     else:
@@ -389,6 +449,14 @@ def _redact_old_images(
 
 class WebAgent(SimpleResponsesAPIAgent):
     config: WebAgentConfig
+
+    @property
+    def environment_server_name(self) -> str:
+        """Return the browser resource, defaulting to the verifier resource."""
+
+        if self.config.environment_server is not None:
+            return self.config.environment_server.name
+        return self.config.resources_server.name
 
     async def responses(
         self,
@@ -575,6 +643,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                                 url_path=self.url_path_for_run("/v1/responses", body),
                                 json=model_body,
                                 cookies=model_cookies,
+                                headers=_model_log_context_headers(task, step_index, parse_attempt),
                                 timeout_secs=self.config.model_request_timeout_secs,
                             )
                             model_error = None
@@ -591,9 +660,18 @@ class WebAgent(SimpleResponsesAPIAgent):
                             break
                         except Exception as exc:  # Bounded native API parity retry.
                             model_error = exc
+                            retry_model_request = (
+                                model_attempt < self.config.model_turn_max_retries
+                                and not _is_model_context_overflow(exc)
+                                and not (
+                                    isinstance(exc, ClientResponseError)
+                                    and _failure_route(exc)[1]
+                                )
+                            )
                             LOG.warning(
                                 "event=web_model_request_failed benchmark=%s task=%s step=%d parse_attempt=%d "
-                                "model_attempt=%d error_type=%s elapsed_seconds=%.3f retry=%s",
+                                "model_attempt=%d error_type=%s elapsed_seconds=%.3f retry=%s "
+                                "failure_kind=%s",
                                 task.benchmark.value,
                                 task.task_id,
                                 step_index,
@@ -601,9 +679,10 @@ class WebAgent(SimpleResponsesAPIAgent):
                                 model_attempt,
                                 type(exc).__name__,
                                 time.monotonic() - model_started,
-                                model_attempt < self.config.model_turn_max_retries,
+                                retry_model_request,
+                                _failure_route(exc)[2],
                             )
-                            if model_attempt >= self.config.model_turn_max_retries:
+                            if not retry_model_request:
                                 raise
                             await asyncio.sleep(self.config.model_retry_delay_secs)
                     if model_error is not None:
@@ -624,6 +703,24 @@ class WebAgent(SimpleResponsesAPIAgent):
                         getattr(model_response.usage, "input_tokens", "unknown"),
                         getattr(model_response.usage, "output_tokens", "unknown"),
                     )
+                    incomplete_reason = _incomplete_model_reason(model_response)
+                    if incomplete_reason == "max_output_tokens":
+                        # VLLMModel converts both a generated length stop and a
+                        # context-budget 400 into a Responses API incomplete
+                        # result. The native reference runner treats either as
+                        # a valid truncated policy outcome and does not retry
+                        # the action parser against the same empty response.
+                        truncated = True
+                        LOG.warning(
+                            "event=web_model_output_truncated benchmark=%s task=%s step=%d "
+                            "parse_attempt=%d reason=%s",
+                            task.benchmark.value,
+                            task.task_id,
+                            step_index,
+                            parse_attempt,
+                            incomplete_reason,
+                        )
+                        break
                     if task.action_profile != WebActionProfile.NATIVE_TOOLCALL:
                         trajectory.extend(model_response.output)
                     try:
@@ -675,7 +772,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                         if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
                             if self.config.native_parse_retry_feedback:
                                 parse_feedback = _native_parse_retry_messages(model_response, exc)
-                            await asyncio.sleep(self.config.model_retry_delay_secs)
+                            await asyncio.sleep(self.config.native_parse_retry_delay_secs)
                         else:
                             trajectory.append(
                                 parse_error_message(
@@ -684,6 +781,9 @@ class WebAgent(SimpleResponsesAPIAgent):
                                     action_profile=task.action_profile,
                                 )
                             )
+
+                if truncated:
+                    break
 
                 if action is None:
                     LOG.warning(
@@ -705,7 +805,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                     _action_call_names(action),
                 )
                 step_response, step_payload = await self._post_json(
-                    server_name=self.config.resources_server.name,
+                    server_name=self.environment_server_name,
                     url_path="/step",
                     json={
                         "operation_id": f"step-{step_index}",
@@ -740,7 +840,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                 if not (task.action_profile == WebActionProfile.NATIVE_TOOLCALL and terminated):
                     self._remember_evidence(observation, screenshot_history, url_history)
                 native_status = step_data.info.get("native_status")
-                if native_status in {CAPTCHA_BUDGET_EXHAUSTED_STATUS, BROWSER_TARGET_CLOSED_STATUS}:
+                if native_status == CAPTCHA_BUDGET_EXHAUSTED_STATUS:
                     # The browser could not reach the site, so nothing the policy
                     # did is measurable. Mask instead of scoring a forced stop.
                     environment_failure_kind = native_status
@@ -753,6 +853,20 @@ class WebAgent(SimpleResponsesAPIAgent):
                     )
                     rollout_finished = True
                     break
+                if native_status == BROWSER_TARGET_CLOSED_STATUS:
+                    # A native coordinate action can close the active browser
+                    # target (for example, by clicking browser chrome).  The
+                    # reference runner records that as an action/task failure,
+                    # not as retryable infrastructure.  Keep the last valid
+                    # screenshot as judge evidence and let `terminated` finish
+                    # the rollout normally.
+                    LOG.warning(
+                        "event=web_environment_target_closed_after_action "
+                        "benchmark=%s task=%s step=%d",
+                        task.benchmark.value,
+                        task.task_id,
+                        step_index,
+                    )
                 if action.terminal:
                     final_answer = action.answer
                 if action.terminal or terminated or truncated:
@@ -820,7 +934,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                 len(screenshot_history),
             )
             evaluate_response, evaluate_payload = await self._post_json(
-                server_name=self.config.resources_server.name,
+                server_name=self.environment_server_name,
                 url_path="/evaluate",
                 json={"final_answer": final_answer},
                 cookies=env_cookies,
@@ -844,7 +958,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                 close_started = time.monotonic()
                 try:
                     _close_response, close_payload = await self._post_json(
-                        server_name=self.config.resources_server.name,
+                        server_name=self.environment_server_name,
                         url_path="/close",
                         json={},
                         cookies=env_cookies,
@@ -875,6 +989,12 @@ class WebAgent(SimpleResponsesAPIAgent):
                         exc_info=True,
                     )
 
+        if last_model_response is None:
+            raise RuntimeError("web rollout ended before the policy returned a response")
+        last_model_response.output = trajectory
+        last_model_response.usage = usage
+
+        judge_failure_metadata: dict[str, Any] = {}
         # The WebVoyager judge only consumes retained evidence. Release the
         # browser before the potentially slow VLM call so one judged episode
         # does not occupy scarce browser/site capacity. WebArena-family native
@@ -889,12 +1009,13 @@ class WebAgent(SimpleResponsesAPIAgent):
                 len(url_history),
                 bool(final_answer),
             )
-            verifier_result = await self._judge_webvoyager(
+            verifier_result, judge_failure_metadata = await self._verify_webvoyager(
                 task=task,
                 final_answer=final_answer or "",
                 screenshots=list(screenshot_history),
                 urls=list(url_history),
                 body=body,
+                response=last_model_response,
             )
             LOG.info(
                 "event=web_judge_complete benchmark=%s task=%s valid_sample=%s success=%s reward=%s "
@@ -908,8 +1029,6 @@ class WebAgent(SimpleResponsesAPIAgent):
                 time.monotonic() - judge_started,
             )
 
-        if last_model_response is None:
-            raise RuntimeError("web rollout ended before the policy returned a response")
         if environment_failure_kind is not None:
             verifier_result = WebVerifierResult(
                 valid_sample=False,
@@ -921,8 +1040,6 @@ class WebAgent(SimpleResponsesAPIAgent):
                 failure_kind="missing_verifier_result",
             )
 
-        last_model_response.output = trajectory
-        last_model_response.usage = usage
         return WebAgentRunResponse(
             responses_create_params=base_body,
             response=last_model_response,
@@ -941,9 +1058,10 @@ class WebAgent(SimpleResponsesAPIAgent):
             verifier_result=verifier_result,
             artifact_session_id=artifacts.session_id,
             recording_artifacts=artifacts.recordings,
+            **judge_failure_metadata,
         )
 
-    async def _judge_webvoyager(
+    async def _verify_webvoyager(
         self,
         *,
         task: WebTask,
@@ -951,53 +1069,60 @@ class WebAgent(SimpleResponsesAPIAgent):
         screenshots: list[str],
         urls: list[str],
         body: WebAgentRunRequest,
-    ) -> WebVerifierResult:
-        if self.config.webvoyager_judge_server is None:
-            return WebVerifierResult(
-                valid_sample=False,
-                failure_kind="webvoyager_judge_not_configured",
-                verifier_version="webvoyager-llm-judge-v1",
-            )
-        request_body = {
-            "task": task.model_dump(mode="json"),
+        response: NeMoGymResponse,
+    ) -> tuple[WebVerifierResult, dict[str, Any]]:
+        evidence = compact_webvoyager_judge_evidence(
+            response=response,
+            final_answer=final_answer,
+            screenshots=screenshots,
+            page_urls=urls,
+        )
+        # Store one compact immutable representation in the persisted response.
+        # Most screenshots already occur in the trajectory and are referenced by
+        # index; only boundary screenshots absent from the trajectory stay inline.
+        setattr(response, "webvoyager_judge_evidence", evidence)
+        # Initial verification does not need to resend the full policy trajectory:
+        # the top-level fields below carry the evidence once. Generic reverify later
+        # receives the original persisted response and expands its compact sequence.
+        verification_response = NeMoGymResponse.model_validate(
+            response.model_dump(mode="json", exclude={"webvoyager_judge_evidence"})
+        )
+        verification_response.output = []
+        request_body = body.model_dump(mode="json") | {
+            "web_task": task.model_dump(mode="json"),
+            "response": verification_response.model_dump(mode="json"),
             "final_answer": final_answer,
             "screenshots": screenshots,
             "page_urls": urls,
         }
-        delay = self.config.judge_retry_initial_delay_secs
-        for attempt in range(self.config.judge_max_retries + 1):
-            try:
-                _judge_response, payload = await self._post_json(
-                    server_name=self.config.webvoyager_judge_server.name,
-                    url_path="/verify_webvoyager",
-                    json=request_body,
-                    timeout_secs=self.config.judge_request_timeout_secs,
-                )
-                candidate = payload.get("result") if isinstance(payload, dict) else None
-                if candidate is None:
-                    raise RuntimeError("WebVoyager judge response did not contain result")
-                return WebVerifierResult.model_validate(candidate)
-            except Exception as exc:  # noqa: BLE001 - retry only this immutable evidence.
-                _failure_class, terminal, _failure_kind, _metadata = _failure_route(exc)
-                if terminal or attempt >= self.config.judge_max_retries:
-                    raise
-                sleep_for = min(delay, self.config.judge_retry_max_delay_secs)
-                LOG.warning(
-                    "event=web_judge_retry benchmark=%s task=%s attempt=%d error_type=%s sleep_seconds=%.1f",
-                    task.benchmark.value,
-                    task.task_id,
-                    attempt + 1,
-                    type(exc).__name__,
-                    sleep_for,
-                )
-                await asyncio.sleep(sleep_for)
-                if delay > 0:
-                    delay = min(
-                        max(delay * 2, self.config.judge_retry_initial_delay_secs),
-                        self.config.judge_retry_max_delay_secs,
-                    )
-
-        raise AssertionError("unreachable WebVoyager judge retry state")
+        _judge_response, payload = await self._post_json(
+            server_name=self.config.resources_server.name,
+            url_path="/verify",
+            json=request_body,
+            timeout_secs=self.config.judge_request_timeout_secs,
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError("WebVoyager verifier response was not an object")
+        failure_metadata = {
+            key: payload[key]
+            for key in (NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY, "_ng_failure_judge_error")
+            if key in payload
+        }
+        valid_sample = not bool(payload.get("mask_sample", False)) and NG_FAILURE_CLASS_KEY not in payload
+        result = WebVerifierResult(
+            reward=float(payload.get("reward", 0.0)),
+            raw_score=float(payload.get("raw_score", payload.get("reward", 0.0))),
+            task_success=bool(payload.get("task_success", False)),
+            valid_sample=valid_sample,
+            failure_kind=(
+                str(payload["failure_kind"])
+                if payload.get("failure_kind")
+                else ("judge_failed" if NG_FAILURE_CLASS_KEY in payload else None)
+            ),
+            verifier_version=str(payload.get("verifier_version", "webvoyager-llm-judge-v1")),
+            metadata=dict(payload.get("verifier_metadata") or {}),
+        )
+        return result, failure_metadata
 
     async def _post_json(
         self,
@@ -1039,7 +1164,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                 raise TimeoutError(f"seed_session exceeded {self.config.seed_request_timeout_secs:.1f}s retry budget")
             try:
                 return await self._post_json(
-                    server_name=self.config.resources_server.name,
+                    server_name=self.environment_server_name,
                     url_path="/seed_session",
                     json={"task": task.model_dump(mode="json")},
                     cookies=cookies,

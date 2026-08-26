@@ -23,6 +23,7 @@ from responses_api_agents.web_agent.app import (
     WebAgent,
     WebAgentConfig,
     WebAgentRunRequest,
+    _incomplete_model_reason,
     _native_parse_retry_messages,
     _parse_response_action,
     _redact_old_images,
@@ -62,6 +63,20 @@ def _native_model_response(name: str, arguments: str) -> dict:
         }
     ]
     return payload
+
+
+def _length_model_response() -> dict:
+    payload = _model_response("")
+    payload["status"] = "incomplete"
+    payload["incomplete_details"] = {"reason": "max_output_tokens"}
+    return payload
+
+
+def test_incomplete_model_reason_reads_openai_response_details() -> None:
+    response = NeMoGymResponse.model_validate(_length_model_response())
+
+    assert _incomplete_model_reason(response) == "max_output_tokens"
+    assert _incomplete_model_reason(NeMoGymResponse.model_validate(_model_response("ok"))) is None
 
 
 def test_native_profile_reads_structured_function_calls_not_message_text():
@@ -123,14 +138,12 @@ async def test_native_parse_retry_injects_feedback_and_retry_temperature() -> No
                 }
             ],
             "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
-            "/verify_webvoyager": [
+            "/verify": [
                 {
-                    "result": {
-                        "reward": 1.0,
-                        "raw_score": 1.0,
-                        "task_success": True,
-                        "valid_sample": True,
-                    }
+                    "reward": 1.0,
+                    "raw_score": 1.0,
+                    "task_success": True,
+                    "mask_sample": False,
                 }
             ],
             "/close": [{"closed": True}],
@@ -163,6 +176,52 @@ async def test_native_parse_retry_injects_feedback_and_retry_temperature() -> No
         getattr(item, "role", None) == "user" and "arguments.actions" in str(item.content)
         for item in model_bodies[1].input
     )
+
+
+@pytest.mark.asyncio
+async def test_native_length_response_ends_as_valid_truncation_without_parse_retry() -> None:
+    agent = _agent(parse_retries=2, judge=True)
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [_seed("Huggingface--18")],
+            "/v1/responses": [_length_model_response()],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
+            "/verify": [
+                {
+                    "reward": 0.0,
+                    "raw_score": 0.0,
+                    "task_success": False,
+                    "mask_sample": False,
+                }
+            ],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": [], "temperature": 0.1},
+        web_task=WebTask(
+            benchmark=WebBenchmark.WEBVOYAGER,
+            task_id="Huggingface--18",
+            intent="Find documentation",
+            start_urls=["https://huggingface.co"],
+            runtime_profile="native_visual",
+            observation_profile="screenshot",
+            action_profile="native_toolcall",
+        ),
+    )
+
+    result = await agent.run(request, body)
+
+    model_calls = [path for _server, path, _body in calls if path == "/v1/responses"]
+    assert model_calls == ["/v1/responses"]
+    assert result.model_turns == 1
+    assert result.environment_steps == 0
+    assert result.truncated is True
+    assert result.mask_sample is False
+    assert result.failure_kind is None
 
 
 def _observation(url="https://example.test") -> dict:
@@ -207,9 +266,12 @@ def _agent(*, parse_retries=1, judge=False, **config_updates):
         host="localhost",
         port=8001,
         entrypoint="app.py",
-        resources_server=ResourcesServerRef(type="resources_servers", name="browser"),
+        resources_server=ResourcesServerRef(
+            type="resources_servers",
+            name="judge" if judge else "browser",
+        ),
+        environment_server=(ResourcesServerRef(type="resources_servers", name="browser") if judge else None),
         model_server=ModelServerRef(type="responses_api_models", name="policy"),
-        webvoyager_judge_server=(ResourcesServerRef(type="resources_servers", name="judge") if judge else None),
         max_parse_retries=parse_retries,
     )
     config_values.update(config_updates)
@@ -440,14 +502,12 @@ async def test_webvoyager_routes_final_evidence_to_external_judge(caplog):
                     }
                 }
             ],
-            "/verify_webvoyager": [
+            "/verify": [
                 {
-                    "result": {
-                        "reward": 1.0,
-                        "raw_score": 1.0,
-                        "task_success": True,
-                        "valid_sample": True,
-                    }
+                    "reward": 1.0,
+                    "raw_score": 1.0,
+                    "task_success": True,
+                    "mask_sample": False,
                 }
             ],
             "/close": [{"closed": True}],
@@ -470,12 +530,21 @@ async def test_webvoyager_routes_final_evidence_to_external_judge(caplog):
         result = await agent.run(request, body)
 
     assert result.reward == 1.0
-    judge_call = next(call for call in calls if call[1] == "/verify_webvoyager")
+    judge_call = next(call for call in calls if call[1] == "/verify")
     assert judge_call[0] == "judge"
     assert judge_call[2]["final_answer"] == "42"
     assert len(judge_call[2]["screenshots"]) == 2
+    judge_response = judge_call[2]["response"]
+    assert judge_response["output"] == []
+    assert "webvoyager_judge_evidence" not in judge_response
+    persisted_response = result.response.model_dump(mode="json")
+    assert persisted_response["output"]
+    persisted_evidence = persisted_response["webvoyager_judge_evidence"]
+    assert persisted_evidence["final_answer"] == "42"
+    assert "screenshots" not in persisted_evidence
+    assert len(persisted_evidence["screenshot_sequence"]) == 2
     paths = [path for _server, path, _body in calls]
-    assert paths.index("/evaluate") < paths.index("/close") < paths.index("/verify_webvoyager")
+    assert paths.index("/evaluate") < paths.index("/close") < paths.index("/verify")
     messages = "\n".join(record.getMessage() for record in caplog.records)
     for event in (
         "event=web_rollout_start",
@@ -492,13 +561,8 @@ async def test_webvoyager_routes_final_evidence_to_external_judge(caplog):
 
 
 @pytest.mark.asyncio
-async def test_webvoyager_retries_only_judge_after_browser_is_closed():
-    agent = _agent(
-        judge=True,
-        judge_max_retries=1,
-        judge_retry_initial_delay_secs=0.0,
-        judge_retry_max_delay_secs=0.0,
-    )
+async def test_webvoyager_preserves_standard_judge_failure_after_browser_is_closed():
+    agent = _agent(judge=True)
     calls = []
     judge_attempts = 0
 
@@ -522,18 +586,13 @@ async def test_webvoyager_retries_only_judge_after_browser_is_closed():
             return _FakeHttpResponse({"result": {"valid_sample": True}})
         if url_path == "/close":
             return _FakeHttpResponse({"closed": True, "session_id": "session-a"})
-        if url_path == "/verify_webvoyager":
+        if url_path == "/verify":
             judge_attempts += 1
-            if judge_attempts == 1:
-                raise RuntimeError("judge endpoint is warming")
             return _FakeHttpResponse(
                 {
-                    "result": {
-                        "reward": 1.0,
-                        "raw_score": 1.0,
-                        "task_success": True,
-                        "valid_sample": True,
-                    }
+                    "reward": 0.0,
+                    "_ng_failure_class": "judge_failed",
+                    "_ng_failure_judge_error": "TimeoutError: judge endpoint is warming",
                 }
             )
         raise AssertionError(f"unexpected path: {url_path}")
@@ -554,14 +613,17 @@ async def test_webvoyager_retries_only_judge_after_browser_is_closed():
 
     result = await agent.run(request, body)
 
-    assert result.reward == 1.0
-    assert judge_attempts == 2
+    assert result.reward == 0.0
+    assert result.mask_sample is True
+    assert result.failure_kind == "judge_failed"
+    assert result.model_dump()["_ng_failure_class"] == "judge_failed"
+    assert judge_attempts == 1
     paths = [path for _server, path, _body in calls]
     assert paths.count("/seed_session") == 1
     assert paths.count("/step") == 1
     assert paths.count("/close") == 1
-    assert paths.count("/verify_webvoyager") == 2
-    assert paths.index("/close") < paths.index("/verify_webvoyager")
+    assert paths.count("/verify") == 1
+    assert paths.index("/close") < paths.index("/verify")
 
 
 @pytest.mark.asyncio
@@ -611,6 +673,73 @@ async def test_browser_request_timeout_is_retryable_and_cleanup_is_bounded():
     assert result.artifact_session_id == "session-a"
     assert result.recording_artifacts[0].uri.endswith("/task.webm")
     assert "/close" in calls
+
+
+@pytest.mark.asyncio
+async def test_model_context_overflow_skips_futile_request_retries_but_remains_rollout_retryable():
+    agent = _agent(model_turn_max_retries=20, model_retry_delay_secs=0)
+    model_attempts = 0
+    model_headers = {}
+    overflow = ClientResponseError(
+        request_info=MagicMock(),
+        history=(),
+        status=500,
+        message="Internal Server Error",
+    )
+    overflow.response_content = json.dumps(
+        {
+            "error": {
+                "message": (
+                    "The decoder prompt (length 128107) is longer than the maximum "
+                    "model length of 128000."
+                ),
+                "type": "BadRequestError",
+                "code": 400,
+            }
+        }
+    ).encode()
+
+    async def post_json(*, url_path, **kwargs):
+        nonlocal model_attempts, model_headers
+        if url_path == "/seed_session":
+            response = _FakeHttpResponse(_seed())
+            return response, await response.json()
+        if url_path == "/v1/responses":
+            model_attempts += 1
+            model_headers = kwargs["headers"]
+            raise overflow
+        if url_path == "/close":
+            response = _FakeHttpResponse({"closed": True, "session_id": "session-a"})
+            return response, await response.json()
+        raise AssertionError(f"unexpected path: {url_path}")
+
+    agent._post_json = AsyncMock(side_effect=post_json)
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": "Solve"},
+        web_task=WebTask(
+            benchmark=WebBenchmark.WEBVOYAGER,
+            task_id="Google Map--14",
+        ),
+    )
+
+    result = await agent.run(request, body)
+    dumped = result.model_dump()
+
+    assert model_attempts == 1
+    assert model_headers == {
+        "x-nemo-gym-log-adapter": "web_agent",
+        "x-nemo-gym-log-task-id": "Google Map--14",
+        "x-nemo-gym-log-domain": "webvoyager",
+        "x-nemo-gym-log-step": "0",
+        "x-nemo-gym-log-parse-attempt": "0",
+    }
+    assert result.mask_sample is True
+    assert result.failure_kind == "model_context_overflow"
+    assert dumped["_ng_failure_class"] == "retryable_infrastructure"
+    assert "_ng_failure_terminal" not in dumped
+    assert result.verifier_result.metadata["error_kind"] == "model_context_overflow"
 
 
 @pytest.mark.asyncio
@@ -818,10 +947,6 @@ async def test_run_classifies_missing_evaluator_as_terminal_configuration_failur
             CAPTCHA_BUDGET_EXHAUSTED_STATUS,
             "RuntimeError: Captcha solver failed more than 3 times",
         ),
-        (
-            BROWSER_TARGET_CLOSED_STATUS,
-            "BrowserTargetClosedDuringCaptcha: browser target closed",
-        ),
     ],
 )
 async def test_environment_access_failure_is_masked_instead_of_judged(
@@ -874,6 +999,68 @@ async def test_environment_access_failure_is_masked_instead_of_judged(
     assert result.reward == 0.0
     assert result.task_success is False
     # Judging a forced stop would score a site-access failure as a policy failure.
-    assert "/verify_webvoyager" not in [path for _server, path, _body in calls]
+    assert "/verify" not in [path for _server, path, _body in calls]
     assert "/close" in [path for _server, path, _body in calls]
     assert "event=web_environment_access_failed" in "\n".join(record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_browser_target_closed_after_action_is_judged_as_policy_failure(caplog):
+    agent = _agent(judge=True)
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [_seed("ESPN--10")],
+            "/v1/responses": [_native_model_response("computer", '{"actions":[{"action":"left_click","coordinate":[0.08,0.015]}]}')],
+            "/step": [
+                {
+                    "operation_id": "step-0",
+                    "observation": _observation("https://www.espn.com/"),
+                    "execution_ok": False,
+                    "terminated": True,
+                    "info": {
+                        "action_error": "BrowserTargetClosedDuringCaptcha: browser target closed",
+                        "native_status": BROWSER_TARGET_CLOSED_STATUS,
+                    },
+                }
+            ],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
+            "/verify": [
+                {
+                    "reward": 0.0,
+                    "raw_score": 0.0,
+                    "task_success": False,
+                    "mask_sample": False,
+                }
+            ],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": [], "temperature": 0.1},
+        web_task=WebTask(
+            benchmark=WebBenchmark.WEBVOYAGER,
+            task_id="ESPN--10",
+            intent="Find the latest championship recap",
+            start_urls=["https://www.espn.com/"],
+            runtime_profile="native_visual",
+            observation_profile="screenshot",
+            action_profile="native_toolcall",
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.responses_api_agents.web_agent"):
+        result = await agent.run(request, body)
+
+    paths = [path for _server, path, _body in calls]
+    assert result.reward == 0.0
+    assert result.task_success is False
+    assert result.mask_sample is False
+    assert result.failure_kind is None
+    assert paths.count("/verify") == 1
+    assert paths.index("/close") < paths.index("/verify")
+    assert "event=web_environment_target_closed_after_action" in "\n".join(
+        record.getMessage() for record in caplog.records
+    )

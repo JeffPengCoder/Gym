@@ -2,10 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import stat
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
+from benchmarks.webvoyager.prepare import REPO_ROOT, write_env
+from benchmarks.webvoyager.prepare import main as prepare_main
 from benchmarks.webvoyager.summarize_native_v3 import (
     load_dataset,
     load_rows,
@@ -35,13 +40,15 @@ def test_native_v3_robust_evaluation_is_scoped_to_the_benchmark_profile() -> Non
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     repo_root = Path(__file__).parents[3]
     base_config = yaml.safe_load(
-        (repo_root / "resources_servers/native_web/configs/native_web.yaml").read_text(encoding="utf-8")
-    )["native_web"]["resources_servers"]["native_web"]
+        (repo_root / "resources_servers/webvoyager_browser/configs/webvoyager_browser.yaml").read_text(
+            encoding="utf-8"
+        )
+    )["webvoyager_browser"]["resources_servers"]["webvoyager_browser"]
     base_agent = yaml.safe_load(
         (repo_root / "responses_api_agents/web_agent/configs/web_agent.yaml").read_text(encoding="utf-8")
     )["web_agent"]["responses_api_agents"]["web_agent"]
 
-    resources = config["native_webvoyager_resources"]["resources_servers"]["native_web"]
+    resources = config["native_webvoyager_resources"]["resources_servers"]["webvoyager_browser"]
     agent = config["native_webvoyager_agent"]["responses_api_agents"]["web_agent"]
 
     assert base_config["terminate_on_action_error"] is True
@@ -50,21 +57,77 @@ def test_native_v3_robust_evaluation_is_scoped_to_the_benchmark_profile() -> Non
     assert base_agent["native_tool_alias_recovery"] == "strict"
     assert base_agent["native_parse_retry_feedback"] is False
     assert base_agent["native_parse_retry_temperature"] is None
+    assert base_agent["native_parse_retry_delay_secs"] == 0.0
     assert base_agent["repeated_action_warning_threshold"] == 0
     assert resources["terminate_on_action_error"] is False
     assert resources["max_computer_actions"] == 20
     assert agent["native_action_recovery"] == "repair_single_closing_bracket"
     assert agent["native_tool_alias_recovery"] == "webvoyager_v3"
-    assert agent["native_parse_retry_feedback"] is True
-    assert agent["native_parse_retry_temperature"] == 0.2
+    assert agent["native_parse_retry_feedback"] is False
+    assert agent["native_parse_retry_temperature"] is None
+    assert agent["native_parse_retry_delay_secs"] == 1.0
     assert agent["max_consecutive_execution_failures"] == 3
     assert agent["resources_request_timeout_secs"] == 420
     assert agent["judge_request_timeout_secs"] == 540
+    assert agent["environment_server"]["name"] == "native_webvoyager_resources"
+    assert agent["resources_server"]["name"] == "native_webvoyager_judge"
     # Every opt-in above repairs how an already-chosen action is decoded or
     # executed. The repeat warning instead writes strategy advice into the
     # policy's context, which the pinned reference never sends, so this profile
     # leaves it off and keeps the trajectory comparable.
     assert agent["repeated_action_warning_threshold"] == 0
+
+
+def test_prepare_writes_private_native_profile_with_standard_resource_roles(tmp_path) -> None:
+    input_jsonl = tmp_path / "input.jsonl"
+    input_jsonl.write_text("{}\n", encoding="utf-8")
+    env_path = tmp_path / "env.yaml"
+
+    assert write_env(
+        env_path,
+        profile="native_v3",
+        input_jsonl=input_jsonl,
+        output_jsonl=tmp_path / "rollouts.jsonl",
+    )
+
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+    config = yaml.safe_load(env_path.read_text(encoding="utf-8"))
+    assert config["agent_name"] == "native_webvoyager_agent"
+    assert config["num_samples_in_parallel"] == 1
+    assert config["responses_create_params"] == {
+        "max_output_tokens": 16384,
+        "temperature": 0.1,
+        "top_p": 0.95,
+    }
+    assert config["policy_api_key"] == "${oc.env:POLICY_API_KEY,local-vllm}"
+    assert config["webvoyager_judge_api_key"] == "${oc.env:WEBARENA_JUDGE_API_KEY,unset}"
+
+
+def test_prepare_rejects_parallel_sessions_on_one_native_display(tmp_path) -> None:
+    with pytest.raises(ValueError, match="isolated Gym processes"):
+        write_env(
+            tmp_path / "env.yaml",
+            profile="native_v3",
+            input_jsonl=tmp_path / "input.jsonl",
+            output_jsonl=tmp_path / "rollouts.jsonl",
+            concurrency=2,
+        )
+
+
+def test_prepare_prints_copyable_locked_cli_commands(monkeypatch, capsys, tmp_path) -> None:
+    prepared = tmp_path / "prepared.jsonl"
+    prepared.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr("benchmarks.webvoyager.prepare.prepare", lambda source, output: prepared)
+    monkeypatch.setattr(sys, "argv", ["prepare.py", "--no-env"])
+
+    prepare_main()
+
+    output = capsys.readouterr().out
+    gym_cli = str(REPO_ROOT / ".venv" / "bin" / "gym")
+    assert f"{gym_cli} env prefetch" in output
+    assert f"{gym_cli} env start" in output
+    assert f"{gym_cli} eval run --no-serve" in output
+    assert "/path/to/Gym" not in output
 
 
 def test_native_summary_keeps_fixed_denominator_and_exposes_masked_failures() -> None:

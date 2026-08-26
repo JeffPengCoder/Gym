@@ -19,8 +19,6 @@ native_visualwebarena:
       action_delay_seconds: 2.0
       terminate_on_action_error: false
       max_computer_actions: 20
-      proxy_mode: disabled
-      require_captcha_solver: false
       record_video: false
       session_ttl_seconds: 14400
       reaper_interval_seconds: 60
