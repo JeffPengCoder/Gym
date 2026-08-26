@@ -63,6 +63,7 @@ from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import (
     maybe_legacy_rollout_id_from_run_body,
+    maybe_rollout_id_from_run_body,
     new_execution_id,
 )
 from nemo_gym.rollout_observability import (
