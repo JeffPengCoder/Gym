@@ -64,12 +64,12 @@ class WebSessionManager:
         self._creating: set[str] = set()
         self._lock = asyncio.Lock()
         self._reaper_task: asyncio.Task[None] | None = None
-        # Both BrowserGym and the native driver own thread-affine Playwright
-        # state. Every lifecycle operation for a session therefore stays on
-        # the same dedicated worker instead of asyncio's shared thread pool.
-        self._operation_runner = operation_runner or ThreadAffineWebOperationRunner(
-            thread_name_prefix="web-playwright"
-        )
+        # A supplied runner is a shared override for lightweight unit tests or
+        # runtimes that do not own thread-affine browser state. By default each
+        # live browser session gets one dedicated worker: Playwright calls for
+        # that session stay on one thread, while a slow reset cannot serialize
+        # every other session behind the same executor.
+        self._shared_operation_runner = operation_runner
         self._started_at = time.time()
 
     async def start(self) -> None:
@@ -92,7 +92,8 @@ class WebSessionManager:
             *(self.close_session(session_id) for session_id in session_ids),
             return_exceptions=True,
         )
-        await self._operation_runner.close()
+        if self._shared_operation_runner is not None:
+            await self._shared_operation_runner.close()
 
     async def seed_session(self, session_id: str, body: WebSeedSessionRequest) -> WebSeedSessionResponse:
         self._validate_task(body.task)
@@ -129,10 +130,12 @@ class WebSessionManager:
 
         lease: SiteLease | None = None
         backend: WebEnvironmentBackend | None = None
+        operation_runner: WebOperationRunner | None = None
         try:
             lease = await self._site_pool.acquire(session_id, body.task)
             backend = self._backend_factory(self.config, session_id, self._artifacts)
-            observation, seed_info = await self._reset_backend(backend, body.task)
+            operation_runner = self._shared_operation_runner or self._make_operation_runner(session_id)
+            observation, seed_info = await self._reset_backend(operation_runner, backend, body.task)
             now = time.time()
             state = WebSessionState(
                 session_id=session_id,
@@ -143,6 +146,7 @@ class WebSessionManager:
                 seed_info=seed_info,
                 created_at=now,
                 last_access_at=now,
+                operation_runner=operation_runner,
             )
             async with self._lock:
                 self._creating.discard(session_id)
@@ -171,11 +175,13 @@ class WebSessionManager:
                 body.task.task_id,
                 time.monotonic() - started,
             )
-            if backend is not None:
+            if backend is not None and operation_runner is not None:
                 try:
-                    await self._run_backend(backend.close)
+                    await self._run_backend(operation_runner, backend.close)
                 except Exception:  # noqa: BLE001
                     LOG.exception("Cleanup failed after web session creation error")
+            if operation_runner is not None and operation_runner is not self._shared_operation_runner:
+                await operation_runner.close()
             if lease is not None:
                 await self._site_pool.release(lease, healthy=False)
             async with self._lock:
@@ -196,7 +202,11 @@ class WebSessionManager:
                 body.task.task_id,
             )
             try:
-                observation, seed_info = await self._reset_backend(state.backend, body.task)
+                observation, seed_info = await self._reset_backend(
+                    state.operation_runner,
+                    state.backend,
+                    body.task,
+                )
                 state.task = body.task
                 state.observation = observation
                 state.seed_info = seed_info
@@ -226,7 +236,7 @@ class WebSessionManager:
     async def observe(self, session_id: str) -> WebObservation:
         state = await self._get_session(session_id)
         async with state.lock:
-            observation = await self._run_backend(state.backend.observe)
+            observation = await self._run_backend(state.operation_runner, state.backend.observe)
             state.observation = observation
             state.last_access_at = time.time()
             return observation
@@ -259,7 +269,7 @@ class WebSessionManager:
                 body.action.terminal,
             )
             try:
-                result = await self._run_backend(state.backend.step, body.action)
+                result = await self._run_backend(state.operation_runner, state.backend.step, body.action)
                 response = WebStepResponse(operation_id=body.operation_id, **result.model_dump())
                 state.observation = result.observation
                 state.operations[body.operation_id] = response
@@ -306,7 +316,7 @@ class WebSessionManager:
                 bool(final_answer),
             )
             try:
-                result = await self._run_backend(state.backend.evaluate, final_answer)
+                result = await self._run_backend(state.operation_runner, state.backend.evaluate, final_answer)
                 state.verifier_result = result
                 state.status = "evaluated"
                 state.last_access_at = time.time()
@@ -342,11 +352,13 @@ class WebSessionManager:
         state.status = "closing"
         try:
             async with state.lock:
-                await self._run_backend(state.backend.close)
+                await self._run_backend(state.operation_runner, state.backend.close)
         except Exception:  # noqa: BLE001
             healthy = False
             LOG.exception("Web backend close failed for session=%s", session_id)
         finally:
+            if state.operation_runner is not self._shared_operation_runner:
+                await state.operation_runner.close()
             await self._site_pool.release(state.site_lease, healthy=healthy)
         LOG.info(
             "event=web_session_close session=%s benchmark=%s task=%s lease=%s healthy=%s",
@@ -395,21 +407,33 @@ class WebSessionManager:
             state.last_access_at = time.time()
             return state
 
-    async def _run_backend(self, operation: Callable[..., Any], *args: Any) -> Any:
+    async def _run_backend(
+        self,
+        operation_runner: WebOperationRunner,
+        operation: Callable[..., Any],
+        *args: Any,
+    ) -> Any:
         """Run a backend operation on its thread-affine Playwright worker."""
 
-        return await self._operation_runner.run(operation, *args)
+        return await operation_runner.run(operation, *args)
 
     async def _reset_backend(
-        self, backend: WebEnvironmentBackend, task: WebTask
+        self,
+        operation_runner: WebOperationRunner,
+        backend: WebEnvironmentBackend,
+        task: WebTask,
     ) -> tuple[WebObservation, dict[str, Any]]:
         try:
-            return await self._run_backend(backend.reset, task)
+            return await self._run_backend(operation_runner, backend.reset, task)
         except ValueError as exc:
             # Backends use ValueError for deterministic task or environment
             # preconditions. Retrying against an unchanged deployment cannot
             # repair those conditions.
             raise BenchmarkPreconditionError(str(exc)) from exc
+
+    @staticmethod
+    def _make_operation_runner(session_id: str) -> WebOperationRunner:
+        return ThreadAffineWebOperationRunner(thread_name_prefix=f"web-playwright-{session_id[:8]}")
 
     @staticmethod
     def _make_site_pool(config: WebResourcesServerConfig) -> SitePool:

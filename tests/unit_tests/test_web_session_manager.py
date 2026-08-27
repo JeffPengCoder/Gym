@@ -355,4 +355,4 @@ async def test_reaper_closes_expired_sessions(tmp_path, monkeypatch: pytest.Monk
         await manager._reaper_loop()
 
     manager.close_session.assert_awaited_once_with("stale")
-    await manager._operation_runner.close()
+    await manager.stop()

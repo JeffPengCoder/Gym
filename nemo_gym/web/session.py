@@ -11,6 +11,7 @@ from typing import Any
 
 from nemo_gym.web.api_models import WebStepResponse
 from nemo_gym.web.models import WebObservation, WebTask, WebVerifierResult
+from nemo_gym.web.operation_runner import WebOperationRunner
 from nemo_gym.web.protocol import WebEnvironmentBackend
 from nemo_gym.web.site_pool import SiteLease
 
@@ -51,6 +52,7 @@ class WebSessionState:
     seed_info: dict[str, Any]
     created_at: float
     last_access_at: float
+    operation_runner: WebOperationRunner
     status: str = "ready"
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     operations: OrderedDict[str, WebStepResponse] = field(default_factory=OrderedDict)

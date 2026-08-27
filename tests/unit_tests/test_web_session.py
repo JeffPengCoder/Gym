@@ -4,6 +4,7 @@
 from collections import OrderedDict
 
 from nemo_gym.web.models import WebBenchmark, WebObservation, WebTask
+from nemo_gym.web.operation_runner import DirectWebOperationRunner
 from nemo_gym.web.session import WebSessionState
 from nemo_gym.web.site_pool import SiteLease
 
@@ -36,6 +37,7 @@ def test_common_session_state_owns_idempotency_and_verifier_slots():
         seed_info={},
         created_at=1.0,
         last_access_at=1.0,
+        operation_runner=DirectWebOperationRunner(),
     )
 
     assert state.operations == OrderedDict()

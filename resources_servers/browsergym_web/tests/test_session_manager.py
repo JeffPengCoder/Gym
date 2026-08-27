@@ -55,11 +55,10 @@ class FakeBackend:
 
 
 class ThreadAffinityBackend(FakeBackend):
-    call_threads: set[int] = set()
+    call_threads: dict[str, set[int]] = {}
 
-    @classmethod
-    def _record_thread(cls):
-        cls.call_threads.add(threading.get_ident())
+    def _record_thread(self):
+        self.call_threads.setdefault(self.session_id, set()).add(threading.get_ident())
 
     def reset(self, task: WebTask):
         self._record_thread()
@@ -152,8 +151,8 @@ async def test_capacity_and_session_identity_are_enforced(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_sessions_keep_browser_calls_on_one_thread(tmp_path):
-    ThreadAffinityBackend.call_threads = set()
+async def test_concurrent_sessions_keep_each_browser_on_its_own_thread(tmp_path):
+    ThreadAffinityBackend.call_threads = {}
     manager = BrowserGymSessionManager(
         _config(tmp_path, max_sessions=2),
         backend_factory=ThreadAffinityBackend,
@@ -180,8 +179,42 @@ async def test_concurrent_sessions_keep_browser_calls_on_one_thread(tmp_path):
     )
     await manager.stop()
 
-    assert len(ThreadAffinityBackend.call_threads) == 1
-    assert event_loop_thread not in ThreadAffinityBackend.call_threads
+    assert set(ThreadAffinityBackend.call_threads) == {"session-a", "session-b"}
+    assert all(len(threads) == 1 for threads in ThreadAffinityBackend.call_threads.values())
+    worker_threads = set().union(*ThreadAffinityBackend.call_threads.values())
+    assert len(worker_threads) == 2
+    assert event_loop_thread not in worker_threads
+
+
+@pytest.mark.asyncio
+async def test_blocked_reset_does_not_serialize_other_sessions(tmp_path):
+    reset_started = threading.Event()
+    release_reset = threading.Event()
+
+    class BlockingResetBackend(FakeBackend):
+        def reset(self, task: WebTask):
+            if self.session_id == "session-a":
+                reset_started.set()
+                if not release_reset.wait(timeout=2):
+                    raise TimeoutError("test reset gate was not released")
+            return super().reset(task)
+
+    manager = BrowserGymSessionManager(
+        _config(tmp_path, max_sessions=2),
+        backend_factory=BlockingResetBackend,
+    )
+    first_seed = asyncio.create_task(manager.seed_session("session-a", WebSeedSessionRequest(task=_task("0"))))
+    assert await asyncio.to_thread(reset_started.wait, 1)
+
+    second_seed = await asyncio.wait_for(
+        manager.seed_session("session-b", WebSeedSessionRequest(task=_task("1"))),
+        timeout=1,
+    )
+    assert second_seed.session_id == "session-b"
+
+    release_reset.set()
+    await first_seed
+    await manager.stop()
 
 
 @pytest.mark.asyncio
