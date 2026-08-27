@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from nemo_gym.web.models import WebRuntimeProfile, WebTask
-from nemo_gym.web.operation_runner import WebOperationRunner
+from nemo_gym.web.operation_runner import ThreadAffineWebOperationRunner, WebOperationRunner
 from nemo_gym.web.session import (
     BenchmarkPreconditionError,
     CapacityUnavailableError,
@@ -16,6 +16,10 @@ from nemo_gym.web.session_manager import BackendFactory, WebSessionManager
 from nemo_gym.web.site_pool import SitePool
 from resources_servers.browsergym_web.backend import BrowserGymBackend
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
+from resources_servers.browsergym_web.playwright_runtime import (
+    close_thread_local_playwright,
+    install_thread_local_playwright,
+)
 
 
 class BrowserGymSessionManager(WebSessionManager):
@@ -29,11 +33,21 @@ class BrowserGymSessionManager(WebSessionManager):
         site_pool: SitePool | None = None,
         operation_runner: WebOperationRunner | None = None,
     ) -> None:
+        self._owns_thread_local_playwright = backend_factory is BrowserGymBackend and operation_runner is None
         super().__init__(
             config,
             backend_factory=backend_factory,
             site_pool=site_pool,
             operation_runner=operation_runner,
+        )
+
+    def _make_operation_runner(self, session_id: str) -> WebOperationRunner:
+        if not self._owns_thread_local_playwright:
+            return super()._make_operation_runner(session_id)
+        install_thread_local_playwright()
+        return ThreadAffineWebOperationRunner(
+            thread_name_prefix=f"browsergym-{session_id[:8]}",
+            finalizer=close_thread_local_playwright,
         )
 
     def _validate_task(self, task: WebTask) -> None:

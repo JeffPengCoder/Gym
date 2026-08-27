@@ -37,8 +37,14 @@ class ThreadAffineWebOperationRunner:
     session lifecycle to BrowserGym.
     """
 
-    def __init__(self, *, thread_name_prefix: str = "web-runtime") -> None:
+    def __init__(
+        self,
+        *,
+        thread_name_prefix: str = "web-runtime",
+        finalizer: Callable[[], Any] | None = None,
+    ) -> None:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=thread_name_prefix)
+        self._finalizer = finalizer
         self._closed = False
 
     async def run(self, operation: Callable[..., Any], *args: Any) -> Any:
@@ -50,5 +56,10 @@ class ThreadAffineWebOperationRunner:
     async def close(self) -> None:
         if self._closed:
             return
-        self._executor.shutdown(wait=True, cancel_futures=True)
-        self._closed = True
+        try:
+            if self._finalizer is not None:
+                await self.run(self._finalizer)
+        finally:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._finalizer = None
+            self._closed = True

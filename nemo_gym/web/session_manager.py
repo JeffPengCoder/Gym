@@ -431,8 +431,7 @@ class WebSessionManager:
             # repair those conditions.
             raise BenchmarkPreconditionError(str(exc)) from exc
 
-    @staticmethod
-    def _make_operation_runner(session_id: str) -> WebOperationRunner:
+    def _make_operation_runner(self, session_id: str) -> WebOperationRunner:
         return ThreadAffineWebOperationRunner(thread_name_prefix=f"web-playwright-{session_id[:8]}")
 
     @staticmethod

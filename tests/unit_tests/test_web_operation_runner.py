@@ -29,6 +29,19 @@ async def test_thread_affine_runner_serializes_calls_on_one_worker():
     assert len(set(worker_threads)) == 1
     assert worker_threads[0] != event_loop_thread
     await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_thread_affine_runner_runs_finalizer_on_its_worker():
+    calls: list[tuple[str, int]] = []
+    runner = ThreadAffineWebOperationRunner(
+        finalizer=lambda: calls.append(("finalize", threading.get_ident())),
+    )
+
+    worker_thread = await runner.run(threading.get_ident)
+    await runner.close()
+
+    assert calls == [("finalize", worker_thread)]
     await runner.close()
 
     with pytest.raises(RuntimeError, match="already stopped"):
