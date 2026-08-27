@@ -568,6 +568,25 @@ def test_nemotron_agent_turns_last_nonterminal_step_into_fail() -> None:
 
     assert actions == ["FAIL"]
     assert info["code"] == "FAIL"
+    assert info["mask_sample"] is True
+    assert info["termination_reason"] == "max_steps"
+
+
+def test_nemotron_agent_masks_exhausted_length_response() -> None:
+    agent = NemotronV3NanoOmniAgent(model="policy", max_steps=2, parse_retries=1)
+
+    def truncated(_payload, _model):
+        raise ValueError("Model response did not finish cleanly: finish_reason='length'")
+
+    agent.call_llm = truncated  # type: ignore[method-assign]
+
+    response, actions, info = agent.predict("Try the task.", {"screenshot": b"fake-png"})
+
+    assert "finish_reason='length'" in response
+    assert actions == ["FAIL"]
+    assert info["mask_sample"] is True
+    assert info["termination_reason"] == "model_response_invalid"
+    assert info["model_calls"][0]["accepted"] is False
 
 
 def test_nemotron_agent_retries_invalid_python_action() -> None:

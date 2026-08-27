@@ -1120,6 +1120,74 @@ def test_nemotron_v3_nano_omni_runner_uses_gym_messages_transport(monkeypatch) -
     assert FakeNemotronAgent.instances[0].kwargs["max_steps"] == 100
 
 
+def test_nemotron_synthetic_fail_is_masked(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    def synthetic_fail(_self, _instruction, _obs):
+        return (
+            "Model response did not finish cleanly: finish_reason='length'",
+            ["FAIL"],
+            {
+                "mask_sample": True,
+                "termination_reason": "model_response_invalid",
+                "model_calls": [],
+            },
+        )
+
+    monkeypatch.setattr(FakeNemotronAgent, "predict", synthetic_fail)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-nano-length", "instruction": "Use the scaffold."},
+        model_fn=lambda *_args: pytest.fail("Nemotron should not use model_fn"),
+        runner_name="nemotron_v3_nano_omni_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakeNemotronAgent",
+        messages_model_fn=lambda *_args: pytest.fail("predict is stubbed"),
+        policy_model_name="nemotron-3-nano-omni-under-test",
+        policy_max_tokens=2048,
+        policy_temperature=1.0,
+        policy_top_p=1.0,
+        max_steps=200,
+        max_trajectory_length=3,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.finished is True
+    assert result.mask_sample is True
+    assert result.termination_reason == "model_response_invalid"
+    assert result.steps[0].actions == ["FAIL"]
+
+
+def test_nemotron_model_authored_fail_remains_unmasked(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    def explicit_fail(_self, _instruction, _obs):
+        return "The task cannot be completed.", ["FAIL"], {"model_calls": []}
+
+    monkeypatch.setattr(FakeNemotronAgent, "predict", explicit_fail)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-nano-explicit-fail", "instruction": "Use the scaffold."},
+        model_fn=lambda *_args: pytest.fail("Nemotron should not use model_fn"),
+        runner_name="nemotron_v3_nano_omni_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakeNemotronAgent",
+        messages_model_fn=lambda *_args: pytest.fail("predict is stubbed"),
+        policy_model_name="nemotron-3-nano-omni-under-test",
+        policy_max_tokens=2048,
+        policy_temperature=1.0,
+        policy_top_p=1.0,
+        max_steps=200,
+        max_trajectory_length=3,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.finished is True
+    assert result.mask_sample is False
+    assert result.termination_reason == "agent_fail"
+    assert result.steps[0].actions == ["FAIL"]
+
+
 def test_qwen3_omni_runner_retries_and_merges_adjacent_pyautogui_actions(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
     responses = [

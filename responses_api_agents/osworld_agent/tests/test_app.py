@@ -219,6 +219,51 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(
 
 @patch("openai.DefaultHttpxClient")
 @patch("openai.OpenAI")
+def test_messages_model_fn_logs_length_response_before_rejecting_it(
+    mock_openai, _mock_http_client, monkeypatch, tmp_path
+) -> None:
+    log_path = tmp_path / "model-io-length.jsonl"
+    monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(log_path))
+    message = SimpleNamespace(
+        content="partial action",
+        tool_calls=[],
+        model_extra={
+            "prompt_token_ids": [1, 2],
+            "generation_token_ids": [3, 4],
+            "generation_log_probs": [-0.1, -0.2],
+        },
+    )
+    mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason="length")]
+    )
+    call = _build_messages_model_fn(
+        base_url="http://policy/v1",
+        model_name="policy",
+        api_key="test-key",  # pragma: allowlist secret
+    )
+    messages = [{"role": "user", "content": "inspect"}]
+
+    with pytest.raises(ValueError, match="finish_reason='length'"):
+        call(
+            messages,
+            {
+                "model": "policy",
+                "messages": messages,
+                "max_tokens": 2048,
+                "temperature": 1.0,
+                "_nemo_gym_return_message": True,
+                "_nemo_gym_require_stop": True,
+            },
+        )
+
+    rows = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert [row["event"] for row in rows] == ["model_request", "model_response"]
+    assert rows[-1]["finish_reason"] == "length"
+    assert rows[-1]["normalized_response"]["generation_token_ids"] == [3, 4]
+
+
+@patch("openai.DefaultHttpxClient")
+@patch("openai.OpenAI")
 def test_messages_model_fn_forwards_explicit_nemo_rl_rollout_purpose(mock_openai, mock_http_client) -> None:
     message = SimpleNamespace(content="done", tool_calls=[], model_extra={})
     client = mock_openai.return_value

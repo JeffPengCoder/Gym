@@ -804,6 +804,8 @@ class NemotronV3NanoOmniAgent:
                 if feedback_next:
                     request_messages = self._parse_retry_messages(messages, response, last_error)
         else:
+            parsed_info["mask_sample"] = True
+            parsed_info["termination_reason"] = "model_response_invalid"
             return last_error, ["FAIL"], parsed_info
 
         actions = [self._scale_windows_scroll(action) for action in actions]
@@ -815,5 +817,7 @@ class NemotronV3NanoOmniAgent:
 
         if len(self.actions) >= self.max_steps and not any(action in {"DONE", "FAIL"} for action in actions):
             parsed_info["code"] = "FAIL"
+            parsed_info["mask_sample"] = True
+            parsed_info["termination_reason"] = "max_steps"
             return content, ["FAIL"], parsed_info
         return content, actions, parsed_info

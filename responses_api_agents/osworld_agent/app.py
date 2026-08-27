@@ -690,9 +690,14 @@ def _build_messages_model_fn(
                 )
             raise
         choice = resp.choices[0]
+        finish_reason_error = None
         if payload.get("_nemo_gym_require_stop") and choice.finish_reason not in {"stop", "tool_calls"}:
-            raise ValueError(f"Model response did not finish cleanly: finish_reason={choice.finish_reason!r}")
+            finish_reason_error = ValueError(
+                f"Model response did not finish cleanly: finish_reason={choice.finish_reason!r}"
+            )
         if not model_io_enabled:
+            if finish_reason_error is not None:
+                raise finish_reason_error
             return _normalize_chat_message(
                 choice.message,
                 structured=bool(payload.get("_nemo_gym_return_message")),
@@ -726,6 +731,11 @@ def _build_messages_model_fn(
                 "normalization_error": normalization_error,
             }
         )
+        # A length/content-filter termination is not executable, but the raw
+        # response is still essential diagnostic evidence.  Log it before
+        # surfacing the failure to the selected agent.
+        if finish_reason_error is not None:
+            raise finish_reason_error
         if normalization_exc is not None:
             raise normalization_exc
         return normalized

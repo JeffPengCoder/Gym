@@ -1966,6 +1966,8 @@ def run_osworld_task(
     timed_out = False
     setup_score_zero = False
     agent_terminal_action: Optional[str] = None
+    agent_mask_sample = False
+    agent_mask_reason: Optional[str] = None
     evaluation_error: Optional[str] = None
     proxy_setup_error = False
     rollout_phase = "before_environment"
@@ -2395,6 +2397,12 @@ def run_osworld_task(
                     model_text, actions = prediction[:2]
                     if len(prediction) == 3 and isinstance(prediction[2], dict):
                         agent_step_info = prediction[2]
+                        if agent_step_info.get("mask_sample"):
+                            agent_mask_sample = True
+                            raw_reason = agent_step_info.get("termination_reason")
+                            agent_mask_reason = (
+                                raw_reason if isinstance(raw_reason, str) and raw_reason else "agent_response_invalid"
+                            )
                     model_text = strip_thinking(_model_response_content(model_text))
                     actions = _flatten_actions(actions)
                     if runner_spec.kind == "qwen3_omni_agent":
@@ -2632,8 +2640,11 @@ def run_osworld_task(
     else:
         reward = 1.0 if final_score >= 1.0 else 0.0
     # mask_sample: reward is unreliable if (a) anything errored, (b) timeout,
-    # or (c) loop exhausted max_steps without the model emitting DONE/FAIL.
-    mask_sample = bool(error) or timed_out or not finished
+    # or (c) loop exhausted max_steps without the model emitting DONE/FAIL, or
+    # (d) the selected agent generated a synthetic terminal action after an
+    # invalid/truncated response.  Explicit model-authored DONE/FAIL remains
+    # eligible; only the agent's explicit mask carrier changes admission.
+    mask_sample = bool(error) or timed_out or not finished or agent_mask_sample
     if timed_out:
         termination_reason = "timeout"
     elif setup_score_zero:
@@ -2644,12 +2655,22 @@ def run_osworld_task(
         termination_reason = "proxy_setup_error"
     elif error:
         termination_reason = "rollout_error"
+    elif agent_mask_sample:
+        termination_reason = agent_mask_reason or "agent_response_invalid"
     elif agent_terminal_action is not None:
         termination_reason = f"agent_{agent_terminal_action.lower()}"
     elif finished:
         termination_reason = "environment_done"
     else:
         termination_reason = "max_steps"
+
+    if mask_sample:
+        task_logger.warning(
+            "OSWORLD_ROLLOUT_MASK|reason=%s|finished=%s|error=%r",
+            termination_reason,
+            finished,
+            error,
+        )
 
     result = RolloutResult(
         reward=reward,
