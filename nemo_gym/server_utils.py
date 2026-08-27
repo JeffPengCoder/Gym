@@ -131,6 +131,10 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     global_aiohttp_connector_limit_per_host: int = 1024
 
     global_aiohttp_client_request_debug: bool = False
+    global_aiohttp_client_trust_env: bool = Field(
+        default=False,
+        description="Allow aiohttp to use HTTP(S)_PROXY and NO_PROXY from the server process environment.",
+    )
 
     global_aiohttp_tcp_keepalive_idle_seconds: int = Field(
         default=60,
@@ -205,6 +209,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         ),
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
+        trust_env=cfg.global_aiohttp_client_trust_env,
     )
 
     global _GLOBAL_AIOHTTP_CLIENT

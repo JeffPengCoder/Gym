@@ -37,6 +37,7 @@ from nemo_gym.server_utils import (
     _validation_body_shape,
     _validation_errors_for_log,
     initialize_ray,
+    set_global_aiohttp_client,
 )
 
 
@@ -329,9 +330,23 @@ class TestServerUtils:
 
     def test_GlobalAIOHTTPAsyncClientConfig_keepalive_defaults(self) -> None:
         cfg = GlobalAIOHTTPAsyncClientConfig()
+        assert cfg.global_aiohttp_client_trust_env is False
         assert cfg.global_aiohttp_tcp_keepalive_idle_seconds == 60
         assert cfg.global_aiohttp_tcp_keepalive_interval_seconds == 10
         assert cfg.global_aiohttp_tcp_keepalive_probes == 3
+
+    def test_global_aiohttp_client_can_trust_proxy_environment(self, monkeypatch: MonkeyPatch) -> None:
+        client = MagicMock()
+        client_session_ctor = MagicMock(return_value=client)
+        monkeypatch.setattr(nemo_gym.server_utils, "ClientSession", client_session_ctor)
+        monkeypatch.setattr(nemo_gym.server_utils, "TCPConnector", MagicMock())
+        monkeypatch.setattr(nemo_gym.server_utils, "DummyCookieJar", MagicMock())
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+
+        result = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig(global_aiohttp_client_trust_env=True))
+
+        assert result is client
+        assert client_session_ctor.call_args.kwargs["trust_env"] is True
 
     def test_keepalive_socket_factory_uses_configured_values(self, monkeypatch: MonkeyPatch) -> None:
         mock_sock = MagicMock()
