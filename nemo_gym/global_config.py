@@ -26,7 +26,7 @@ from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import ClassVar, Dict, List, Optional, Tuple, Type
+from typing import ClassVar, Dict, List, Optional, Set, Tuple, Type
 
 import hydra
 import rich
@@ -49,6 +49,7 @@ from nemo_gym.config_types import (
     NoServerInstancesError,
     ServerInstanceConfig,
     ServerRefNotFoundError,
+    UnsupportedAgentPairingError,
     is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
@@ -104,6 +105,8 @@ TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
+ALLOW_UNSUPPORTED_PAIRING_KEY_NAME = "allow_unsupported_pairing"
+ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -140,11 +143,15 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     TELEMETRY_KEY_NAME,
+    ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
+# Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
+ALLOWED_AGENTS_KEY_NAME = "allowed_agents"
+RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
 
 
 @dataclass(frozen=True)
@@ -606,6 +613,8 @@ Duplicate config paths:
                 f"resources server alongside the agent so there is a task for it to run."
             )
 
+        self._raise_on_unsupported_pairing(global_config_dict, source, targets)
+
         # Struct mode would reject the key removals below - we need open_dict to allow it.
         with open_dict(global_config_dict):
             for target in targets:
@@ -616,6 +625,49 @@ Duplicate config paths:
                 agents.pop(target.agent_type)
                 agents[source.agent_type] = composed
             global_config_dict.pop(source.name)
+
+    def _raise_on_unsupported_pairing(
+        self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]
+    ) -> None:
+        """Reject swapping `source` onto any target whose resources server does not declare support for it.
+
+        Compatibility is declared verifier-side because that is where it is known: an environment's author
+        knows which harnesses score their task correctly, while a generic harness cannot know that for every
+        environment. A server that declares nothing accepts any harness.
+        """
+        if pairing_override_enabled(global_config_dict):
+            return
+
+        restrictions: List[Set[str]] = []
+        rejected: List[Tuple[_AgentInstance, List[str]]] = []
+        for target in targets:
+            reference = self._resources_server_reference(target.server_config)
+            allowed = allowed_agents_for(global_config_dict, reference.get("name") if reference else None)
+            if allowed is None:
+                continue
+            restrictions.append(set(allowed))
+            if source.agent_type not in allowed:
+                rejected.append((target, allowed))
+        if not rejected:
+            return
+
+        # Report every rejected instance at once: a config can bring in several, and fixing them one
+        # error at a time means one full re-resolve per instance.
+        rejected_list = "\n".join(
+            f"  - {target.name} uses {target.server_config['resources_server']['name']} "
+            f"and accepts {', '.join(allowed)}"
+            for target, allowed in rejected
+        )
+        supported = sorted(set.intersection(*restrictions))
+        remedy = f"Select one of: {', '.join(supported)}." if supported else "No single agent satisfies all of them."
+        raise UnsupportedAgentPairingError(
+            f"""'{source.agent_type}' is not declared compatible with {len(rejected)} of the agent instance(s) """
+            f"""it would replace, so it cannot be scored correctly:
+{rejected_list}
+
+{remedy} Or pass --allow-unsupported-pairing (or set {ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME}=1) to bypass \
+the check."""
+        )
 
     @staticmethod
     def _carry_over_agent_bindings(original: DictConfig, composed: DictConfig) -> None:
@@ -1136,6 +1188,39 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
     server_config_dict = list(server_config_dict.values())[0]
 
     return server_config_dict
+
+
+def allowed_agents_for(global_config_dict: DictConfig, resources_server_name: Optional[str]) -> Optional[List[str]]:
+    """The agent types `resources_server_name` declares support for, or None when it declares none.
+
+    A bare string is accepted as a single entry: an `++...allowed_agents=name` override arrives before the
+    server model is validated, and iterating it would read the name as its characters.
+    """
+    instance = global_config_dict.get(resources_server_name) if resources_server_name else None
+    if not isinstance(instance, DictConfig) or RESOURCES_SERVER_TYPE_KEY_NAME not in instance:
+        return None
+    servers = instance[RESOURCES_SERVER_TYPE_KEY_NAME]
+    if not isinstance(servers, DictConfig) or len(servers) != 1:
+        return None
+    implementation = next(iter(servers))
+    declared = servers[implementation].get(ALLOWED_AGENTS_KEY_NAME)
+    if not declared:
+        return None
+    if isinstance(declared, str):
+        return [declared]
+    if not isinstance(declared, ListConfig):
+        raise ConfigError(
+            f"'{resources_server_name}.{RESOURCES_SERVER_TYPE_KEY_NAME}.{implementation}."
+            f"{ALLOWED_AGENTS_KEY_NAME}' must be a list of agent types, got {type(declared).__name__}."
+        )
+    return [str(name) for name in declared]
+
+
+def pairing_override_enabled(global_config_dict: DictConfig) -> bool:
+    """True when the `allowed_agents` guard has been waived by config key or environment variable."""
+    return bool(global_config_dict.get(ALLOW_UNSUPPORTED_PAIRING_KEY_NAME)) or getenv(
+        ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, ""
+    ).lower() not in ("", "0", "false")
 
 
 def agents_by_resources_server(global_config_dict: DictConfig) -> Dict[str, List[str]]:
