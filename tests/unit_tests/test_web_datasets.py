@@ -6,9 +6,11 @@ import json
 import pytest
 
 from nemo_gym.web.datasets import (
+    adapt_native_visualwebarena_records,
     adapt_native_webarena_record,
     adapt_native_webarena_records,
     adapt_native_webvoyager_record,
+    adapt_visualwebarena_records,
     adapt_webarena_record,
     adapt_webvoyager_record,
     load_json_records,
@@ -64,6 +66,27 @@ def test_webarena_auth_and_non_string_start_urls_are_normalized():
 
     scalar = WebTask.model_validate(adapt_webarena_record({"task_id": 10, "start_url": 123})["web_task"])
     assert scalar.start_urls == ["123"]
+
+
+def test_visualwebarena_partitions_are_globally_reindexed():
+    rows = adapt_visualwebarena_records(
+        [
+            ("classifieds", [{"task_id": 0, "intent": "c", "sites": ["classifieds"]}]),
+            (
+                "reddit",
+                [
+                    {"task_id": 0, "intent": "r0", "sites": ["reddit"]},
+                    {"task_id": 1, "intent": "r1", "sites": ["wikipedia"]},
+                ],
+            ),
+            ("shopping", [{"task_id": 0, "intent": "s", "sites": ["shopping"]}]),
+        ]
+    )
+
+    tasks = [WebTask.model_validate(row["web_task"]) for row in rows]
+    assert [task.task_id for task in tasks] == ["0", "1", "2", "3"]
+    assert tasks[-1].original_metadata["_source_task_id"] == 0
+    assert tasks[-1].original_metadata["_source_partition"] == "shopping"
 
 
 def test_webvoyager_uses_legacy_action_surface_over_browsergym():
@@ -130,6 +153,32 @@ def test_native_webarena_batch_preserves_cross_task_collision_plan():
     for row in rows:
         targets = row["web_task"]["task_kwargs"]["collision_plan"]["snapshot_adapters"]["program_html"]["targets"]
         assert len(targets) == 1
+
+
+def test_native_visualwebarena_matches_reference_contiguous_ids_and_images():
+    rows = adapt_native_visualwebarena_records(
+        [
+            {
+                "id": "visualwebarena-577",
+                "ques": "First",
+                "web_name": ["reddit"],
+                "web": ["__REDDIT__"],
+                "eval": {},
+            },
+            {
+                "id": "visualwebarena-580",
+                "ques": "Second",
+                "web_name": ["shopping"],
+                "web": ["__SHOPPING__"],
+                "image": ["input-0.png", "input-1.png"],
+                "eval": {},
+            },
+        ]
+    )
+
+    assert [row["web_task"]["task_id"] for row in rows] == ["0", "1"]
+    assert rows[1]["web_task"]["input_images"] == ["input-0.png", "input-1.png"]
+    assert rows[1]["web_task"]["original_metadata"]["id"] == "visualwebarena-580"
 
 
 def test_write_jsonl_is_utf8_and_newline_delimited(tmp_path):

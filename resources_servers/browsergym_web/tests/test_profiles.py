@@ -17,6 +17,16 @@ def test_webarena_uses_pinned_environment_and_native_evaluator():
     assert profile.external_verifier is False
 
 
+def test_visualwebarena_uses_pinned_environment_and_native_evaluator():
+    profile = resolve_browsergym_profile(WebTask(benchmark=WebBenchmark.VISUALWEBARENA, task_id=721))
+
+    assert profile.module == "browsergym.visualwebarena"
+    assert profile.env_id == "browsergym/visualwebarena.721"
+    assert profile.action_subsets == ("visualwebarena",)
+    assert profile.observation_profile == WebObservationProfile.SOM
+    assert profile.external_verifier is False
+
+
 def test_webvoyager_uses_openended_task_and_external_verifier():
     profile = resolve_browsergym_profile(
         WebTask(

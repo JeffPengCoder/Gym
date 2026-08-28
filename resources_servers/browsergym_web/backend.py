@@ -8,6 +8,7 @@ import importlib
 import json
 import logging
 from collections import deque
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,9 @@ from nemo_gym.web.session import EvaluatorConfigurationError, EvaluatorInfrastru
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
 from resources_servers.browsergym_web.evaluator_compat import (
     configure_evaluator_environment,
+    configure_visualwebarena_evaluator_model,
     configure_webarena_evaluator_model,
+    rule_only_evaluator_import_environment,
 )
 from resources_servers.browsergym_web.profiles import BrowserGymLaunchSpec, resolve_browsergym_profile
 
@@ -100,16 +103,24 @@ class BrowserGymBackend:
         self.close()
         spec = resolve_browsergym_profile(task)
         evaluator_model = self._evaluator_model(task.benchmark)
-        self._prepare_evaluator(task)
+        needs_rule_only_import_environment = self._prepare_evaluator(task)
+        import_environment = (
+            rule_only_evaluator_import_environment(base_url=self.config.evaluator_base_url)
+            if needs_rule_only_import_environment
+            else nullcontext()
+        )
         env = None
         try:
-            env = self._make_environment(spec)
-            raw_observation, raw_info = env.reset(seed=task.seed)
+            with import_environment:
+                env = self._make_environment(spec)
+                raw_observation, raw_info = env.reset(seed=task.seed)
             # BrowserGym defers construction of the upstream task until env.reset().
             # Only then have the benchmark packages installed their legacy dataset
             # mappings and imported the evaluator modules.
             if spec.module == "browsergym.webarena":
                 configure_webarena_evaluator_model(self.config.webarena_evaluator_model)
+            elif spec.module == "browsergym.visualwebarena":
+                configure_visualwebarena_evaluator_model(self.config.visualwebarena_evaluator_model)
         except BaseException:
             if env is not None:
                 try:
@@ -270,19 +281,24 @@ class BrowserGymBackend:
         if self.spec is None:
             raise RuntimeError("cannot identify verifier without an active task")
         model = self._evaluator_model(self.task.benchmark) if self.task is not None else None
-        if self.spec.module == "browsergym.webarena" and model:
+        if self.spec.module in {"browsergym.webarena", "browsergym.visualwebarena"} and model:
             return f"{self.spec.verifier_version}:judge={model}"
         return self.spec.verifier_version
 
-    def _prepare_evaluator(self, task: WebTask) -> None:
+    def _prepare_evaluator(self, task: WebTask) -> bool:
         model = self._evaluator_model(task.benchmark)
         if not model:
-            if task.benchmark == WebBenchmark.WEBARENA and _uses_model_evaluator(task.original_metadata):
+            if task.benchmark in {WebBenchmark.WEBARENA, WebBenchmark.VISUALWEBARENA} and _uses_model_evaluator(
+                task.original_metadata
+            ):
                 raise EvaluatorConfigurationError(
                     f"{task.benchmark.value} task {task.task_id} requires a model-backed native evaluator; "
                     f"configure {task.benchmark.value}_evaluator_model"
                 )
-            return
+            # libvisualwebarena 0.0.15 creates its OpenAI clients while
+            # importing the evaluator module, including for rule-only tasks.
+            # Temporarily satisfy that import only when no judge is required.
+            return task.benchmark == WebBenchmark.VISUALWEBARENA
 
         api_key = self.config.evaluator_api_key()
         if not api_key:
@@ -293,10 +309,13 @@ class BrowserGymBackend:
             api_key=api_key,
             base_url=self.config.evaluator_base_url,
         )
+        return False
 
     def _evaluator_model(self, benchmark: WebBenchmark) -> str | None:
         if benchmark == WebBenchmark.WEBARENA:
             return self.config.webarena_evaluator_model
+        if benchmark == WebBenchmark.VISUALWEBARENA:
+            return self.config.visualwebarena_evaluator_model
         return None
 
     def _convert_observation(self, raw: dict[str, Any]) -> WebObservation:

@@ -248,7 +248,7 @@ def adapt_native_visual_record(
     can produce the exact same row consumed by the full runtime.
     """
 
-    if benchmark not in {"webarena", "webvoyager"}:
+    if benchmark not in {"webarena", "visualwebarena", "webvoyager"}:
         raise ValueError(f"unsupported native web benchmark: {benchmark!r}")
     source_id = record.get("id", record.get("task_id"))
     if source_id is None:
@@ -274,7 +274,7 @@ def adapt_native_visual_record(
     else:
         input_images = [str(image) for image in image_value if image]
     task_kwargs: dict[str, Any] = {}
-    if benchmark == "webarena":
+    if benchmark in {"webarena", "visualwebarena"}:
         task_kwargs["collision_plan"] = deepcopy(
             dict(collision_plan) if collision_plan is not None else build_collision_plan(dict(record))
         )
@@ -323,6 +323,21 @@ def adapt_native_webarena_record(
         benchmark="webarena",
         verifier_profile="native_webarena_classic",
         task_id=task_id,
+        collision_plan=collision_plan,
+    )
+
+
+def adapt_native_visualwebarena_record(
+    record: Mapping[str, Any],
+    *,
+    task_index: int | None = None,
+    collision_plan: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return adapt_native_visual_record(
+        record,
+        benchmark="visualwebarena",
+        verifier_profile="native_visualwebarena",
+        task_id=task_index,
         collision_plan=collision_plan,
     )
 

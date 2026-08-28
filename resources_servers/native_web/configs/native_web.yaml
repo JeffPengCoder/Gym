@@ -4,8 +4,8 @@ native_web:
       entrypoint: app.py
       domain: agent
       verified: false
-      description: Headed Chromium runtime for the native WebArena evaluator
-      value: Run local WebArena sites through Gym's native visual web protocol
+      description: Shared headed Chromium runtime for native WebArena and VisualWebArena evaluators
+      value: Run local WebArena-family sites through Gym's native visual web protocol
       # PyAutoGUI controls one process-global X display. Scale with 16
       # resource-server replicas/displays, never 16 sessions in one display.
       max_sessions: 1
@@ -25,4 +25,4 @@ native_web:
       reaper_interval_seconds: 60
       require_auth: false
       site_pool_mode: local_locks
-      allowed_benchmarks: [webarena]
+      allowed_benchmarks: [webarena, visualwebarena]

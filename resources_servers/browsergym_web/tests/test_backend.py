@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import pytest
 
 from nemo_gym.web.artifacts import WebArtifactStore
@@ -52,7 +54,7 @@ def _config(tmp_path):
         entrypoint="app.py",
         domain="agent",
         artifact_dir=str(tmp_path),
-        allowed_benchmarks=[WebBenchmark.WEBARENA, WebBenchmark.WEBVOYAGER],
+        allowed_benchmarks=[WebBenchmark.WEBARENA, WebBenchmark.VISUALWEBARENA, WebBenchmark.WEBVOYAGER],
     )
 
 
@@ -69,6 +71,11 @@ def _task() -> WebTask:
 
 def _webarena_task(**updates) -> WebTask:
     task = WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0", seed=7)
+    return task.model_copy(update=updates)
+
+
+def _visualwebarena_task(**updates) -> WebTask:
+    task = WebTask(benchmark=WebBenchmark.VISUALWEBARENA, task_id="0", seed=7)
     return task.model_copy(update=updates)
 
 
@@ -186,6 +193,38 @@ def test_webarena_model_evaluator_requires_explicit_configuration(tmp_path):
         backend.reset(task)
 
 
+def test_visualwebarena_model_evaluator_requires_explicit_configuration(tmp_path):
+    backend = BrowserGymBackend(_config(tmp_path), "session-missing-vwa-evaluator", WebArtifactStore(tmp_path))
+    task = _visualwebarena_task(
+        original_metadata={"eval": {"reference_answers": {"fuzzy_match": ["answer"]}}},
+    )
+
+    with pytest.raises(EvaluatorConfigurationError, match="visualwebarena_evaluator_model"):
+        backend.reset(task)
+
+
+def test_rule_only_visualwebarena_uses_temporary_import_credential(tmp_path, monkeypatch):
+    seen_keys = []
+
+    class ImportSensitiveEnv(FakeEnv):
+        def reset(self, seed):
+            seen_keys.append(os.environ["OPENAI_API_KEY"])
+            return super().reset(seed)
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    backend = BrowserGymBackend(_config(tmp_path), "session-vwa-rule-only", WebArtifactStore(tmp_path))
+    monkeypatch.setattr(backend, "_make_environment", lambda _spec: ImportSensitiveEnv())
+    task = _visualwebarena_task(
+        original_metadata={"eval": {"reference_answers": {"exact_match": "answer"}}},
+    )
+
+    backend.reset(task)
+
+    assert seen_keys == ["unused-for-rule-only-evaluator"]
+    assert "OPENAI_API_KEY" not in os.environ
+    backend.close()
+
+
 def test_webarena_evaluator_hook_runs_after_upstream_reset(tmp_path, monkeypatch):
     events = []
 
@@ -214,6 +253,32 @@ def test_webarena_evaluator_hook_runs_after_upstream_reset(tmp_path, monkeypatch
     assert events == ["environment:test-only", "reset", "configure:local-judge"]
     assert info["evaluator_model"] == "local-judge"
     assert info["verifier_version"].endswith(":judge=local-judge")
+    backend.close()
+
+
+def test_visualwebarena_evaluator_hook_runs_after_upstream_reset(tmp_path, monkeypatch):
+    events = []
+
+    class OrderedEnv(FakeEnv):
+        def reset(self, seed):
+            events.append("reset")
+            return super().reset(seed)
+
+    config = _config(tmp_path).model_copy(update={"visualwebarena_evaluator_model": "local-visual-judge"})
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only")  # pragma: allowlist secret
+    backend = BrowserGymBackend(config, "session-vwa-hook", WebArtifactStore(tmp_path))
+    monkeypatch.setattr(backend, "_make_environment", lambda _spec: OrderedEnv())
+    monkeypatch.setattr(
+        backend_module,
+        "configure_visualwebarena_evaluator_model",
+        lambda model: events.append(f"configure:{model}"),
+    )
+
+    _observation, info = backend.reset(_visualwebarena_task())
+
+    assert events == ["reset", "configure:local-visual-judge"]
+    assert info["evaluator_model"] == "local-visual-judge"
+    assert info["verifier_version"].endswith(":judge=local-visual-judge")
     backend.close()
 
 

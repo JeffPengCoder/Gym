@@ -78,6 +78,18 @@ def resolve_browsergym_profile(task: WebTask) -> BrowserGymLaunchSpec:
             verifier_version="browsergym-v0.14.3:webarena",
         )
 
+    if task.benchmark == WebBenchmark.VISUALWEBARENA:
+        if task.action_profile != WebActionProfile.BROWSERGYM_HIGHLEVEL:
+            raise ValueError("VisualWebArena requires the browsergym_highlevel action profile")
+        return BrowserGymLaunchSpec(
+            module="browsergym.visualwebarena",
+            env_id=_gym_id(task, "visualwebarena"),
+            action_subsets=("visualwebarena",),
+            observation_profile=task.observation_profile or WebObservationProfile.SOM,
+            env_kwargs=env_kwargs,
+            verifier_version="browsergym-v0.14.3:visualwebarena",
+        )
+
     if task.benchmark == WebBenchmark.WEBVOYAGER:
         start_url = next((url for url in task.start_urls if url), None)
         if start_url is None:

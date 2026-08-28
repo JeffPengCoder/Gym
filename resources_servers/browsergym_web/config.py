@@ -21,6 +21,7 @@ class BrowserGymWebResourcesServerConfig(WebResourcesServerConfig):
     pre_observation_delay: float = Field(default=0.5, ge=0.0, le=30.0)
     record_video: bool = False
     webarena_evaluator_model: str | None = None
+    visualwebarena_evaluator_model: str | None = None
     evaluator_base_url: str | None = None
     evaluator_api_key_env: str = "OPENAI_API_KEY"
 

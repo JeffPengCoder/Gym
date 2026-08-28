@@ -12,6 +12,7 @@ from resources_servers.native_web.config import NativeWebResourcesServerConfig
 
 NATIVE_VERIFIER_PROFILES = {
     WebBenchmark.WEBARENA: "native_webarena_classic",
+    WebBenchmark.VISUALWEBARENA: "native_visualwebarena",
 }
 
 
@@ -26,7 +27,7 @@ class NativeWebSessionManager(WebSessionManager):
         if task.action_profile != WebActionProfile.NATIVE_TOOLCALL:
             raise ValueError("native_web requires action_profile=native_toolcall")
         if task.benchmark not in NATIVE_VERIFIER_PROFILES:
-            raise ValueError("native_web only accepts WebArena tasks")
+            raise ValueError("native_web only accepts WebArena and VisualWebArena tasks")
         expected_verifier = NATIVE_VERIFIER_PROFILES[task.benchmark]
         if task.verifier_profile != expected_verifier:
             raise ValueError(

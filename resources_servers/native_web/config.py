@@ -11,7 +11,9 @@ from nemo_gym.web.native_browser import NativeBrowserResourcesServerConfig
 
 
 class NativeWebResourcesServerConfig(NativeBrowserResourcesServerConfig):
-    """Native-browser configuration scoped to WebArena."""
+    """Native-browser configuration scoped to WebArena and VisualWebArena."""
 
     artifact_dir: str = "cache/native-web/artifacts"
-    allowed_benchmarks: list[WebBenchmark] = Field(default_factory=lambda: [WebBenchmark.WEBARENA])
+    allowed_benchmarks: list[WebBenchmark] = Field(
+        default_factory=lambda: [WebBenchmark.WEBARENA, WebBenchmark.VISUALWEBARENA]
+    )

@@ -16,6 +16,9 @@ from nemo_gym.web.models import (
     WebTask,
 )
 from nemo_gym.web.native_eval_collision import build_collision_plans
+from nemo_gym.web.native_visual import (
+    adapt_native_visualwebarena_record as _adapt_native_visualwebarena_record,
+)
 from nemo_gym.web.native_visual import adapt_native_webarena_record as _adapt_native_webarena_record
 from nemo_gym.web.native_visual import adapt_native_webvoyager_record as _adapt_native_webvoyager_record
 
@@ -69,6 +72,37 @@ def adapt_webarena_record(record: Mapping[str, Any]) -> dict[str, Any]:
     return gym_row(task)
 
 
+def adapt_visualwebarena_records(
+    partitions: Iterable[tuple[str, Iterable[Mapping[str, Any]]]],
+) -> list[dict[str, Any]]:
+    """Concatenate and globally re-index VWA partitions like libvisualwebarena.
+
+    BrowserGym/libvisualwebarena 0.0.15 orders the official partitions as
+    Classifieds, Reddit (including its cross-site tasks), then Shopping, and
+    assigns the resulting 910 rows global task ids 0..909.
+    """
+
+    rows: list[dict[str, Any]] = []
+    for partition, records in partitions:
+        for record in records:
+            original_metadata = dict(record)
+            original_metadata["_source_partition"] = partition
+            original_metadata["_source_task_id"] = record.get("task_id")
+            task = WebTask(
+                benchmark=WebBenchmark.VISUALWEBARENA,
+                task_id=len(rows),
+                intent=str(record.get("intent") or ""),
+                start_urls=_start_urls(record.get("start_url")),
+                sites=[str(site) for site in record.get("sites") or []],
+                observation_profile=WebObservationProfile.SOM,
+                verifier_profile="browsergym_visualwebarena",
+                auth_profile=_auth_profile(record),
+                original_metadata=original_metadata,
+            )
+            rows.append(gym_row(task))
+    return rows
+
+
 def adapt_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
     task = WebTask(
         benchmark=WebBenchmark.WEBVOYAGER,
@@ -104,6 +138,27 @@ def adapt_native_webarena_records(records: Iterable[Mapping[str, Any]]) -> list[
     return [
         _adapt_native_webarena_record(record, collision_plan=plan)
         for record, plan in zip(source_records, plans, strict=True)
+    ]
+
+
+def adapt_native_visualwebarena_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt the maintained 908-task population to the native visual route."""
+
+    return _adapt_native_visualwebarena_record(record)
+
+
+def adapt_native_visualwebarena_records(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Match the reference runner's contiguous 0..N-1 VisualWebArena IDs."""
+
+    source_records = [dict(record) for record in records]
+    plans = build_collision_plans(source_records)
+    return [
+        _adapt_native_visualwebarena_record(
+            record,
+            task_index=index,
+            collision_plan=plan,
+        )
+        for index, (record, plan) in enumerate(zip(source_records, plans, strict=True))
     ]
 
 

@@ -58,6 +58,25 @@ def _webarena_task(**updates) -> WebTask:
     return task.model_copy(update=updates)
 
 
+def _visualwebarena_task(**updates) -> WebTask:
+    task = WebTask(
+        benchmark="visualwebarena",
+        task_id="0",
+        intent="Return a number at least three",
+        runtime_profile="native_visual",
+        action_profile="native_toolcall",
+        verifier_profile="native_visualwebarena",
+        original_metadata={
+            "id": "visualwebarena-0",
+            "eval": {
+                "eval_types": ["string_match"],
+                "reference_answers": {"required_values": [">= 3"]},
+            },
+        },
+    )
+    return task.model_copy(update=updates)
+
+
 def test_native_resource_rejects_non_webarena_benchmark() -> None:
     manager = NativeWebSessionManager(_config())
     with pytest.raises(ValueError, match="benchmark 'webvoyager' is disabled"):
@@ -68,6 +87,10 @@ def test_native_resource_rejects_mixed_verifier_profile() -> None:
     manager = NativeWebSessionManager(_config())
     with pytest.raises(ValueError, match="verifier_profile=native_webarena_classic"):
         manager._validate_task(_webarena_task(verifier_profile="browsergym_webarena"))
+
+
+def test_native_resource_accepts_visualwebarena_with_its_verifier() -> None:
+    NativeWebSessionManager(_config())._validate_task(_visualwebarena_task())
 
 
 def test_native_and_browsergym_are_sibling_implementations() -> None:
@@ -105,6 +128,25 @@ def test_native_webarena_evaluator_scores_rule_only_task(monkeypatch) -> None:
     assert result.task_success
     assert result.valid_sample
     assert result.verifier_version == "native-webarena-3b775dc"
+
+
+def test_native_visualwebarena_evaluator_scores_rule_only_task() -> None:
+    context = NativeBrowserEvaluationContext(page=object(), browser_context=object(), evidence=())
+    evaluator = NativeTaskEvaluator(config=_config())
+    task = _visualwebarena_task()
+
+    evaluator.prepare(task=task, observation=WebObservation(), browser_context=context)
+    result = evaluator.evaluate(
+        task=task,
+        observation=WebObservation(),
+        final_answer="4",
+        browser_context=context,
+    )
+
+    assert result.reward == 1.0
+    assert result.task_success
+    assert result.valid_sample
+    assert result.verifier_version == "native-visualwebarena-3b775dc"
 
 
 def test_native_webarena_evaluator_merges_api_and_browser_snapshots(monkeypatch) -> None:
@@ -205,6 +247,8 @@ def test_native_component_declares_isolated_runtime_dependencies() -> None:
     assert "nemo-gym" in dependencies
     assert "nemo-gym[dev]" not in dependencies
     assert "playwright==1.55.0" in dependencies
+    assert "numpy>=1.26.4,<2" in dependencies
+    assert "scikit-image" in dependencies
     assert project["tool"]["uv"]["sources"]["nemo-gym"] == {
         "path": "../..",
         "editable": True,

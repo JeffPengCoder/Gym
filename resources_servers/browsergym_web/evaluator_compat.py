@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Narrow compatibility hooks for pinned BrowserGym evaluators."""
+"""Narrow compatibility hooks for pinned WebArena-family evaluators."""
 
 from __future__ import annotations
 
@@ -9,11 +9,13 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any
 
 
 _ORIGINAL_ATTR = "_nemo_gym_original_chat_completion"
 LOG = logging.getLogger("nemo_gym.resources_servers.browsergym_web")
+_RULE_ONLY_EVALUATOR_KEY = "unused-for-rule-only-evaluator"
 
 
 def configure_evaluator_environment(*, api_key: str, base_url: str | None) -> None:
@@ -25,6 +27,26 @@ def configure_evaluator_environment(*, api_key: str, base_url: str | None) -> No
         # OPENAI_API_BASE spelling for older WebArena-era evaluator images.
         os.environ["OPENAI_BASE_URL"] = base_url
         os.environ["OPENAI_API_BASE"] = base_url
+
+
+@contextmanager
+def rule_only_evaluator_import_environment(*, base_url: str | None):
+    """Temporarily satisfy VisualWebArena's unconditional client import."""
+
+    keys = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE")
+    previous = {key: os.environ.get(key) for key in keys}
+    configure_evaluator_environment(
+        api_key=_RULE_ONLY_EVALUATOR_KEY,
+        base_url=base_url,
+    )
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _configure_evaluator_model(*, package: str, benchmark: str, model_name: str | None) -> None:
@@ -66,3 +88,11 @@ def _configure_evaluator_model(*, package: str, benchmark: str, model_name: str 
 
 def configure_webarena_evaluator_model(model_name: str | None) -> None:
     _configure_evaluator_model(package="webarena", benchmark="WebArena", model_name=model_name)
+
+
+def configure_visualwebarena_evaluator_model(model_name: str | None) -> None:
+    _configure_evaluator_model(
+        package="visualwebarena",
+        benchmark="VisualWebArena",
+        model_name=model_name,
+    )
