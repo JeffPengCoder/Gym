@@ -24,6 +24,7 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    accumulate_response_usage,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
@@ -250,12 +251,8 @@ def _is_model_context_overflow(exc: Exception) -> bool:
     if isinstance(response_content, bytes):
         response_content = response_content.decode("utf-8", errors="replace")
     haystack = " ".join((str(exc), str(response_content or ""))).lower()
-    return (
-        "decoder prompt" in haystack
-        and "longer than the maximum model length" in haystack
-    ) or (
-        "maximum context length" in haystack
-        and ("tokens" in haystack or "token" in haystack)
+    return ("decoder prompt" in haystack and "longer than the maximum model length" in haystack) or (
+        "maximum context length" in haystack and ("tokens" in haystack or "token" in haystack)
     )
 
 
@@ -314,16 +311,7 @@ def _resolve_task(body: WebAgentRunRequest) -> WebTask:
 
 
 def _merge_usage(total, response: NeMoGymResponse):
-    if response.usage is None:
-        return total
-    if total is None:
-        return response.usage.model_copy(deep=True)
-    total.input_tokens += response.usage.input_tokens
-    total.output_tokens += response.usage.output_tokens
-    total.total_tokens += response.usage.total_tokens
-    total.input_tokens_details.cached_tokens = 0
-    total.output_tokens_details.reasoning_tokens = 0
-    return total
+    return accumulate_response_usage(total, response.usage)
 
 
 def _url_origin(url: str) -> str:
@@ -663,10 +651,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                             retry_model_request = (
                                 model_attempt < self.config.model_turn_max_retries
                                 and not _is_model_context_overflow(exc)
-                                and not (
-                                    isinstance(exc, ClientResponseError)
-                                    and _failure_route(exc)[1]
-                                )
+                                and not (isinstance(exc, ClientResponseError) and _failure_route(exc)[1])
                             )
                             LOG.warning(
                                 "event=web_model_request_failed benchmark=%s task=%s step=%d parse_attempt=%d "
@@ -712,8 +697,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                         # the action parser against the same empty response.
                         truncated = True
                         LOG.warning(
-                            "event=web_model_output_truncated benchmark=%s task=%s step=%d "
-                            "parse_attempt=%d reason=%s",
+                            "event=web_model_output_truncated benchmark=%s task=%s step=%d parse_attempt=%d reason=%s",
                             task.benchmark.value,
                             task.task_id,
                             step_index,
@@ -861,8 +845,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                     # screenshot as judge evidence and let `terminated` finish
                     # the rollout normally.
                     LOG.warning(
-                        "event=web_environment_target_closed_after_action "
-                        "benchmark=%s task=%s step=%d",
+                        "event=web_environment_target_closed_after_action benchmark=%s task=%s step=%d",
                         task.benchmark.value,
                         task.task_id,
                         step_index,

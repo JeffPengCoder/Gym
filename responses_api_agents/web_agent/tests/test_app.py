@@ -24,6 +24,7 @@ from responses_api_agents.web_agent.app import (
     WebAgentConfig,
     WebAgentRunRequest,
     _incomplete_model_reason,
+    _merge_usage,
     _native_parse_retry_messages,
     _parse_response_action,
     _redact_old_images,
@@ -77,6 +78,33 @@ def test_incomplete_model_reason_reads_openai_response_details() -> None:
 
     assert _incomplete_model_reason(response) == "max_output_tokens"
     assert _incomplete_model_reason(NeMoGymResponse.model_validate(_model_response("ok"))) is None
+
+
+def test_merge_usage_accumulates_cached_and_reasoning_tokens() -> None:
+    first_payload = _model_response("first")
+    first_payload["usage"] = {
+        "input_tokens": 10,
+        "input_tokens_details": {"cached_tokens": 2},
+        "output_tokens": 5,
+        "output_tokens_details": {"reasoning_tokens": 3},
+        "total_tokens": 15,
+    }
+    second_payload = _model_response("second")
+    second_payload["usage"] = {
+        "input_tokens": 20,
+        "input_tokens_details": {"cached_tokens": 7},
+        "output_tokens": 8,
+        "output_tokens_details": {"reasoning_tokens": 4},
+        "total_tokens": 28,
+    }
+
+    usage = _merge_usage(None, NeMoGymResponse.model_validate(first_payload))
+    usage = _merge_usage(usage, NeMoGymResponse.model_validate(second_payload))
+
+    assert usage is not None
+    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (30, 13, 43)
+    assert usage.input_tokens_details.cached_tokens == 9
+    assert usage.output_tokens_details.reasoning_tokens == 7
 
 
 def test_native_profile_reads_structured_function_calls_not_message_text():
@@ -689,10 +717,7 @@ async def test_model_context_overflow_skips_futile_request_retries_but_remains_r
     overflow.response_content = json.dumps(
         {
             "error": {
-                "message": (
-                    "The decoder prompt (length 128107) is longer than the maximum "
-                    "model length of 128000."
-                ),
+                "message": ("The decoder prompt (length 128107) is longer than the maximum model length of 128000."),
                 "type": "BadRequestError",
                 "code": 400,
             }
@@ -1011,7 +1036,9 @@ async def test_browser_target_closed_after_action_is_judged_as_policy_failure(ca
         agent,
         {
             "/seed_session": [_seed("ESPN--10")],
-            "/v1/responses": [_native_model_response("computer", '{"actions":[{"action":"left_click","coordinate":[0.08,0.015]}]}')],
+            "/v1/responses": [
+                _native_model_response("computer", '{"actions":[{"action":"left_click","coordinate":[0.08,0.015]}]}')
+            ],
             "/step": [
                 {
                     "operation_id": "step-0",
