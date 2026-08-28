@@ -249,13 +249,18 @@ class WebResourcesServer(SimpleResourcesServer):
                 failure_kind=result.failure_kind,
             )
         except Exception as exc:  # noqa: BLE001 - verifier infrastructure errors must be masked.
+            LOG.exception("Web verifier failed for session=%s", session_id)
+            error_detail = str(exc).strip()
+            failure_kind = f"verifier_error:{type(exc).__name__}"
+            if error_detail:
+                failure_kind = f"{failure_kind}:{error_detail}"
             return WebVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
                 raw_score=0.0,
                 task_success=False,
                 mask_sample=True,
-                failure_kind=f"verifier_error:{type(exc).__name__}",
+                failure_kind=failure_kind,
             )
         finally:
             try:

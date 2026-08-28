@@ -364,7 +364,7 @@ async def test_verify_maps_valid_invalid_and_infrastructure_results() -> None:
     assert failed.raw_score == 0.0
     assert failed.task_success is False
     assert failed.mask_sample is True
-    assert failed.failure_kind == "verifier_error:RuntimeError"
+    assert failed.failure_kind == "verifier_error:RuntimeError:judge offline"
     assert manager.closed == ["session-a", "session-a", "session-a"]
 
 
