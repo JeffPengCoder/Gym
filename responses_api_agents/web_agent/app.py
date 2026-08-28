@@ -821,9 +821,9 @@ class WebAgent(SimpleResponsesAPIAgent):
                     _url_origin(observation.url),
                     time.monotonic() - environment_started,
                 )
-                if not (task.action_profile == WebActionProfile.NATIVE_TOOLCALL and terminated):
-                    self._remember_evidence(observation, screenshot_history, url_history)
                 native_status = step_data.info.get("native_status")
+                if native_status != BROWSER_TARGET_CLOSED_STATUS:
+                    self._remember_evidence(observation, screenshot_history, url_history)
                 if native_status == CAPTCHA_BUDGET_EXHAUSTED_STATUS:
                     # The browser could not reach the site, so nothing the policy
                     # did is measurable. Mask instead of scoring a forced stop.

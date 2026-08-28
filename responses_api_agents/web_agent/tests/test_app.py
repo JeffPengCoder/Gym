@@ -149,6 +149,8 @@ async def test_native_parse_retry_injects_feedback_and_retry_temperature() -> No
         native_parse_retry_temperature=0.2,
         model_retry_delay_secs=0,
     )
+    final_observation = _observation("https://example.test/final")
+    final_observation["screenshot"]["data_url"] = "data:image/png;base64,final"
     calls = _wire(
         agent,
         {
@@ -160,7 +162,7 @@ async def test_native_parse_retry_injects_feedback_and_retry_temperature() -> No
             "/step": [
                 {
                     "operation_id": "step-0",
-                    "observation": _observation(),
+                    "observation": final_observation,
                     "execution_ok": True,
                     "terminated": True,
                 }
@@ -204,6 +206,9 @@ async def test_native_parse_retry_injects_feedback_and_retry_temperature() -> No
         getattr(item, "role", None) == "user" and "arguments.actions" in str(item.content)
         for item in model_bodies[1].input
     )
+    judge_body = next(call_body for _server, path, call_body in calls if path == "/verify")
+    assert judge_body["screenshots"][-1] == "data:image/png;base64,final"
+    assert judge_body["page_urls"][-1] == "https://example.test/final"
 
 
 @pytest.mark.asyncio
@@ -1088,6 +1093,9 @@ async def test_browser_target_closed_after_action_is_judged_as_policy_failure(ca
     assert result.failure_kind is None
     assert paths.count("/verify") == 1
     assert paths.index("/close") < paths.index("/verify")
+    judge_body = next(call_body for _server, path, call_body in calls if path == "/verify")
+    assert len(judge_body["screenshots"]) == 1
+    assert judge_body["page_urls"] == ["https://example.test"]
     assert "event=web_environment_target_closed_after_action" in "\n".join(
         record.getMessage() for record in caplog.records
     )
