@@ -318,6 +318,7 @@ _ASSETS = {
     "environment": ("environments", "", "config"),
     "resources-server": ("resources_servers", "configs", None),
     "model-type": ("responses_api_models", "configs", None),
+    "agent-type": ("responses_api_agents", "configs", None),
 }
 
 
@@ -432,6 +433,29 @@ BENCHMARK = _asset_selector("benchmark")
 ENVIRONMENT = _asset_selector("environment")
 RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
 MODEL_TYPE = _asset_selector("model-type")
+
+AGENT_TYPE = Flag(
+    register=lambda p: p.add_argument(
+        "--agent-type",
+        metavar="NAME",
+        help="Agent (NAME or NAME/FLAVOR) to run the selected environment or benchmark.",
+    ),
+    translate_to_hydra=lambda args: _translate_agent_type(args),
+)
+
+
+def _translate_agent_type(args: argparse.Namespace) -> list[str]:
+    """`--agent-type` picks the harness to compose, which is already fixed once the servers are up."""
+    name = getattr(args, "agent_type", None)
+    if not name:
+        return []
+    if getattr(args, "no_serve", False):
+        raise ValueError(
+            "`--agent-type` chooses which agent runs the task, which is settled once the servers are "
+            "running, so it cannot be combined with `--no-serve`. Use `--agent` to name one of them."
+        )
+    return [f"+config_paths=[{_asset_config_path('agent-type', name)}]"]
+
 
 # `--search-dir`: extra component-search roots. `main()` folds these into the `NEMO_GYM_EXTRA_ROOTS` env
 # var before dispatch (see there), so a single register-only flag suffices for every command — the roots
@@ -730,6 +754,7 @@ COMMANDS = {
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
+            AGENT_TYPE,
             SEARCH_DIR,
             MODEL,
             MODEL_URL,
@@ -777,6 +802,7 @@ COMMANDS = {
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
+            AGENT_TYPE,
             SEARCH_DIR,
             MODEL,
             MODEL_URL,
@@ -792,6 +818,7 @@ COMMANDS = {
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
+            AGENT_TYPE,
             SEARCH_DIR,
         ),
     ),
@@ -819,6 +846,7 @@ COMMANDS = {
                 )
             ),
             _bool_flag("resume", "resume_from_cache", "Resume from cached rollouts instead of recollecting."),
+            AGENT_TYPE,
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
