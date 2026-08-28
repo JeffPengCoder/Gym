@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 from collections import deque
 from contextlib import nullcontext
 from pathlib import Path
@@ -32,6 +33,9 @@ from resources_servers.browsergym_web.visualwebarena_compat import (
     configure_webarena_evaluator_model,
     rule_only_evaluator_import_environment,
 )
+
+
+LOG = logging.getLogger("nemo_gym.resources_servers.browsergym_web.backend")
 
 
 def _json_safe(value: Any) -> Any:
@@ -105,20 +109,25 @@ class BrowserGymBackend:
             if needs_rule_only_import_environment
             else nullcontext()
         )
-        with import_environment:
-            env = self._make_environment(spec)
-            try:
+        env = None
+        try:
+            with import_environment:
+                env = self._make_environment(spec)
                 raw_observation, raw_info = env.reset(seed=task.seed)
-            except Exception:
-                env.close()
-                raise
-        # BrowserGym defers construction of the upstream task until env.reset().
-        # Only then have the benchmark packages installed their legacy dataset
-        # mappings and imported the evaluator modules.
-        if spec.module == "browsergym.webarena":
-            configure_webarena_evaluator_model(self.config.webarena_evaluator_model)
-        elif spec.module == "browsergym.visualwebarena":
-            configure_evaluator_model(self.config.visualwebarena_evaluator_model)
+            # BrowserGym defers construction of the upstream task until env.reset().
+            # Only then have the benchmark packages installed their legacy dataset
+            # mappings and imported the evaluator modules.
+            if spec.module == "browsergym.webarena":
+                configure_webarena_evaluator_model(self.config.webarena_evaluator_model)
+            elif spec.module == "browsergym.visualwebarena":
+                configure_evaluator_model(self.config.visualwebarena_evaluator_model)
+        except BaseException:
+            if env is not None:
+                try:
+                    env.close()
+                except BaseException:
+                    LOG.exception("BrowserGym environment cleanup failed after reset error")
+            raise
 
         self.env = env
         self.task = task

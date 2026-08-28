@@ -280,3 +280,35 @@ def test_webarena_evaluator_hook_runs_after_upstream_reset(tmp_path, monkeypatch
     assert info["evaluator_model"] == "local-judge"
     assert info["verifier_version"].endswith(":judge=local-judge")
     backend.close()
+
+
+@pytest.mark.parametrize(
+    "benchmark,config_field,hook_name",
+    [
+        (WebBenchmark.WEBARENA, "webarena_evaluator_model", "configure_webarena_evaluator_model"),
+        (WebBenchmark.VISUALWEBARENA, "visualwebarena_evaluator_model", "configure_evaluator_model"),
+    ],
+)
+def test_post_reset_evaluator_hook_failure_closes_environment(
+    tmp_path,
+    monkeypatch,
+    benchmark,
+    config_field,
+    hook_name,
+):
+    env = FakeEnv()
+    config = _config(tmp_path).model_copy(update={config_field: "broken-evaluator"})
+    backend = BrowserGymBackend(config, "session-hook-failure", WebArtifactStore(tmp_path))
+    monkeypatch.setattr(backend, "_make_environment", lambda _spec: env)
+    monkeypatch.setattr(backend, "_prepare_evaluator", lambda _task: None)
+
+    def fail_hook(_model):
+        raise RuntimeError("evaluator hook failed")
+
+    monkeypatch.setattr(backend_module, hook_name, fail_hook)
+
+    with pytest.raises(RuntimeError, match="evaluator hook failed"):
+        backend.reset(WebTask(benchmark=benchmark, task_id="0", seed=7))
+
+    assert env.closed is True
+    assert backend.env is None
