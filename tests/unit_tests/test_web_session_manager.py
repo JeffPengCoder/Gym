@@ -227,6 +227,22 @@ async def test_admission_and_task_identity_guards(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    ["error", "closing", "resetting", "stepping", "evaluating", "finished", "evaluated"],
+)
+async def test_seed_replay_rejects_non_ready_session_states(tmp_path, status: str) -> None:
+    manager, _ = _manager(tmp_path)
+    await manager.seed_session("session", WebSeedSessionRequest(task=_task()))
+    manager._sessions["session"].status = status
+
+    with pytest.raises(SessionConflictError, match=rf"cannot replay seed while status='{status}'"):
+        await manager.seed_session("session", WebSeedSessionRequest(task=_task()))
+
+    await manager.close_session("session")
+
+
+@pytest.mark.asyncio
 async def test_seed_precondition_failure_releases_backend_and_lease(tmp_path) -> None:
     pool = FakeSitePool()
 

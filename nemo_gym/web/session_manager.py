@@ -111,6 +111,10 @@ class WebSessionManager:
             existing = self._sessions.get(session_id)
             if existing is not None:
                 self._require_same_task(existing.task, body.task, session_id)
+                if existing.status != "ready":
+                    raise SessionConflictError(
+                        f"session {session_id!r} cannot replay seed while status={existing.status!r}"
+                    )
                 existing.last_access_at = time.time()
                 LOG.info(
                     "event=web_session_seed_cached session=%s benchmark=%s task=%s status=%s",
