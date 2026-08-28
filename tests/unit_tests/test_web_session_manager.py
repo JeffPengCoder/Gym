@@ -279,7 +279,9 @@ async def test_reset_step_evaluate_and_close_failures_mark_session_unhealthy(tmp
     backends[0].fail_reset = True
     with pytest.raises(RuntimeError, match="reset failed"):
         await manager.reset_session("reset", WebResetRequest(task=_task("reset")))
-    assert manager._sessions["reset"].status == "error"
+    assert "reset" not in manager._sessions
+    assert backends[0].close_calls == 1
+    assert pool.released == [(pool.acquired[0], False)]
 
     await manager.seed_session("step", WebSeedSessionRequest(task=_task("step")))
     backends[1].fail_step = True
@@ -296,6 +298,24 @@ async def test_reset_step_evaluate_and_close_failures_mark_session_unhealthy(tmp
 
     await manager.stop()
     assert [healthy for _lease, healthy in pool.released] == [False, False, False]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reset_immediately_releases_backend_and_lease(tmp_path) -> None:
+    pool = FakeSitePool()
+    manager, backends = _manager(tmp_path, site_pool=pool)
+    await manager.seed_session("cancelled", WebSeedSessionRequest(task=_task("cancelled")))
+
+    def cancel_reset(_task):
+        raise asyncio.CancelledError
+
+    backends[0].reset = cancel_reset
+    with pytest.raises(asyncio.CancelledError):
+        await manager.reset_session("cancelled", WebResetRequest(task=_task("cancelled")))
+
+    assert "cancelled" not in manager._sessions
+    assert backends[0].close_calls == 1
+    assert pool.released == [(pool.acquired[0], False)]
 
 
 @pytest.mark.asyncio

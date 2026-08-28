@@ -192,46 +192,58 @@ class WebSessionManager:
         state = await self._get_session(session_id)
         self._validate_task(body.task)
         self._require_same_task(state.task, body.task, session_id)
-        async with state.lock:
-            state.status = "resetting"
-            started = time.monotonic()
-            LOG.info(
-                "event=web_session_reset_start session=%s benchmark=%s task=%s",
-                session_id,
-                body.task.benchmark.value,
-                body.task.task_id,
-            )
-            try:
-                observation, seed_info = await self._reset_backend(
-                    state.operation_runner,
-                    state.backend,
-                    body.task,
-                )
-                state.task = body.task
-                state.observation = observation
-                state.seed_info = seed_info
-                state.operations.clear()
-                state.verifier_result = None
-                state.status = "ready"
-                state.last_access_at = time.time()
+        cleanup_failed_session = False
+        try:
+            async with state.lock:
+                state.status = "resetting"
+                started = time.monotonic()
                 LOG.info(
-                    "event=web_session_reset_complete session=%s benchmark=%s task=%s elapsed_seconds=%.3f",
+                    "event=web_session_reset_start session=%s benchmark=%s task=%s",
                     session_id,
                     body.task.benchmark.value,
                     body.task.task_id,
-                    time.monotonic() - started,
                 )
-                return self._seed_response(state)
-            except Exception:
-                state.status = "error"
-                LOG.exception(
-                    "event=web_session_reset_failed session=%s benchmark=%s task=%s elapsed_seconds=%.3f",
-                    session_id,
-                    body.task.benchmark.value,
-                    body.task.task_id,
-                    time.monotonic() - started,
-                )
-                raise
+                try:
+                    observation, seed_info = await self._reset_backend(
+                        state.operation_runner,
+                        state.backend,
+                        body.task,
+                    )
+                    state.task = body.task
+                    state.observation = observation
+                    state.seed_info = seed_info
+                    state.operations.clear()
+                    state.verifier_result = None
+                    state.status = "ready"
+                    state.last_access_at = time.time()
+                    LOG.info(
+                        "event=web_session_reset_complete session=%s benchmark=%s task=%s elapsed_seconds=%.3f",
+                        session_id,
+                        body.task.benchmark.value,
+                        body.task.task_id,
+                        time.monotonic() - started,
+                    )
+                    return self._seed_response(state)
+                except BaseException:
+                    # A failed or cancelled reset can leave browser and site
+                    # state partially mutated. Mark the lease unhealthy and
+                    # remove the session immediately instead of parking it
+                    # until the TTL reaper runs.
+                    state.status = "error"
+                    cleanup_failed_session = True
+                    LOG.exception(
+                        "event=web_session_reset_failed session=%s benchmark=%s task=%s elapsed_seconds=%.3f",
+                        session_id,
+                        body.task.benchmark.value,
+                        body.task.task_id,
+                        time.monotonic() - started,
+                    )
+                    raise
+        finally:
+            # close_session acquires state.lock, so cleanup must happen only
+            # after leaving the reset critical section.
+            if cleanup_failed_session:
+                await self.close_session(session_id)
 
     async def observe(self, session_id: str) -> WebObservation:
         state = await self._get_session(session_id)
