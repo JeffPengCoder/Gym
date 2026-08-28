@@ -151,21 +151,47 @@ def test_capsolver_ignores_nonblocking_widget_without_provider_request(monkeypat
     assert "event=captcha_unresolved" not in messages
 
 
-def test_capsolver_defers_completed_blocking_widget_without_crashing(caplog) -> None:
-    class _CompletedBlockingPage(_Page):
-        def title(self) -> str:
-            return "Just a moment..."
-
-    page = _CompletedBlockingPage()
+def test_capsolver_retries_completed_challenge_that_reappears(monkeypatch, caplog) -> None:
+    client = _Client(timeout=30.0)
+    monkeypatch.setattr(captcha.httpx, "Client", lambda **_kwargs: client)
+    monkeypatch.setattr(captcha.time, "sleep", lambda _seconds: None)
+    page = _BlockingPage()
     solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
     solver._completed_challenges.add(("https://example.test", "turnstile", captcha._fingerprint("public-site-key")))
 
     with caplog.at_level(logging.WARNING, logger="nemo_gym.resources_servers.webvoyager_browser.captcha"):
-        assert solver.maybe_solve(page, phase="before post-action screenshot") is False
+        assert solver.maybe_solve(page, phase="before post-action screenshot") is True
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert "reason=repeated_after_solution" in messages
+    assert "event=captcha_rechallenged" in messages
+    assert "action=retry" in messages
+    assert [url.rsplit("/", 1)[-1] for url, _payload in client.requests] == ["createTask", "getTaskResult"]
     assert "CAP-private-key" not in messages
+
+
+def test_capsolver_failed_clear_is_not_cached_and_can_be_retried(monkeypatch) -> None:
+    class _PersistentBlockingPage(_BlockingPage):
+        def title(self) -> str:
+            return "Just a moment..."
+
+    client = _Client(timeout=30.0)
+    monkeypatch.setattr(captcha.httpx, "Client", lambda **_kwargs: client)
+    monkeypatch.setattr(captcha.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(captcha.CapSolverBrowserSolver, "_wait_for_challenge_clear", lambda *_args: False)
+    solver = captcha.CapSolverBrowserSolver("CAP-private-key", timeout=5)
+    page = _PersistentBlockingPage()
+
+    for phase in ("after computer", "before post-action screenshot"):
+        with pytest.raises(RuntimeError, match="challenge page did not clear"):
+            solver.maybe_solve(page, phase=phase)
+
+    assert solver._completed_challenges == set()
+    assert [url.rsplit("/", 1)[-1] for url, _payload in client.requests] == [
+        "createTask",
+        "getTaskResult",
+        "createTask",
+        "getTaskResult",
+    ]
 
 
 def test_capsolver_environment_selection_logs_presence_not_value(monkeypatch, caplog) -> None:

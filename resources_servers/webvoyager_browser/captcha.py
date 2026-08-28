@@ -206,14 +206,14 @@ class CapSolverBrowserSolver:
         identity = (origin, kind, _fingerprint(site_key))
         if identity in self._completed_challenges:
             LOG.warning(
-                "event=captcha_unresolved provider=capsolver phase=%s origin=%s challenge=%s "
-                "reason=repeated_after_solution site_key_sha256=%s",
+                "event=captcha_rechallenged provider=capsolver phase=%s origin=%s challenge=%s "
+                "action=retry site_key_sha256=%s",
                 phase,
                 origin,
                 kind,
                 identity[2],
             )
-            return False
+            self._completed_challenges.discard(identity)
         task = self._build_task(page, kind, site_key)
         task_type = str(task["type"])
         LOG.info(
@@ -287,9 +287,9 @@ class CapSolverBrowserSolver:
                         if not token:
                             raise RuntimeError("CapSolver returned no browser token")
                         injection = self._inject(page, kind, str(token))
-                    self._completed_challenges.add(identity)
                     if blocking_challenge and not self._wait_for_challenge_clear(page):
                         raise RuntimeError("CAPTCHA solution was injected but the challenge page did not clear")
+                    self._completed_challenges.add(identity)
                     LOG.info(
                         "event=captcha_solved provider=capsolver phase=%s origin=%s challenge=%s "
                         "provider_task_sha256=%s polls=%d fields=%d callbacks=%d elapsed_seconds=%.3f",
