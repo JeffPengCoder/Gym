@@ -14,8 +14,10 @@
 # limitations under the License.
 import json
 import socket
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, ValidationError
 from pytest import MonkeyPatch, raises
 
@@ -78,7 +80,7 @@ class TestServerUtils:
                 "type": "too_long",
                 "loc": ("screenshots",),
                 "msg": "List should have at most 1 item after validation, not 2",
-                "ctx": {"max_length": 1, "actual_length": 2},
+                "ctx": {"field_type": "List", "max_length": 1, "actual_length": 2},
             }
         ]
         assert diagnostics["body"]["fields"]["screenshots"] == {"type": "array", "length": 2}
@@ -91,6 +93,36 @@ class TestServerUtils:
         assert _validation_body_shape("opaque") == {"type": "string", "length": 6}
         assert _validation_body_shape(b"opaque") == {"type": "bytes", "length": 6}
         assert _validation_body_shape(42) == {"type": "int"}
+
+    def test_validation_diagnostics_keep_schema_context_but_not_input_context(self) -> None:
+        class Payload(BaseModel):
+            mode: Literal["a", "b", "c"]
+
+        try:
+            Payload(mode="rejected-input")
+        except ValidationError as exc:
+            [diagnostic] = _validation_errors_for_log(exc)
+        else:  # pragma: no cover - guards the test fixture itself.
+            raise AssertionError("expected validation failure")
+
+        assert diagnostic["ctx"] == {"expected": "'a', 'b' or 'c'"}
+        assert "rejected-input" not in json.dumps(diagnostic)
+
+        custom_error = RequestValidationError(
+            [
+                {
+                    "type": "custom_error",
+                    "loc": ("body", "mode"),
+                    "msg": "Custom validation failed",
+                    "input": "request-secret",
+                    "ctx": {"expected": "request-derived-context"},
+                }
+            ]
+        )
+        [custom_diagnostic] = _validation_errors_for_log(custom_error)
+        serialized = json.dumps(custom_diagnostic)
+        assert "request-secret" not in serialized
+        assert "request-derived-context" not in serialized
 
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
