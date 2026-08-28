@@ -1,0 +1,28 @@
+native_web:
+  resources_servers:
+    native_web:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Headed Chromium runtime for the native WebArena evaluator
+      value: Run local WebArena sites through Gym's native visual web protocol
+      # PyAutoGUI controls one process-global X display. Scale with 16
+      # resource-server replicas/displays, never 16 sessions in one display.
+      max_sessions: 1
+      artifact_dir: cache/native-web/artifacts
+      inline_screenshots: true
+      max_evidence_screenshots: 200
+      headless: false
+      viewport_width: 1920
+      viewport_height: 1080
+      action_delay_seconds: 2.0
+      # Reusable native-web defaults stay strict. Benchmark profiles may opt
+      # into bounded recovery explicitly.
+      terminate_on_action_error: true
+      max_computer_actions: 20
+      record_video: false
+      session_ttl_seconds: 14400
+      reaper_interval_seconds: 60
+      require_auth: false
+      site_pool_mode: local_locks
+      allowed_benchmarks: [webarena]

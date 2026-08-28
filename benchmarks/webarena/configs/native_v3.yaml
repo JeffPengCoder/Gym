@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Native Nano Omni WebArena route. The BrowserGym profile in ../config.yaml
+# remains available and keeps its upstream action/evaluator semantics.
+config_paths:
+  - resources_servers/native_web/configs/native_webarena.yaml
+  - responses_api_agents/web_agent/configs/web_agent.yaml
+
+native_webarena_agent:
+  _inherit_from: web_agent
+  responses_api_agents:
+    web_agent:
+      resources_server:
+        type: resources_servers
+        name: native_webarena
+      max_steps: 100
+      max_parse_retries: 2
+      native_action_recovery: repair_single_closing_bracket
+      native_tool_alias_recovery: webvoyager_v3
+      native_max_computer_actions: 20
+      native_parse_retry_feedback: true
+      native_parse_retry_temperature: 0.2
+      repeated_action_warning_threshold: 0
+      max_consecutive_execution_failures: 3
+      model_turn_max_retries: 19
+      model_retry_delay_secs: 5.0
+      max_image_history: 3
+      visual_observation_text: none
+      redact_old_visual_observations: false
+      resources_request_timeout_secs: 1800
+      model_request_timeout_secs: 1200
+      run_timeout_secs: 14400
+      datasets:
+        - name: webarena-native-v3
+          type: benchmark
+          jsonl_fpath: benchmarks/webarena/data/webarena_native_v3.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/webarena/prepare_native_v3.py
+          num_repeats: 1

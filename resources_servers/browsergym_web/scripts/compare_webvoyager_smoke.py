@@ -113,6 +113,7 @@ def _package_versions() -> dict[str, str]:
     versions = {}
     for name in (
         "browsergym-core",
+        "browsergym-webarena",
         "gymnasium",
         "playwright",
         "selenium",

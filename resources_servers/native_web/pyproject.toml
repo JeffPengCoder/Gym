@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nemo-gym-native-web"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  # native_web reuses Gym's backend-neutral HTTP/session/artifact contract.
+  # BrowserGym is a sibling implementation and is intentionally not a runtime
+  # dependency. Install the parent Gym closure without its dev extra so this
+  # component cannot upgrade browser packages independently of the image.
+  "nemo-gym",
+  "httpx",
+  "pillow",
+  # The qualified native evaluation image contains the Playwright 1.55
+  # browser bundle (Chromium 1187).  Python and browser revisions must match.
+  "playwright==1.55.0",
+  "pyautogui",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }

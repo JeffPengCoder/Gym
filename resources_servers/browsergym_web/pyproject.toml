@@ -7,7 +7,13 @@ version = "0.0.0"
 requires-python = ">=3.13.14,<3.14"
 dependencies = [
     "nemo-gym[dev]",
-    "browsergym-core==0.14.3",
+    "browsergym-webarena==0.14.3",
+    # evaluate leaves datasets unconstrained. Pin a release compatible with
+    # the current PyArrow surface used by the WebArena evaluator stack.
+    "datasets==5.0.1",
+    # Newer NLTK import-security hooks reject component-local imports when the
+    # cluster's trusted egress proxy is present. Preserve benchmark-era NLTK.
+    "nltk==3.8.1",
     "Pillow>=10",
 ]
 

@@ -4,11 +4,11 @@
 
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from pydantic import Field
 
-from nemo_gym.web.models import WebBenchmark
 from nemo_gym.web.resource_config import WebResourcesServerConfig
 
 
@@ -20,4 +20,9 @@ class BrowserGymWebResourcesServerConfig(WebResourcesServerConfig):
     tags_to_mark: Literal["all", "standard_html"] = "standard_html"
     pre_observation_delay: float = Field(default=0.5, ge=0.0, le=30.0)
     record_video: bool = False
-    allowed_benchmarks: list[WebBenchmark] = Field(default_factory=lambda: [WebBenchmark.WEBVOYAGER])
+    webarena_evaluator_model: str | None = None
+    evaluator_base_url: str | None = None
+    evaluator_api_key_env: str = "OPENAI_API_KEY"
+
+    def evaluator_api_key(self) -> str:
+        return os.environ.get(self.evaluator_api_key_env, "").strip()

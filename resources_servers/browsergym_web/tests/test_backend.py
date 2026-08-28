@@ -5,7 +5,8 @@ import pytest
 
 from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.models import WebAction, WebBenchmark, WebTask
-from nemo_gym.web.session import EvaluatorInfrastructureError
+from nemo_gym.web.session import EvaluatorConfigurationError, EvaluatorInfrastructureError
+from resources_servers.browsergym_web import backend as backend_module
 from resources_servers.browsergym_web.backend import BrowserGymBackend
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
 
@@ -51,7 +52,7 @@ def _config(tmp_path):
         entrypoint="app.py",
         domain="agent",
         artifact_dir=str(tmp_path),
-        allowed_benchmarks=[WebBenchmark.WEBVOYAGER],
+        allowed_benchmarks=[WebBenchmark.WEBARENA, WebBenchmark.WEBVOYAGER],
     )
 
 
@@ -64,6 +65,11 @@ def _task() -> WebTask:
         action_profile="webvoyager_legacy",
         seed=7,
     )
+
+
+def _webarena_task(**updates) -> WebTask:
+    task = WebTask(benchmark=WebBenchmark.WEBARENA, task_id="0", seed=7)
+    return task.model_copy(update=updates)
 
 
 def test_backend_collects_webvoyager_evidence_for_external_judge(tmp_path, monkeypatch):
@@ -140,6 +146,91 @@ def test_reset_failure_closes_new_environment(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="reset failed"):
         backend.reset(_task())
+
+    assert env.closed is True
+    assert backend.env is None
+
+
+def test_webarena_keeps_execution_and_terminal_benchmark_scores_separate(tmp_path, monkeypatch):
+    class ScoringEnv(FakeEnv):
+        def step(self, action):
+            self.actions.append(action)
+            terminal = action.startswith("send_msg_to_user")
+            reward = 1.0 if terminal else 0.5
+            return self._observation(last_action=action), reward, terminal, False, {}
+
+    env = ScoringEnv()
+    backend = BrowserGymBackend(_config(tmp_path), "session-wa", WebArtifactStore(tmp_path))
+    monkeypatch.setattr(backend, "_make_environment", lambda _spec: env)
+
+    _observation, info = backend.reset(_webarena_task())
+    step = backend.step(WebAction(name="noop", script="noop()"))
+    evaluation = backend.evaluate("done")
+
+    assert info["env_id"] == "browsergym/webarena.0"
+    assert step.benchmark_reward == 0.5
+    assert evaluation.reward == 1.0
+    assert evaluation.metadata["best_observed_reward"] == 1.0
+    assert evaluation.metadata["score_semantics"] == "terminal_native_evaluator_reward"
+    backend.close()
+
+
+def test_webarena_model_evaluator_requires_explicit_configuration(tmp_path):
+    backend = BrowserGymBackend(_config(tmp_path), "session-missing-evaluator", WebArtifactStore(tmp_path))
+    task = _webarena_task(
+        task_id="8",
+        original_metadata={"eval": {"reference_answers": {"fuzzy_match": ["answer"]}}},
+    )
+
+    with pytest.raises(EvaluatorConfigurationError, match="webarena_evaluator_model"):
+        backend.reset(task)
+
+
+def test_webarena_evaluator_hook_runs_after_upstream_reset(tmp_path, monkeypatch):
+    events = []
+
+    class OrderedEnv(FakeEnv):
+        def reset(self, seed):
+            events.append("reset")
+            return super().reset(seed)
+
+    config = _config(tmp_path).model_copy(update={"webarena_evaluator_model": "local-judge"})
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only")  # pragma: allowlist secret
+    backend = BrowserGymBackend(config, "session-wa-hook", WebArtifactStore(tmp_path))
+    monkeypatch.setattr(backend, "_make_environment", lambda _spec: OrderedEnv())
+    monkeypatch.setattr(
+        backend_module,
+        "configure_evaluator_environment",
+        lambda **kwargs: events.append(f"environment:{kwargs['api_key']}"),
+    )
+    monkeypatch.setattr(
+        backend_module,
+        "configure_webarena_evaluator_model",
+        lambda model: events.append(f"configure:{model}"),
+    )
+
+    _observation, info = backend.reset(_webarena_task())
+
+    assert events == ["environment:test-only", "reset", "configure:local-judge"]
+    assert info["evaluator_model"] == "local-judge"
+    assert info["verifier_version"].endswith(":judge=local-judge")
+    backend.close()
+
+
+def test_webarena_evaluator_hook_failure_closes_environment(tmp_path, monkeypatch):
+    env = FakeEnv()
+    config = _config(tmp_path).model_copy(update={"webarena_evaluator_model": "broken-evaluator"})
+    backend = BrowserGymBackend(config, "session-hook-failure", WebArtifactStore(tmp_path))
+    monkeypatch.setattr(backend, "_make_environment", lambda _spec: env)
+    monkeypatch.setattr(backend, "_prepare_evaluator", lambda _task: None)
+    monkeypatch.setattr(
+        backend_module,
+        "configure_webarena_evaluator_model",
+        lambda _model: (_ for _ in ()).throw(RuntimeError("evaluator hook failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="evaluator hook failed"):
+        backend.reset(_webarena_task())
 
     assert env.closed is True
     assert backend.env is None

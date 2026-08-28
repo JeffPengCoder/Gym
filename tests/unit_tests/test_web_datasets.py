@@ -6,12 +6,64 @@ import json
 import pytest
 
 from nemo_gym.web.datasets import (
+    adapt_native_webarena_record,
+    adapt_native_webarena_records,
     adapt_native_webvoyager_record,
+    adapt_webarena_record,
     adapt_webvoyager_record,
     load_json_records,
     write_jsonl,
 )
 from nemo_gym.web.models import WebTask
+
+
+def test_webarena_record_preserves_source_and_splits_multi_page_start():
+    record = {
+        "task_id": 7,
+        "intent": "Compare the pages",
+        "sites": ["reddit", "gitlab"],
+        "start_url": "__REDDIT__ |AND| __GITLAB__",
+        "eval": {"reference_answers": {"exact_match": "secret"}},
+    }
+
+    row = adapt_webarena_record(record)
+    task = WebTask.model_validate(row["web_task"])
+
+    assert task.start_urls == ["__REDDIT__", "__GITLAB__"]
+    assert task.original_metadata == record
+    assert row["responses_create_params"]["metadata"]["task_id"] == "7"
+
+
+def test_null_storage_state_does_not_become_string_auth_profile():
+    row = adapt_webarena_record(
+        {
+            "task_id": 8,
+            "intent": "Inspect the map",
+            "require_login": True,
+            "storage_state": None,
+        }
+    )
+
+    task = WebTask.model_validate(row["web_task"])
+    assert task.auth_profile is None
+
+
+def test_webarena_auth_and_non_string_start_urls_are_normalized():
+    row = adapt_webarena_record(
+        {
+            "task_id": 9,
+            "require_login": True,
+            "storage_state": 7,
+            "start_url": ["https://one.example", "", 2],
+        }
+    )
+
+    task = WebTask.model_validate(row["web_task"])
+    assert task.auth_profile == "7"
+    assert task.start_urls == ["https://one.example", "2"]
+
+    scalar = WebTask.model_validate(adapt_webarena_record({"task_id": 10, "start_url": 123})["web_task"])
+    assert scalar.start_urls == ["123"]
 
 
 def test_webvoyager_uses_legacy_action_surface_over_browsergym():
@@ -33,6 +85,51 @@ def test_webvoyager_uses_legacy_action_surface_over_browsergym():
 def test_native_webvoyager_adapter_is_exposed_through_dataset_api():
     row = adapt_native_webvoyager_record({"id": "Allrecipes--0", "ques": "Find a recipe"})
     assert row["web_task"]["runtime_profile"] == "native_visual"
+
+
+def test_native_webarena_uses_reference_numeric_task_id_and_shared_tools():
+    row = adapt_native_webarena_record(
+        {
+            "id": "webarena-17",
+            "ques": "Inspect an order",
+            "web_name": ["shopping_admin"],
+            "web": ["__SHOPPING_ADMIN__"],
+            "eval": {"eval_types": ["string_match"]},
+        }
+    )
+
+    assert row["web_task"]["task_id"] == "17"
+    assert row["web_task"]["runtime_profile"] == "native_visual"
+    assert row["web_task"]["verifier_profile"] == "native_webarena_classic"
+    assert row["responses_create_params"]["tools"]
+
+
+def test_native_webarena_batch_preserves_cross_task_collision_plan():
+    rows = adapt_native_webarena_records(
+        [
+            {
+                "id": f"webarena-{index}",
+                "ques": "Update the shared profile",
+                "web_name": ["gitlab"],
+                "web": ["__GITLAB__/byteblaze"],
+                "eval": {
+                    "eval_types": ["program_html"],
+                    "program_html": [
+                        {
+                            "url": "__GITLAB__/byteblaze",
+                            "locator": "document.body.innerText",
+                            "required_contents": {"must_include": ["updated"]},
+                        }
+                    ],
+                },
+            }
+            for index in range(2)
+        ]
+    )
+
+    for row in rows:
+        targets = row["web_task"]["task_kwargs"]["collision_plan"]["snapshot_adapters"]["program_html"]["targets"]
+        assert len(targets) == 1
 
 
 def test_write_jsonl_is_utf8_and_newline_delimited(tmp_path):

@@ -7,7 +7,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from nemo_gym.web.models import WebBenchmark, WebObservationProfile, WebRuntimeProfile, WebTask
+from nemo_gym.web.models import (
+    WebActionProfile,
+    WebBenchmark,
+    WebObservationProfile,
+    WebRuntimeProfile,
+    WebTask,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,11 +52,32 @@ def _safe_env_kwargs(task: WebTask) -> dict[str, Any]:
     return dict(supplied)
 
 
+def _gym_id(task: WebTask, prefix: str) -> str:
+    explicit = task.task_kwargs.get("gym_id")
+    if explicit:
+        return str(explicit)
+    if task.task_id.startswith("browsergym/"):
+        return task.task_id
+    return f"browsergym/{prefix}.{task.task_id}"
+
+
 def resolve_browsergym_profile(task: WebTask) -> BrowserGymLaunchSpec:
     if task.runtime_profile != WebRuntimeProfile.BROWSERGYM:
         raise ValueError(f"task requests unsupported runtime profile: {task.runtime_profile}")
 
     env_kwargs = _safe_env_kwargs(task)
+    if task.benchmark == WebBenchmark.WEBARENA:
+        if task.action_profile != WebActionProfile.BROWSERGYM_HIGHLEVEL:
+            raise ValueError("WebArena requires the browsergym_highlevel action profile")
+        return BrowserGymLaunchSpec(
+            module="browsergym.webarena",
+            env_id=_gym_id(task, "webarena"),
+            action_subsets=("webarena",),
+            observation_profile=task.observation_profile or WebObservationProfile.A11Y,
+            env_kwargs=env_kwargs,
+            verifier_version="browsergym-v0.14.3:webarena",
+        )
+
     if task.benchmark == WebBenchmark.WEBVOYAGER:
         start_url = next((url for url in task.start_urls if url), None)
         if start_url is None:

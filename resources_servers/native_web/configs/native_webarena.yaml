@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+native_webarena:
+  resources_servers:
+    native_web:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Headed Chromium/PyAutoGUI runtime with the native WebArena evaluator
+      value: Run the maintained Nano Omni WebArena recipe behind Gym's web protocol
+      max_sessions: 1
+      artifact_dir: cache/native-webarena/artifacts
+      inline_screenshots: true
+      max_evidence_screenshots: 200
+      headless: false
+      viewport_width: 1920
+      viewport_height: 1080
+      action_delay_seconds: 2.0
+      terminate_on_action_error: false
+      max_computer_actions: 20
+      record_video: false
+      session_ttl_seconds: 14400
+      reaper_interval_seconds: 60
+      require_auth: false
+      # A single server replica must not overlap mutable-site writers.
+      site_pool_mode: local_locks
+      allowed_benchmarks: [webarena]

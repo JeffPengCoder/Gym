@@ -145,7 +145,7 @@ def render_observation(
 
     profile = task.observation_profile
     if profile is None:
-        profile = WebObservationProfile.SOM
+        profile = WebObservationProfile.A11Y if task.benchmark.value == "webarena" else WebObservationProfile.SOM
     if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
         text_parts = []
         if step_index == 0 or task.input_images:

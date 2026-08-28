@@ -15,6 +15,7 @@ from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.models import (
     WebAction,
     WebArtifactRef,
+    WebBenchmark,
     WebObservation,
     WebObservationProfile,
     WebStepResult,
@@ -22,8 +23,12 @@ from nemo_gym.web.models import (
     WebTask,
     WebVerifierResult,
 )
-from nemo_gym.web.session import EvaluatorInfrastructureError
+from nemo_gym.web.session import EvaluatorConfigurationError, EvaluatorInfrastructureError
 from resources_servers.browsergym_web.config import BrowserGymWebResourcesServerConfig
+from resources_servers.browsergym_web.evaluator_compat import (
+    configure_evaluator_environment,
+    configure_webarena_evaluator_model,
+)
 from resources_servers.browsergym_web.profiles import BrowserGymLaunchSpec, resolve_browsergym_profile
 
 
@@ -94,10 +99,17 @@ class BrowserGymBackend:
     def reset(self, task: WebTask) -> tuple[WebObservation, dict[str, Any]]:
         self.close()
         spec = resolve_browsergym_profile(task)
+        evaluator_model = self._evaluator_model(task.benchmark)
+        self._prepare_evaluator(task)
         env = None
         try:
             env = self._make_environment(spec)
             raw_observation, raw_info = env.reset(seed=task.seed)
+            # BrowserGym defers construction of the upstream task until env.reset().
+            # Only then have the benchmark packages installed their legacy dataset
+            # mappings and imported the evaluator modules.
+            if spec.module == "browsergym.webarena":
+                configure_webarena_evaluator_model(self.config.webarena_evaluator_model)
         except BaseException:
             if env is not None:
                 try:
@@ -127,6 +139,8 @@ class BrowserGymBackend:
                 "verifier_version": self._verifier_version(),
             }
         )
+        if evaluator_model:
+            info["evaluator_model"] = evaluator_model
         return self._observation, info
 
     def observe(self) -> WebObservation:
@@ -255,7 +269,35 @@ class BrowserGymBackend:
     def _verifier_version(self) -> str:
         if self.spec is None:
             raise RuntimeError("cannot identify verifier without an active task")
+        model = self._evaluator_model(self.task.benchmark) if self.task is not None else None
+        if self.spec.module == "browsergym.webarena" and model:
+            return f"{self.spec.verifier_version}:judge={model}"
         return self.spec.verifier_version
+
+    def _prepare_evaluator(self, task: WebTask) -> None:
+        model = self._evaluator_model(task.benchmark)
+        if not model:
+            if task.benchmark == WebBenchmark.WEBARENA and _uses_model_evaluator(task.original_metadata):
+                raise EvaluatorConfigurationError(
+                    f"{task.benchmark.value} task {task.task_id} requires a model-backed native evaluator; "
+                    f"configure {task.benchmark.value}_evaluator_model"
+                )
+            return
+
+        api_key = self.config.evaluator_api_key()
+        if not api_key:
+            raise EvaluatorConfigurationError(
+                f"{self.config.evaluator_api_key_env} must be set when {task.benchmark.value}_evaluator_model is configured"
+            )
+        configure_evaluator_environment(
+            api_key=api_key,
+            base_url=self.config.evaluator_base_url,
+        )
+
+    def _evaluator_model(self, benchmark: WebBenchmark) -> str | None:
+        if benchmark == WebBenchmark.WEBARENA:
+            return self.config.webarena_evaluator_model
+        return None
 
     def _convert_observation(self, raw: dict[str, Any]) -> WebObservation:
         if self.task is None or self.spec is None:
@@ -333,3 +375,13 @@ class BrowserGymBackend:
             elapsed_time=max(0.0, _first_number(raw.get("elapsed_time"))),
             metadata=metadata,
         )
+
+
+def _uses_model_evaluator(value: Any) -> bool:
+    """Detect upstream task metadata that can invoke a fuzzy/UA judge."""
+
+    if isinstance(value, dict):
+        return any(str(key).lower() == "fuzzy_match" or _uses_model_evaluator(item) for key, item in value.items())
+    if isinstance(value, (list, tuple, set)):
+        return any(_uses_model_evaluator(item) for item in value)
+    return False

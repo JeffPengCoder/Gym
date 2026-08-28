@@ -95,12 +95,7 @@ def _config(tmp_path, **updates: Any) -> BrowserGymWebResourcesServerConfig:
 
 
 def _task(task_id: str = "0") -> WebTask:
-    return WebTask(
-        benchmark=WebBenchmark.WEBVOYAGER,
-        task_id=task_id,
-        start_urls=["https://example.test/"],
-        action_profile="webvoyager_legacy",
-    )
+    return WebTask(benchmark=WebBenchmark.WEBARENA, task_id=task_id)
 
 
 @pytest.mark.asyncio

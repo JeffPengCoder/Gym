@@ -8,8 +8,8 @@ browsergym_web:
       num_workers: 1
       domain: agent
       verified: false
-      description: Stateful BrowserGym runtime for the legacy WebVoyager profile
-      value: Preserve BrowserGym open-ended browsing behind the shared Gym web contract
+      description: Stateful BrowserGym runtime for WebArena and WebVoyager profiles
+      value: Reuse one Gym control contract while retaining benchmark-native evaluation boundaries
       max_sessions: 1
       artifact_dir: cache/browsergym-web/artifacts
       inline_screenshots: true
@@ -23,4 +23,7 @@ browsergym_web:
       require_auth: false
       auth_token_env: BROWSERGYM_WEB_RESOURCES_TOKEN
       site_pool_mode: unmanaged
-      allowed_benchmarks: [webvoyager]
+      webarena_evaluator_model: null
+      evaluator_base_url: null
+      evaluator_api_key_env: OPENAI_API_KEY  # pragma: allowlist secret
+      allowed_benchmarks: [webarena, webvoyager]

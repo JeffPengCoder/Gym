@@ -3,8 +3,18 @@
 
 import pytest
 
-from nemo_gym.web.models import WebBenchmark, WebRuntimeProfile, WebTask
+from nemo_gym.web.models import WebBenchmark, WebObservationProfile, WebRuntimeProfile, WebTask
 from resources_servers.browsergym_web.profiles import resolve_browsergym_profile
+
+
+def test_webarena_uses_pinned_environment_and_native_evaluator():
+    profile = resolve_browsergym_profile(WebTask(benchmark=WebBenchmark.WEBARENA, task_id=310))
+
+    assert profile.module == "browsergym.webarena"
+    assert profile.env_id == "browsergym/webarena.310"
+    assert profile.action_subsets == ("webarena",)
+    assert profile.observation_profile == WebObservationProfile.A11Y
+    assert profile.external_verifier is False
 
 
 def test_webvoyager_uses_openended_task_and_external_verifier():

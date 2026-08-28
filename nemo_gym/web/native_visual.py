@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Pinned Nano Omni native-visual prompt, tools, and WebVoyager adapter.
+"""Pinned Nano Omni native-visual prompt, tools, and dataset adapters.
 
 This module contains no browser implementation.  It is the stable contract
 shared by dataset preparation, the Responses agent and native web runtimes.
@@ -13,6 +13,7 @@ from copy import deepcopy
 from typing import Any
 
 from nemo_gym.web.actions import MAX_NATIVE_SCROLL_AMOUNT
+from nemo_gym.web.native_eval_collision import build_collision_plan
 
 
 NATIVE_VISUAL_SYSTEM_PROMPT = """You are a GUI agent controlling a web browser. You are given a task instruction, a screenshot of the browser, and your previous interactions. You need to perform a series of actions to complete the task. The browser is already open and logged into the required websites.
@@ -238,6 +239,7 @@ def adapt_native_visual_record(
     benchmark: str,
     verifier_profile: str,
     task_id: str | int | None = None,
+    collision_plan: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one native-visual wire row without importing Gym runtime deps.
 
@@ -246,7 +248,7 @@ def adapt_native_visual_record(
     can produce the exact same row consumed by the full runtime.
     """
 
-    if benchmark != "webvoyager":
+    if benchmark not in {"webarena", "webvoyager"}:
         raise ValueError(f"unsupported native web benchmark: {benchmark!r}")
     source_id = record.get("id", record.get("task_id"))
     if source_id is None:
@@ -271,6 +273,11 @@ def adapt_native_visual_record(
         input_images = [image_value]
     else:
         input_images = [str(image) for image in image_value if image]
+    task_kwargs: dict[str, Any] = {}
+    if benchmark == "webarena":
+        task_kwargs["collision_plan"] = deepcopy(
+            dict(collision_plan) if collision_plan is not None else build_collision_plan(dict(record))
+        )
     web_task = {
         "benchmark": benchmark,
         "task_id": str(normalized_task_id),
@@ -284,7 +291,7 @@ def adapt_native_visual_record(
         "verifier_profile": verifier_profile,
         "auth_profile": None,
         "seed": 0,
-        "task_kwargs": {},
+        "task_kwargs": task_kwargs,
         "original_metadata": dict(record),
     }
     return {
@@ -298,6 +305,26 @@ def adapt_native_visual_record(
         },
         "web_task": web_task,
     }
+
+
+def adapt_native_webarena_record(
+    record: Mapping[str, Any],
+    *,
+    collision_plan: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    source_id = record.get("id", record.get("task_id"))
+    task_id = source_id
+    if isinstance(source_id, str) and source_id.startswith("webarena-"):
+        suffix = source_id.removeprefix("webarena-")
+        if suffix.isdigit():
+            task_id = int(suffix)
+    return adapt_native_visual_record(
+        record,
+        benchmark="webarena",
+        verifier_profile="native_webarena_classic",
+        task_id=task_id,
+        collision_plan=collision_plan,
+    )
 
 
 def adapt_native_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:

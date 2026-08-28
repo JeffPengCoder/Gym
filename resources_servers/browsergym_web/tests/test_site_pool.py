@@ -16,7 +16,7 @@ def test_browsergym_site_pool_is_a_compatibility_export():
 
 def _task(task_id: str, sites: list[str], mutation_class: str) -> WebTask:
     return WebTask(
-        benchmark=WebBenchmark.WEBVOYAGER,
+        benchmark=WebBenchmark.WEBARENA,
         task_id=task_id,
         sites=sites,
         site_locks=sites,

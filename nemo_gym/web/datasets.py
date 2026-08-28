@@ -15,6 +15,8 @@ from nemo_gym.web.models import (
     WebObservationProfile,
     WebTask,
 )
+from nemo_gym.web.native_eval_collision import build_collision_plans
+from nemo_gym.web.native_visual import adapt_native_webarena_record as _adapt_native_webarena_record
 from nemo_gym.web.native_visual import adapt_native_webvoyager_record as _adapt_native_webvoyager_record
 
 
@@ -26,6 +28,15 @@ def _start_urls(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(part) for part in value if part]
     return [str(value)]
+
+
+def _auth_profile(record: Mapping[str, Any]) -> str | None:
+    """Keep a real storage-state reference without stringifying JSON null."""
+
+    storage_state = record.get("storage_state")
+    if not record.get("require_login") or not storage_state:
+        return None
+    return str(storage_state)
 
 
 def gym_row(task: WebTask) -> dict[str, Any]:
@@ -41,6 +52,21 @@ def gym_row(task: WebTask) -> dict[str, Any]:
         },
         "web_task": task.model_dump(mode="json"),
     }
+
+
+def adapt_webarena_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    task = WebTask(
+        benchmark=WebBenchmark.WEBARENA,
+        task_id=record["task_id"],
+        intent=str(record.get("intent") or ""),
+        start_urls=_start_urls(record.get("start_url")),
+        sites=[str(site) for site in record.get("sites") or []],
+        observation_profile=WebObservationProfile.A11Y,
+        verifier_profile="browsergym_webarena",
+        auth_profile=_auth_profile(record),
+        original_metadata=dict(record),
+    )
+    return gym_row(task)
 
 
 def adapt_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -62,6 +88,23 @@ def adapt_native_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
     """Adapt the maintained 552-task population to the native Nano Omni route."""
 
     return _adapt_native_webvoyager_record(record)
+
+
+def adapt_native_webarena_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt the maintained 812-task population to the native visual route."""
+
+    return _adapt_native_webarena_record(record)
+
+
+def adapt_native_webarena_records(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Adapt a full selection and preserve its mutable-target collision plan."""
+
+    source_records = [dict(record) for record in records]
+    plans = build_collision_plans(source_records)
+    return [
+        _adapt_native_webarena_record(record, collision_plan=plan)
+        for record, plan in zip(source_records, plans, strict=True)
+    ]
 
 
 def load_json_records(path: str | Path) -> list[dict[str, Any]]:

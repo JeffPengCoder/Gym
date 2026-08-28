@@ -1,46 +1,27 @@
-# BrowserGym Web Resources Server
+# BrowserGym web resource server
 
-This stateful server owns the BrowserGym/Playwright context used by the legacy
-WebVoyager profile. It exposes the shared Gym web lifecycle:
+This resource server implements Gym's common stateful web protocol for
+WebArena and the legacy BrowserGym WebVoyager route.
 
-```text
-seed_session -> observe -> step* -> evaluate -> close
-```
+- WebArena registers the pinned `browsergym/webarena.<task_id>` environment,
+  exposes accessibility-tree observations and BrowserGym high-level actions,
+  and returns the upstream terminal evaluator reward.
+- WebVoyager uses BrowserGym's open-ended task, a SoM screenshot, and an
+  external screenshot-and-answer judge.
 
-WebVoyager uses `browsergym/openended`. Browser execution produces screenshot
-evidence, while the separate `webvoyager_judge` resource server owns final
-answer-and-screenshot scoring.
+The implementation keeps browser state inside one resource-server session;
+the Responses agent owns the policy loop. BrowserGym action mappings are
+validated before execution, and exceptions escaping `Env.step()` are reported
+as evaluator/runtime failures rather than correctable policy actions.
 
-## Runtime setup
+WebArena model-backed evaluator tasks require an explicit evaluator model and
+API key. The compatibility hook changes only the pinned evaluator's model
+argument; its prompt, sampling options, and score parsing remain upstream.
 
-Install the component environment and Chromium:
+The component pins BrowserGym 0.14.3. Its `overrides.txt` selects a Python
+3.13-compatible greenlet build without changing the Playwright API version.
+Install Chromium for Playwright 1.44.0 in the runtime image before launching
+the server.
 
-```bash
-uv sync --project resources_servers/browsergym_web
-uv run --project resources_servers/browsergym_web playwright install chromium
-```
-
-The component pins `browsergym-core==0.14.3`. BrowserGym pins Playwright 1.44,
-whose declared greenlet release predates Python 3.13; `overrides.txt` selects
-greenlet 3.1.1, which provides compatible CPython 3.13 wheels without changing
-the BrowserGym or Playwright API versions.
-
-The committed `data/` files are five schema-validation fixtures, not benchmark
-scores. Use `benchmarks/webvoyager/config.yaml` for the legacy benchmark route.
-
-## Isolation and failure semantics
-
-Each live BrowserGym session owns one thread-affine Playwright executor. The
-thread-local compatibility shim prevents BrowserGym 0.14.x from sharing its
-process-global synchronous Playwright object across independent session
-threads. A blocked reset therefore does not serialize unrelated sessions.
-
-Step `execution_ok` reports browser action execution separately from benchmark
-reward. Exceptions escaping `Env.step()` are treated as runtime/evaluator
-failures rather than correctable policy actions. When `record_video: true`,
-finalized non-empty videos are indexed under the session artifact directory and
-returned after browser shutdown has flushed them.
-
-The default `site_pool_mode: unmanaged` tracks ownership without claiming that
-public websites are isolated. `local_locks` is available to coordinate task
-metadata within one process, but it is not a cross-process deployment lock.
+Browser video is optional. When enabled, finalized recordings are returned in
+the standard close response alongside screenshot evidence.
