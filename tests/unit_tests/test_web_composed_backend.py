@@ -211,3 +211,21 @@ def test_reset_starts_a_fresh_evaluator_lifecycle() -> None:
     assert close_count == 1
     assert len(evaluator.prepared) == 2
     assert evaluator.prepared[-1]["browser_context"] == {"task_id": "0"}
+
+
+def test_reset_cleanup_failure_invalidates_previous_lifecycle() -> None:
+    evaluator = _Evaluator()
+    backend = ComposedWebBackend(_Driver(), evaluator)
+    backend.reset(_task())
+
+    def fail_close() -> None:
+        raise RuntimeError("evaluator cleanup failed")
+
+    evaluator.close = fail_close  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="evaluator cleanup failed"):
+        backend.reset(_task())
+    with pytest.raises(RuntimeError, match="reset before use"):
+        backend.step(WebAction(name="noop", script="noop()"))
+    with pytest.raises(RuntimeError, match="reset before use"):
+        backend.evaluate("done")

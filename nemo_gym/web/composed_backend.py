@@ -79,10 +79,11 @@ class ComposedWebBackend:
         if self._task is not None:
             # A session reset starts a new evaluator lifecycle. In particular,
             # WebArena-family before-state snapshots must never survive into a
-            # retry of the same task. Drivers own their own reset cleanup.
-            self.evaluator.close()
+            # retry of the same task. Invalidate the active state before
+            # cleanup so a close failure cannot expose the old lifecycle.
             self._task = None
             self._observation = None
+            self.evaluator.close()
         observation, info = self.driver.reset(task)
         try:
             self.evaluator.prepare(
