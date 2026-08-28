@@ -27,10 +27,9 @@ rollout only after its reward is resolved.
 
 Bounded network, timeout, capacity, and session failures are written as
 retryable infrastructure sidecars. Structured invalid-task and benchmark
-precondition responses are written as terminal masked sidecars. Rollout
-collection also writes `<output_stem>_population_status.json`; scores are only
-complete when every materialized rollout has a main result and terminal,
-exhausted, retryable, and missing counts are all zero.
+precondition responses are written as terminal masked sidecars. Population
+completeness and fixed-denominator scoring remain benchmark-specific; for
+example, WebVoyager's summarizer reconciles results against its pinned task IDs.
 
 Every seeded rollout returns `artifact_session_id`, including bounded failures
 that happen after seeding. When browser recording is enabled, finalized video

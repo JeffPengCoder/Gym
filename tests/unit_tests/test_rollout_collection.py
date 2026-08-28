@@ -46,7 +46,6 @@ from nemo_gym.rollout_collection import (
     _expand_input_glob,
     _failures_path_for,
     _get_max_rollout_attempts,
-    _population_status_from_files,
     _rollout_for_export,
     _rollout_request_debug_summary,
     loads_jsonl_line,
@@ -130,62 +129,6 @@ class TestGetMaxRolloutAttempts:
     def test_non_positive_falls_back_to_default(self, monkeypatch) -> None:
         monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "0")
         assert _get_max_rollout_attempts() == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
-
-
-class TestRolloutPopulationStatus:
-    def test_distinguishes_terminal_exhausted_retryable_and_missing(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
-        output = tmp_path / "rollouts.jsonl"
-        config = RolloutCollectionConfig(
-            agent_name="agent",
-            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
-            output_jsonl_fpath=str(output),
-        )
-        materialized = [{TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0} for index in range(5)]
-        config.materialized_jsonl_fpath.write_bytes(b"\n".join(orjson.dumps(row) for row in materialized) + b"\n")
-        output.write_bytes(orjson.dumps(materialized[0]) + b"\n")
-        failures = [
-            materialized[1] | {NG_FAILURE_CLASS_KEY: "benchmark_precondition", NG_TERMINAL_KEY: True},
-            *(materialized[2] | {NG_FAILURE_CLASS_KEY: "retryable_infrastructure"} for _ in range(3)),
-            materialized[3] | {NG_FAILURE_CLASS_KEY: "retryable_infrastructure"},
-            materialized[0] | {NG_FAILURE_CLASS_KEY: "ignored_completed"},
-            {TASK_INDEX_KEY_NAME: 99, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "ignored_unknown"},
-        ]
-        _failures_path_for(output).write_bytes(b"\n".join(orjson.dumps(row) for row in failures) + b"\n")
-
-        status = _population_status_from_files(config)
-
-        assert status.model_dump() == {
-            "status": "incomplete",
-            "expected": 5,
-            "completed": 1,
-            "terminal": 1,
-            "exhausted": 1,
-            "retryable": 1,
-            "missing": 1,
-            "failure_attempts": 5,
-            "max_attempts": 3,
-            "dispatch_complete": False,
-            "scorable_complete": False,
-        }
-
-    def test_missing_files_and_invalid_identity_rows_form_an_empty_complete_population(self, tmp_path: Path) -> None:
-        output = tmp_path / "rollouts.jsonl"
-        config = RolloutCollectionConfig(
-            agent_name="agent",
-            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
-            output_jsonl_fpath=str(output),
-        )
-        config.materialized_jsonl_fpath.write_bytes(
-            orjson.dumps({TASK_INDEX_KEY_NAME: "not-an-int", ROLLOUT_INDEX_KEY_NAME: 0}) + b"\n"
-        )
-
-        status = _population_status_from_files(config)
-
-        assert status.expected == 0
-        assert status.completed == 0
-        assert status.status == "complete"
-        assert status.dispatch_complete is True
 
 
 class TestRolloutCollection:
@@ -1005,9 +948,6 @@ class TestRolloutCollection:
         assert output_jsonl_fpath.exists()
         assert _failures_path_for(output_jsonl_fpath).exists()
         assert output_jsonl_fpath.with_name("rollouts_aggregate_metrics.json").exists()
-        population_status = json.loads(output_jsonl_fpath.with_name("rollouts_population_status.json").read_text())
-        assert population_status["status"] == "complete"
-        assert population_status["completed"] == population_status["expected"] == 1
 
     async def test_fresh_run_clears_stale_failure_sidecar(
         self, tmp_path: Path, empty_global_config: MagicMock
@@ -1044,9 +984,6 @@ class TestRolloutCollection:
         await Helper().run_from_config(config)
 
         assert _failures_path_for(output_fpath).read_bytes() == b""
-        status = json.loads(output_fpath.with_name("rollouts_population_status.json").read_text())
-        assert status["status"] == "complete"
-        assert status["terminal"] == status["exhausted"] == 0
 
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     @pytest.mark.parametrize("redact_payloads", [False, True])
