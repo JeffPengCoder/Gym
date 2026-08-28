@@ -12,32 +12,44 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
+import pickle
 import warnings
 from asyncio import Future
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 from threading import get_ident
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
 import yaml
+from aiohttp import ClientConnectorError, ClientResponseError, ServerDisconnectedError
 from omegaconf import OmegaConf
 
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
+    AGENT_REQUEST_FAILED_FAILURE_CLASS,
+    AGENT_RUN_ERROR_FAILURE_CLASS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_PERF_KEY,
+    NG_TERMINAL_KEY,
     NG_TRAJECTORY_KEY,
     E2ERolloutCollectionConfig,
     RolloutAggregationConfig,
@@ -49,6 +61,7 @@ from nemo_gym.rollout_collection import (
     _build_ng_perf,
     _build_trajectory_record,
     _expand_input_glob,
+    _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
     _rollout_for_export,
@@ -76,6 +89,57 @@ def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     get_global_config_dict = MagicMock(return_value={})
     monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
     return get_global_config_dict
+
+
+class FakeResponse:
+    """The parts of aiohttp's ClientResponse that the rollout dispatcher touches."""
+
+    def __init__(self, status: int, payload: dict | None = None) -> None:
+        self.status = status
+        self.ok = 200 <= status < 300
+        self.payload = payload
+        self.released = False
+
+    def release(self) -> None:
+        self.released = True
+
+
+def http_error(status: int, message: str = "boom", body: bytes | None = None) -> ClientResponseError:
+    request_info = SimpleNamespace(method="POST", url="http://agent/run", real_url="http://agent/run")
+    error = ClientResponseError(request_info=request_info, history=(), status=status, message=message)
+    if body is not None:
+        error.response_content = body
+    return error
+
+
+def install_fake_server_client(monkeypatch: pytest.MonkeyPatch, post: AsyncMock) -> MagicMock:
+    """Route every dispatcher HTTP call through `post` and unwrap FakeResponse."""
+    server_client = MagicMock()
+    server_client.post = post
+    server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+    monkeypatch.setattr(
+        nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: server_client
+    )
+
+    async def raise_for_status(response: FakeResponse) -> None:
+        if not response.ok:
+            raise http_error(response.status)
+
+    async def get_response_json(response: FakeResponse) -> dict | None:
+        return response.payload
+
+    monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", raise_for_status)
+    monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", get_response_json)
+    return server_client
+
+
+def failing_row(task_index: int = 7) -> dict:
+    return {
+        AGENT_REF_KEY_NAME: {"name": "my_agent"},
+        TASK_INDEX_KEY_NAME: task_index,
+        ROLLOUT_INDEX_KEY_NAME: 0,
+        "responses_create_params": {"input": []},
+    }
 
 
 class TestLoadsJsonlLine:
@@ -719,6 +783,404 @@ class TestRolloutCollection:
             assert "do not log this" not in captured.out
         else:
             assert "[rollout_collection] /run failed" not in captured.out
+
+    async def test_run_examples_records_agent_http_failure_as_a_failure_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 5xx from /run becomes a row-associated failure, not a reward-zero rollout."""
+        row = failing_row()
+        post = AsyncMock(return_value=FakeResponse(500))
+        install_fake_server_client(monkeypatch, post)
+
+        async def raise_for_status(_response):
+            raise http_error(500, body=b'{"detail": "unhandled tool-call json"}')
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", raise_for_status)
+
+        returned_row, result = await next(
+            RolloutCollectionHelper().run_examples([row], route_failures_to_sidecar=True)
+        )
+
+        assert returned_row is row
+        assert result[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
+        assert result["_ng_failure_type"] == "ClientResponseError"
+        assert result["_ng_failure_http_status"] == 500
+        assert result["_ng_failure_response_body"] == '{"detail": "unhandled tool-call json"}'
+        # No invented verifier output: no reward, no placeholder response, no token payload.
+        assert "reward" not in result
+        assert "response" not in result
+        assert NG_TERMINAL_KEY not in result
+
+    @pytest.mark.parametrize("status", [401, 429, 503, 504])
+    async def test_run_examples_records_any_status_without_resending(
+        self, monkeypatch: pytest.MonkeyPatch, status: int
+    ) -> None:
+        """No status is retried in place; the agent may already have run."""
+        post = AsyncMock(return_value=FakeResponse(status))
+        install_fake_server_client(monkeypatch, post)
+
+        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
+
+        assert result["_ng_failure_http_status"] == status
+        assert post.await_count == 1
+
+    @pytest.mark.parametrize(
+        ("error", "status", "expected_class"),
+        [
+            (
+                ClientConnectorError(MagicMock(), OSError("connection refused")),
+                None,
+                AGENT_REQUEST_FAILED_FAILURE_CLASS,
+            ),
+            (ServerDisconnectedError(), None, AGENT_REQUEST_FAILED_FAILURE_CLASS),
+            (http_error(503), 503, AGENT_REQUEST_FAILED_FAILURE_CLASS),
+            (http_error(500), 500, AGENT_RUN_ERROR_FAILURE_CLASS),
+            (http_error(400), 400, AGENT_RUN_ERROR_FAILURE_CLASS),
+            (orjson.JSONDecodeError("unexpected end of data", "", 0), 200, AGENT_RUN_ERROR_FAILURE_CLASS),
+        ],
+        ids=["connection refused", "dropped mid-flight", "gateway 503", "agent 500", "agent 400", "unreadable body"],
+    )
+    async def test_run_examples_classifies_by_who_answered(
+        self, monkeypatch: pytest.MonkeyPatch, error: BaseException, status: int | None, expected_class: str
+    ) -> None:
+        """A NeMo Gym agent answers 500 when its handler raises, so its own statuses mean it ran.
+
+        A gateway status or no reply at all does not, and neither is ever resent from here.
+        """
+        post = AsyncMock(side_effect=error) if status is None else AsyncMock(return_value=FakeResponse(status))
+        install_fake_server_client(monkeypatch, post)
+        if status == 200:
+
+            async def get_response_json(_response):
+                raise error
+
+            monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", get_response_json)
+
+        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
+
+        assert result[NG_FAILURE_CLASS_KEY] == expected_class
+        assert result["_ng_failure_type"] == type(error).__name__
+        assert result["_ng_failure_http_status"] == status
+        assert "reward" not in result
+        assert post.await_count == 1
+
+    async def test_run_examples_raises_for_direct_callers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Library callers (NeMo-RL) keep the exception contract they have today."""
+        post = AsyncMock(return_value=FakeResponse(500))
+        install_fake_server_client(monkeypatch, post)
+
+        with pytest.raises(ClientResponseError):
+            await next(RolloutCollectionHelper().run_examples([failing_row()]))
+
+    @pytest.mark.parametrize("error", [RuntimeError("dispatcher bug"), asyncio.CancelledError()])
+    async def test_run_examples_propagates_non_request_failures(
+        self, monkeypatch: pytest.MonkeyPatch, error: BaseException
+    ) -> None:
+        """Routing covers request failures only; a bug or a cancellation still ends the run."""
+        post = AsyncMock(side_effect=error)
+        install_fake_server_client(monkeypatch, post)
+
+        with pytest.raises(type(error)):
+            await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
+
+    async def test_failure_row_survives_serialization(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The record has to cross the jsonl, pickle and Ray boundaries as plain data."""
+        post = AsyncMock(return_value=FakeResponse(500))
+        install_fake_server_client(monkeypatch, post)
+
+        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
+
+        assert pickle.loads(pickle.dumps(result)) == result
+        assert orjson.loads(orjson.dumps(result)) == result
+
+    async def test_run_from_config_routes_agent_failure_to_sidecar_and_out_of_metrics(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """End to end: one 500 and one success, through the real dispatch and aggregation path."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                for i in range(2)
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        aggregated: dict[str, list[dict]] = {}
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            if url_path == "/run":
+                if json["x"] == 0:
+                    raise http_error(500, "unhandled tool-call json")
+                return FakeResponse(200, {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}})
+            assert url_path == "/aggregate_metrics"
+            aggregated["verify_responses"] = [dict(r) for r in json.verify_responses]
+            return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            disable_health_check=True,
+        )
+        results = await RolloutCollectionHelper().run_from_config(config)
+
+        assert len(results) == 2
+
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert [r[TASK_INDEX_KEY_NAME] for r in persisted] == [1]
+        assert [r["reward"] for r in persisted] == [1.0]
+
+        failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
+        assert len(failures) == 1
+        assert failures[0][NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
+        assert failures[0][TASK_INDEX_KEY_NAME] == 0
+        assert failures[0][ROLLOUT_INDEX_KEY_NAME] == 0
+        assert failures[0][AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+        assert "reward" not in failures[0]
+
+        # The failed rollout reaches neither the aggregator's input nor its denominator.
+        assert [r[TASK_INDEX_KEY_NAME] for r in aggregated["verify_responses"]] == [1]
+        metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
+            ".json"
+        )
+        agent_metrics = orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]
+        assert agent_metrics["mean/reward"] == 1.0
+
+    async def test_run_from_config_resume_retries_an_agent_failure_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """A failure row is one attempt, so resume re-dispatches it with a fresh attempt index."""
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        output_jsonl_fpath.write_bytes(b"")
+        materialized_fpath = tmp_path / "output_materialized_inputs.jsonl"
+        materialized_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                }
+            )
+            + b"\n"
+        )
+        _failures_path_for(output_jsonl_fpath).write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                    NG_FAILURE_CLASS_KEY: AGENT_REQUEST_FAILED_FAILURE_CLASS,
+                }
+            )
+            + b"\n"
+        )
+
+        dispatched: list[dict] = []
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            if url_path == "/run":
+                dispatched.append(json)
+                return FakeResponse(200, {"reward": 1.0})
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=True,
+            disable_health_check=True,
+        )
+        await RolloutCollectionHelper().run_from_config(config)
+
+        assert len(dispatched) == 1
+        assert dispatched[0][ATTEMPT_INDEX_KEY_NAME] == 1
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert [r["reward"] for r in persisted] == [1.0]
+
+    def test_failure_rows_counted_as_zero_selects_the_last_attempt_of_each_rollout(self, tmp_path: Path) -> None:
+        """The last attempt stands, so it is chosen before the wanted classes are picked out."""
+        failures_fpath = tmp_path / "output_failures.jsonl"
+
+        def attempt(task_index: int, failure_class: str, reward: float | None = 0.0) -> dict:
+            row = {
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: failure_class,
+                "_ng_failure_http_status": 500,
+            }
+            return row if reward is None else {**row, "reward": reward}
+
+        failures_fpath.write_bytes(
+            b"\n".join(
+                orjson.dumps(row)
+                for row in [
+                    attempt(0, AGENT_RUN_ERROR_FAILURE_CLASS),
+                    attempt(1, AGENT_RUN_ERROR_FAILURE_CLASS),
+                    attempt(1, AGENT_RUN_ERROR_FAILURE_CLASS),
+                    attempt(2, AGENT_RUN_ERROR_FAILURE_CLASS, reward=None),
+                    attempt(3, AGENT_RUN_ERROR_FAILURE_CLASS),
+                    attempt(3, AGENT_REQUEST_FAILED_FAILURE_CLASS),
+                    attempt(4, AGENT_REQUEST_FAILED_FAILURE_CLASS),
+                    attempt(4, AGENT_RUN_ERROR_FAILURE_CLASS),
+                ]
+            )
+            + b"\n"
+        )
+
+        # Task 0 succeeded on a later attempt. Task 1 failed twice and counts once. Task 3 ended in
+        # a class the caller did not ask for, so its earlier attempt must not stand in for it.
+        rows = _failure_rows_counted_as_zero([failures_fpath], [AGENT_RUN_ERROR_FAILURE_CLASS], {(0, 0)})
+        assert sorted(row[TASK_INDEX_KEY_NAME] for row in rows) == [1, 2, 4]
+
+        assert _failure_rows_counted_as_zero([failures_fpath], [], set()) == []
+
+        # A row with no reward is scored zero here and only here, and diagnostics never reach the
+        # aggregator, which averages every number it is handed.
+        scoreless = next(row for row in rows if row[TASK_INDEX_KEY_NAME] == 2)
+        assert scoreless["reward"] == 0.0
+        assert not any(key.startswith("_ng_failure_") for key in scoreless)
+        sidecar = [orjson.loads(line) for line in failures_fpath.read_bytes().splitlines()]
+        assert "reward" not in sidecar[3]
+        assert sidecar[3]["_ng_failure_http_status"] == 500
+
+    @pytest.mark.parametrize(
+        ("counted_classes", "expected_scored", "expected_mean"),
+        [([], 1, 1.0), ([AGENT_RUN_ERROR_FAILURE_CLASS], 2, 0.5)],
+        ids=["off by default", "opted in"],
+    )
+    async def test_run_from_config_counts_an_opted_in_failure_class_as_zero(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        counted_classes: list[str],
+        expected_scored: int,
+        expected_mean: float,
+    ) -> None:
+        """One 500 and one success, end to end: the failed rollout counts only when asked for.
+
+        `key_metrics` is asserted whole, because the row's diagnostic fields are numbers and the
+        aggregator averages every number it is handed.
+        """
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                for i in range(2)
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        aggregated: dict[str, list[dict]] = {}
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                if json["x"] == 0:
+                    raise http_error(500, "unhandled tool-call json")
+                return FakeResponse(200, {"reward": 1.0})
+            aggregated["verify_responses"] = [dict(r) for r in json.verify_responses]
+            return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            count_failure_classes_as_zero=counted_classes,
+            disable_health_check=True,
+        )
+        await RolloutCollectionHelper().run_from_config(config)
+
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert [row["reward"] for row in persisted] == [1.0]
+
+        failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
+        assert failures[0][NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
+        assert "reward" not in failures[0]
+
+        assert len(aggregated["verify_responses"]) == expected_scored
+        metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
+            ".json"
+        )
+        assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": expected_mean}
+
+    async def test_run_from_config_fails_when_no_rollout_produced_a_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Routing failures out of the score must not turn a dead run into a quiet success."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(500)))
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            disable_health_check=True,
+        )
+
+        with pytest.raises(RuntimeError, match="produced a result"):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        # The attempt is still on disk, so resume can pick it up.
+        failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
+        assert [row[NG_FAILURE_CLASS_KEY] for row in failures] == [AGENT_RUN_ERROR_FAILURE_CLASS]
+
+    async def test_aggregate_counts_an_opted_in_failure_class_from_each_shard_sidecar(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """`gym eval aggregate` applies the same option offline, over the shards' own sidecars."""
+        shard_fpath = tmp_path / "rollouts-chunk0.jsonl"
+        shard_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                    "reward": 1.0,
+                }
+            )
+            + b"\n"
+        )
+        _failures_path_for(shard_fpath).write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 1,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                    "reward": 0.0,
+                    NG_FAILURE_CLASS_KEY: "verify_failed",
+                }
+            )
+            + b"\n"
+        )
+        merged_fpath = tmp_path / "rollouts.jsonl"
+        aggregated: dict[str, list[dict]] = {}
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            aggregated["verify_responses"] = [dict(r) for r in json.verify_responses]
+            return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        config = RolloutAggregationConfig(
+            input_glob=str(shard_fpath),
+            output_jsonl_fpath=str(merged_fpath),
+            count_failure_classes_as_zero=["verify_failed"],
+            disable_health_check=True,
+        )
+        await RolloutAggregationHelper().run_from_config(config)
+
+        assert sorted(row["reward"] for row in aggregated["verify_responses"]) == [0.0, 1.0]
+        # The merged rollouts file keeps only the rollouts that produced a result.
+        merged = [orjson.loads(line) for line in merged_fpath.read_bytes().splitlines()]
+        assert [row["reward"] for row in merged] == [1.0]
 
     async def test_run_examples_stamps_independent_rollout_latency(self, monkeypatch: pytest.MonkeyPatch) -> None:
         row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
