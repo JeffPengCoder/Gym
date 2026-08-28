@@ -1,11 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Native Nano Omni VisualWebArena route. Set task_image_root to the same
-# read-only image directory in both the agent and resource-server profiles.
+# Native Nano Omni VisualWebArena route. Preparation populates one pinned,
+# read-only image root shared by the agent and resource-server profiles.
 config_paths:
   - resources_servers/native_web/configs/native_visualwebarena.yaml
   - responses_api_agents/web_agent/configs/web_agent.yaml
+
+# Declare the standard cache key before interpolation validation; Gym resolves
+# it to an absolute path and callers may still override it normally.
+cache_dir: cache
+
+prepare_script_args:
+  # The prepare script downloads the pinned public data repository here on
+  # first use. Put it on a shared cache for distributed workers.
+  source_root: ${oc.env:VISUALWEBARENA_NATIVE_SOURCE_ROOT,${cache_dir}/webarena_benchmarks/6a2977939b157b0ab9de7799bb089c721f1ac115}
+
+native_visualwebarena:
+  resources_servers:
+    native_web:
+      task_image_root: ${prepare_script_args.source_root}
 
 native_visualwebarena_agent:
   _inherit_from: web_agent
@@ -28,7 +42,7 @@ native_visualwebarena_agent:
       max_image_history: 3
       visual_observation_text: none
       redact_old_visual_observations: false
-      task_image_root: null
+      task_image_root: ${prepare_script_args.source_root}
       resources_request_timeout_secs: 1800
       model_request_timeout_secs: 1200
       run_timeout_secs: 14400

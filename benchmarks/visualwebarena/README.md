@@ -32,22 +32,42 @@ failure.
 VisualWebArena evaluator. Prepare the maintained 908-row population with:
 
 ```bash
-export VISUALWEBARENA_NATIVE_SOURCE_JSONL=/path/to/webarena_benchmarks/visualwebarena.jsonl
-python benchmarks/visualwebarena/prepare_native_v3.py
+gym eval prepare --config benchmarks/visualwebarena/configs/native_v3.yaml
 ```
 
-The native prepare path accepts the 908-row `visualwebarena.jsonl` from
-`jayl940712/webarena_benchmarks` commit
-`6a2977939b157b0ab9de7799bb089c721f1ac115` and verifies its SHA-256 before
-adapting any row. A different 908-row file is rejected rather than silently
-changing task IDs, reference images, or evaluator targets.
+On first use, the native prepare path downloads the complete public
+[`jayl940712/webarena_benchmarks`](https://github.com/jayl940712/webarena_benchmarks)
+archive at commit `6a2977939b157b0ab9de7799bb089c721f1ac115` into
+`cache/webarena_benchmarks/<commit>/`. This includes both the 908-row
+`visualwebarena.jsonl` and its 346 reference images. The download is atomic and
+reused on later runs. Before adapting any row, prepare verifies the JSONL
+SHA-256, task count, and every local image reference; a different or incomplete
+source is rejected rather than silently changing task IDs, images, or evaluator
+targets.
+
+For a shared or pre-populated cache, point `VISUALWEBARENA_NATIVE_SOURCE_ROOT`
+at the directory containing both `visualwebarena.jsonl` and the
+`visualwebarena/` image tree. The native config passes that same absolute root
+to the agent and resource server:
+
+```bash
+export VISUALWEBARENA_NATIVE_SOURCE_ROOT=/shared/webarena_benchmarks
+gym eval prepare --config benchmarks/visualwebarena/configs/native_v3.yaml
+```
+
+An offline checkout can be created explicitly when the cluster login node is
+the only host with network access:
+
+```bash
+git clone https://github.com/jayl940712/webarena_benchmarks.git /shared/webarena_benchmarks
+git -C /shared/webarena_benchmarks checkout 6a2977939b157b0ab9de7799bb089c721f1ac115
+export VISUALWEBARENA_NATIVE_SOURCE_ROOT=/shared/webarena_benchmarks
+```
 
 The JSONL intentionally retains paths such as
-`visualwebarena/shopping/task_86/input_0.png`. Mount the directory that contains
-the `visualwebarena/` tree read-only (the reference checkout's `benchmarks/`
-directory) and set that parent as the same `task_image_root` override on both
-`native_visualwebarena_agent.responses_api_agents.web_agent` and
-`native_visualwebarena.resources_servers.native_web`. The resource server also
+`visualwebarena/shopping/task_86/input_0.png`. Consequently, the image root is
+the public checkout root—not a `benchmarks/` child. Mount that root read-only at
+the same absolute path on every distributed worker. The resource server also
 needs the deployment's `WA_*` URLs and approved `WEBARENA_JUDGE_*` secret
 environment. Site reset and split-level deployment isolation remain
 orchestration responsibilities, not browser-driver behavior.
