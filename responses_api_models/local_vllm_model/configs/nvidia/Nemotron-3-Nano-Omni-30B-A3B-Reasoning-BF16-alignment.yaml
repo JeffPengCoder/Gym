@@ -1,9 +1,9 @@
 # Public Nano Omni v3 profile for web-runtime alignment.
 #
-# The checkpoint and revision are public and immutable. The native-compatible
-# chat template and parser plugins remain explicit operator inputs until their
-# public implementations are provenance-bound and tested. Do not replace the
-# placeholders with cluster-specific paths in this repository.
+# The checkpoint, tokenizer, and chat template are pinned public assets. The
+# small reasoning-parser plugin is public too, but vLLM requires a local file
+# path, so operators download it once and expose that path through the required
+# NANO_V3_REASONING_PARSER_PLUGIN environment variable.
 Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment:
   responses_api_models:
     local_vllm_model:
@@ -39,14 +39,15 @@ Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment:
         enable_auto_tool_choice: true
         trust_remote_code: true
 
-        # Required alignment inputs. Supply reviewed, readable paths in the
-        # run config; never commit cluster/user-specific values here.
-        tokenizer: ???
-        chat_template: ???
-        # The pinned native launchers use vLLM's built-in Qwen3 parser for
-        # Nano Omni structured browser calls.
+        # Use the tokenizer and standalone chat_template.jinja published with
+        # the same immutable model revision. A reference-score experiment may
+        # override these with separately provenance-bound serving assets.
+        tokenizer: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16
+        tokenizer_revision: 24e67ea000b7c2837fc8f9488aa2008524fac8ba  # pragma: allowlist secret
+        # NVIDIA's public Nano v3 tool-calling recipe and the pinned
+        # WebVoyager reference launcher both use the built-in Qwen3 parser.
         tool_call_parser: qwen3_coder
-        reasoning_parser_plugin: ???
+        reasoning_parser_plugin: ${oc.env:NANO_V3_REASONING_PARSER_PLUGIN}
         reasoning_parser: nano_v3
 
         model_loader_extra_config:

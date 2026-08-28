@@ -3,7 +3,10 @@
 
 from pathlib import Path
 
+import pytest
 import yaml
+from omegaconf import OmegaConf
+from omegaconf.errors import InterpolationResolutionError
 
 
 CONFIG = (
@@ -37,14 +40,31 @@ def test_public_nano_omni_profile_pins_web_alignment_runtime() -> None:
     assert serve["reasoning_parser"] == "nano_v3"
 
 
-def test_native_compatibility_inputs_fail_closed_without_private_defaults() -> None:
+def test_public_compatibility_assets_are_pinned_without_cluster_paths() -> None:
     text = CONFIG.read_text(encoding="utf-8")
     serve = _config()["vllm_serve_kwargs"]
 
-    assert serve["tokenizer"] == "???"
-    assert serve["chat_template"] == "???"
+    assert serve["tokenizer"] == PUBLIC_MODEL
+    assert serve["tokenizer_revision"] == PUBLIC_REVISION
+    assert "chat_template" not in serve
     assert serve["tool_call_parser"] == "qwen3_coder"
-    assert serve["reasoning_parser_plugin"] == "???"
+    assert serve["reasoning_parser_plugin"] == "${oc.env:NANO_V3_REASONING_PARSER_PLUGIN}"
+    assert "???" not in text
     assert "/lustre/" not in text
     assert "/home/" not in text
     assert "/Users/" not in text
+
+
+def test_public_profile_requires_explicit_reasoning_parser_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NANO_V3_REASONING_PARSER_PLUGIN", raising=False)
+    config = OmegaConf.load(CONFIG)
+
+    with pytest.raises(InterpolationResolutionError, match="NANO_V3_REASONING_PARSER_PLUGIN"):
+        OmegaConf.to_container(config, resolve=True)
+
+    parser_path = "/runtime-assets/nano_v3_reasoning_parser.py"
+    monkeypatch.setenv("NANO_V3_REASONING_PARSER_PLUGIN", parser_path)
+    config = OmegaConf.load(CONFIG)
+    resolved = OmegaConf.to_container(config, resolve=True)
+    profile = resolved[PROFILE]["responses_api_models"]["local_vllm_model"]
+    assert profile["vllm_serve_kwargs"]["reasoning_parser_plugin"] == parser_path

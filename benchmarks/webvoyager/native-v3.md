@@ -33,12 +33,14 @@ boundary is restricted to WebArena and VisualWebArena.
 - Dataset: `jayl940712/webarena_benchmarks` commit
   `6a2977939b157b0ab9de7799bb089c721f1ac115`, `webvoyager.jsonl`, 552 tasks,
   SHA-256 `f635a9b27fa1980a63b39bbf64ae8e9e766159cb70fa765451d3d3c0b948ff98`.
-- Policy: public `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16`
-  revision `24e67ea000b7c2837fc8f9488aa2008524fac8ba`.
+- Public policy example: `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16`
+  revision `24e67ea000b7c2837fc8f9488aa2008524fac8ba`. The benchmark itself consumes
+  an OpenAI-compatible multimodal policy endpoint and is not tied to this
+  checkpoint.
 - Generation: temperature 0.1, top-p 0.95, 100 browser steps, three recent
   browser screenshots, structured native browser tools.
-- Serving: TP8, 128K context, an independently staged multimodal public-v3
-  template, and
+- Serving contract used for the public profile: TP8, 128K context, the
+  tokenizer and chat template published with the pinned model revision, and
   `chat_template_kwargs={"truncate_history_thinking": false}` on every vLLM
   chat-completions request. Layer
   `benchmarks/webvoyager/configs/native_v3_policy.yaml` after the generic
@@ -66,17 +68,80 @@ A browser that exhausts its CAPTCHA budget reports
 `failure_kind=captcha_budget_exhausted` rather than judging a forced stop, and
 the summarizer routes it to the cleanup wave.
 
+## Public policy-serving assets
+
+The benchmark, agent, browser and judge do not load a tokenizer. They call an
+OpenAI-compatible multimodal policy endpoint. Tokenizer, chat-template and
+output-parser choices matter only when an operator starts a local model server.
+
+The public Nano Omni profile uses the tokenizer and standalone
+`chat_template.jinja` published at the
+[same immutable revision as the model](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16/tree/24e67ea000b7c2837fc8f9488aa2008524fac8ba). <!-- pragma: allowlist secret -->
+The [`nano_v3` reasoning parser](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/f6aca92089793f4bc9ece522ffbb5365d38b5113/nano_v3_reasoning_parser.py) <!-- pragma: allowlist secret -->
+is also public, but it is hosted in the NVIDIA Nemotron Nano model repository
+and vLLM requires it as a local file. Download the small serving assets as
+follows:
+
+```bash
+ASSET_DIR=/path/to/nano-omni-v3-assets
+MODEL_REPO=nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16
+MODEL_REVISION=24e67ea000b7c2837fc8f9488aa2008524fac8ba  # pragma: allowlist secret
+PARSER_REPO=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+PARSER_REVISION=f6aca92089793f4bc9ece522ffbb5365d38b5113  # pragma: allowlist secret
+
+hf download "$MODEL_REPO" \
+  --revision "$MODEL_REVISION" \
+  --include tokenizer.json tokenizer_config.json special_tokens_map.json chat_template.jinja \
+  --local-dir "$ASSET_DIR/model"
+hf download "$PARSER_REPO" nano_v3_reasoning_parser.py \
+  --revision "$PARSER_REVISION" \
+  --local-dir "$ASSET_DIR/parser"
+
+export NANO_V3_REASONING_PARSER_PLUGIN="$ASSET_DIR/parser/nano_v3_reasoning_parser.py"
+```
+
+The checked-in local-vLLM profile pins the public tokenizer revision. The
+locked Transformers/vLLM stack selects the standalone `chat_template.jinja`
+from that snapshot instead of the older template embedded in
+`tokenizer_config.json`. The profile also selects vLLM's built-in
+`qwen3_coder` tool-call parser and fails closed when
+`NANO_V3_REASONING_PARSER_PLUGIN` is unset. For an offline deployment, override
+`tokenizer` and `chat_template` with the downloaded model directory and
+`chat_template.jinja` path.
+
+These public assets provide a fully public serving configuration. They are not
+claimed to be byte-identical to every recipe-specific tokenizer or template
+used by earlier reference-score experiments. A result produced with such
+overrides must record their paths, revisions or hashes separately instead of
+presenting them as requirements of the public benchmark profile. A tokenizer
+warning observed with an older serving stack is evidence of version or asset
+drift in that run, not a general WebVoyager compatibility rule.
+
+## Using other policy models
+
+Do not substitute a tokenizer from another model merely because both servers
+use the OpenAI API or the same tokenizer class. A local model should use the
+tokenizer, multimodal processor, chat template, reasoning parser and tool-call
+parser published or documented for that checkpoint. Token IDs must agree with
+the model embeddings and special-token configuration; multimodal placeholders
+must render correctly; and the selected parser must recognize the template's
+tool-call syntax.
+
+For an externally managed endpoint, those serving choices remain outside Gym.
+Compatibility with this benchmark is verified at the API boundary: send one
+image and the native browser tool schemas, confirm that the endpoint returns a
+standard `tool_calls` entry with an allowed function name and JSON arguments,
+then complete a one-task rollout before scaling out. This serving contract is
+independent of the browser backend. The native Playwright/PyAutoGUI route and
+the legacy Selenium/BrowserGym route can call the same policy endpoint.
+
 ## Required run inputs
 
 1. Set `WEBVOYAGER_SOURCE_JSONL` and run the native prepare script.
-2. Provide reviewed paths for the tokenizer, chat template and reasoning
-   parser plugin in the public v3 model config. Stage the public-v3 multimodal
-   template as a separate immutable runtime asset and pass that explicit path
-   to vLLM; do not rely on an implicit model-directory fallback. The tokenizer
-   is not optional:
-   serving directly from the public checkpoint currently emits the Mistral
-   regex warning and is not equivalent to the launcher's explicit Nano
-   tokenizer input.
+2. Point `POLICY_BASE_URL` at a compatible external endpoint, or prepare the
+   public local-serving assets above and set
+   `NANO_V3_REASONING_PARSER_PLUGIN`. Record explicit tokenizer/template
+   overrides only when reproducing a separately defined serving recipe.
 3. Start every native resource-server instance under a unique 1920x1080 Xvfb
    display. `max_sessions=1` is intentional: PyAutoGUI is display-global.
    Install `xclip` in the browser image. PyAutoGUI cannot emit non-ASCII
@@ -103,8 +168,8 @@ the browser clamps the value again before calling PyAutoGUI. This matches the
 reference worker-safety guard and prevents extreme model-generated values from
 stalling a worker.
 
-Prepare the private benchmark composition with the same locked CLI used by the
-root repository:
+Prepare the local, gitignored benchmark composition with the same locked CLI
+used by the root repository:
 
 ```bash
 cd /path/to/Gym
