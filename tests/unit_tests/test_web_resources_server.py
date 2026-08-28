@@ -366,3 +366,18 @@ async def test_verify_maps_valid_invalid_and_infrastructure_results() -> None:
     assert failed.mask_sample is True
     assert failed.failure_kind == "verifier_error:RuntimeError"
     assert manager.closed == ["session-a", "session-a", "session-a"]
+
+
+@pytest.mark.asyncio
+async def test_verify_cleanup_failure_does_not_replace_successful_verdict() -> None:
+    manager = FakeManager()
+    manager.failures["close_session"] = RuntimeError("lease release failed")
+    server = _server(manager)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session-a"})
+
+    result = await server.verify(request, _verify_request())
+
+    assert result.reward == 1.0
+    assert result.raw_score == 0.75
+    assert result.task_success is True
+    assert result.mask_sample is False

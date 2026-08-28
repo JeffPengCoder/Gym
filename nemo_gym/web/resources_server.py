@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hmac
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -36,6 +37,9 @@ from nemo_gym.web.session import (
     SessionNotFoundError,
 )
 from nemo_gym.web.session_manager import WebSessionManager
+
+
+LOG = logging.getLogger("nemo_gym.web.resources_server")
 
 
 def _error_response(*, status_code: int, detail: str, error_kind: str, retryable: bool) -> JSONResponse:
@@ -254,7 +258,10 @@ class WebResourcesServer(SimpleResourcesServer):
                 failure_kind=f"verifier_error:{type(exc).__name__}",
             )
         finally:
-            await self._manager.close_session(session_id)
+            try:
+                await self._manager.close_session(session_id)
+            except Exception:  # noqa: BLE001 - cleanup must not replace a decided verdict.
+                LOG.exception("Web verifier cleanup failed for session=%s", session_id)
 
     async def healthz(self):
         return await self._manager.health()
