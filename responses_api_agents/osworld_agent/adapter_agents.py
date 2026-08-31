@@ -815,9 +815,4 @@ class NemotronV3NanoOmniAgent:
         # Keep only parser semantics in the agent's rolling text history.
         self.cots.append({key: value for key, value in parsed_info.items() if key != "model_calls"})
 
-        if len(self.actions) >= self.max_steps and not any(action in {"DONE", "FAIL"} for action in actions):
-            parsed_info["code"] = "FAIL"
-            parsed_info["mask_sample"] = True
-            parsed_info["termination_reason"] = "max_steps"
-            return content, ["FAIL"], parsed_info
         return content, actions, parsed_info

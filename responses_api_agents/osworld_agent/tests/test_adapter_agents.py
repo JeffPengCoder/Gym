@@ -557,7 +557,7 @@ def test_nemotron_agent_uses_the_maintained_checkpoint_prompt_contract() -> None
     assert "The password of the computer is" not in agent.system_prompt
 
 
-def test_nemotron_agent_turns_last_nonterminal_step_into_fail() -> None:
+def test_nemotron_agent_preserves_last_nonterminal_action_for_runner() -> None:
     agent = NemotronV3NanoOmniAgent(model="policy", max_steps=1)
     agent.call_llm = lambda _payload, _model: {  # type: ignore[method-assign]
         "content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(1, 2)\n```",
@@ -566,10 +566,10 @@ def test_nemotron_agent_turns_last_nonterminal_step_into_fail() -> None:
 
     _response, actions, info = agent.predict("Try the task.", {"screenshot": b"fake-png"})
 
-    assert actions == ["FAIL"]
-    assert info["code"] == "FAIL"
-    assert info["mask_sample"] is True
-    assert info["termination_reason"] == "max_steps"
+    assert actions == ["pyautogui.click(1, 2)"]
+    assert info["code"] == "pyautogui.click(1, 2)"
+    assert "mask_sample" not in info
+    assert "termination_reason" not in info
 
 
 def test_nemotron_agent_masks_exhausted_length_response() -> None:

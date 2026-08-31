@@ -882,6 +882,10 @@ def test_prompt_agent_runner_normalizes_computer_13_actions(monkeypatch) -> None
     assert FakeEnv.instances[0].actions == [
         {"action_type": "CLICK", "parameters": {"x": 753, "y": 45, "button": "left"}}
     ]
+    assert result.finished is False
+    assert result.reward == 1.0
+    assert result.mask_sample is True
+    assert result.termination_reason == "max_steps"
 
 
 def test_prompt_agent_runner_strips_thinking_before_native_agent_parse(monkeypatch) -> None:
