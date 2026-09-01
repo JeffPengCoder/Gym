@@ -34,8 +34,11 @@ semantics. `responses_create_params` supplies per-rollout sampling overrides.
 A completed response includes:
 
 - Gym `reward`, using binary or raw OSWorld reward according to `reward_mode`;
-- `mask_sample`, set for infrastructure failures, timeouts, and unfinished
-  rollouts whose reward is not suitable for training;
+- `runtime_eligible` plus `runtime_admission_reason` and policy identity;
+  `mask_sample` remains the backward-compatible inverse carrier for
+  infrastructure, timeout, and evaluator failures;
+- `horizon_reached` and `evaluation_completed`, so an evaluated `max_steps`
+  outcome is not confused with corrupt runtime data;
 - `verifier_metadata.osworld_score`, `osworld_steps`, completion/error state,
   termination reason, model identity, artifact directory, and proxy provenance;
 - a schema-v2 `trajectory_contract` and one semantic `(state, action, reward,
@@ -78,10 +81,22 @@ The trace-aware NeMo-RL launcher derives and stamps `rollout_id` inside that
 object and binds a runtime generation contract before training dispatch.
 Standalone benchmarks derive a stable identity automatically and still emit
 the same semantic contract. A trainer must fail closed unless the identity is
-caller-owned, exact evidence is complete, and runtime admission proves the
-tokenizer/template/processor contract. The `context_compaction_contract` wire
-name is retained for compatibility with the existing NeMo-RL physical-trace
-reconstructor; it is evidence capability, not a Gym training switch.
+caller-owned, exact evidence is complete, runtime admission is valid, and its
+own tokenizer/template/processor contract passes. Gym exposes the first two
+admission layers independently: `trajectory_contract.runtime_admission`
+classifies VM/evaluator trust, while `exact_trace_admission` reports evidence
+facts and leaves the final loss/token decision to the training consumer. The
+legacy `training_eligibility` and `eligible` fields remain compatibility views.
+The `context_compaction_contract` wire name is retained for compatibility with
+the existing NeMo-RL physical-trace reconstructor; it is evidence capability,
+not a Gym training switch.
+
+At `max_steps`, the runner executes the last valid action first, evaluates the
+resulting VM state, preserves score/reward, records
+`termination_reason=max_steps` and `horizon_reached=true`, and then applies
+runtime admission. Both reward-zero and reward-one horizons remain
+runtime-eligible when evaluation completed. The model adapter never fabricates
+`FAIL` and never decides `mask_sample`; it reports parse and transport facts.
 
 OSWorld continues to evaluate inside `env.evaluate()`. The environment backend
 is selectable between OSWorld's provider directly and Gym Sandbox. In the
@@ -95,6 +110,7 @@ service endpoints, status, and cleanup.
 | --- | --- |
 | `app.py` | Gym server, request validation, model transport, Ray dispatch, response and aggregate metrics |
 | `client.py` | `DesktopEnv` lifecycle, cache staging, action execution, evaluation, logging, and artifacts |
+| `rollout_outcome.py` | Termination classification and runtime admission; never changes actions, score, or reward |
 | `runner_registry.py` | Runner names, upstream class paths, and default observation/action contracts |
 | `adapter_agents.py` | Gym-owned model scaffolds, including `NemotronV3NanoOmniAgent` |
 | `trajectory.py` | Model-independent semantic trajectory identity, transitions, and evidence capabilities |

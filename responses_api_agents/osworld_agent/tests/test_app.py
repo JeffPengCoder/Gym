@@ -40,6 +40,10 @@ from responses_api_agents.osworld_agent.app import (
     _resolve_run_rollout_purpose,
     _validate_runner_runtime,
 )
+from responses_api_agents.osworld_agent.rollout_outcome import (
+    LEGACY_RUNTIME_ADMISSION_POLICY_ID,
+    RUNTIME_ADMISSION_POLICY_ID,
+)
 from responses_api_agents.osworld_agent.trajectory import resolve_trajectory_identity, stable_id
 
 
@@ -56,6 +60,12 @@ DEFAULT_RUN_RESULT: Dict[str, Any] = {
     "reward": 1.0,
     "score": 1.0,
     "finished": True,
+    "horizon_reached": False,
+    "evaluation_completed": True,
+    "runtime_eligible": True,
+    "runtime_admission_reason": "valid_evaluated_outcome",
+    "runtime_admission_policy_id": RUNTIME_ADMISSION_POLICY_ID,
+    "mask_sample": False,
     "error": None,
     "artifact_dir": "/tmp/osworld-artifacts/chrome/test-task-001",
     "steps": [
@@ -220,7 +230,7 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(
 
 @patch("openai.DefaultHttpxClient")
 @patch("openai.OpenAI")
-def test_messages_model_fn_logs_length_response_before_rejecting_it(
+def test_messages_model_fn_preserves_structured_length_response_for_adapter_facts(
     mock_openai, _mock_http_client, monkeypatch, tmp_path
 ) -> None:
     log_path = tmp_path / "model-io-length.jsonl"
@@ -244,6 +254,42 @@ def test_messages_model_fn_logs_length_response_before_rejecting_it(
     )
     messages = [{"role": "user", "content": "inspect"}]
 
+    normalized = call(
+        messages,
+        {
+            "model": "policy",
+            "messages": messages,
+            "max_tokens": 2048,
+            "temperature": 1.0,
+            "_nemo_gym_return_message": True,
+            "_nemo_gym_require_stop": True,
+        },
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert [row["event"] for row in rows] == ["model_request", "model_response"]
+    assert rows[-1]["finish_reason"] == "length"
+    assert rows[-1]["normalized_response"]["generation_token_ids"] == [3, 4]
+    assert normalized["finish_reason"] == "length"
+    assert normalized["prompt_token_ids"] == [1, 2]
+    assert normalized["generation_token_ids"] == [3, 4]
+    assert normalized["generation_log_probs"] == [-0.1, -0.2]
+
+
+@patch("openai.DefaultHttpxClient")
+@patch("openai.OpenAI")
+def test_messages_model_fn_keeps_nonstructured_finish_reason_guard(mock_openai, _mock_http_client) -> None:
+    message = SimpleNamespace(content="partial action", tool_calls=[], model_extra={})
+    mock_openai.return_value.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason="length")]
+    )
+    call = _build_messages_model_fn(
+        base_url="http://policy/v1",
+        model_name="policy",
+        api_key="test-key",  # pragma: allowlist secret
+    )
+    messages = [{"role": "user", "content": "inspect"}]
+
     with pytest.raises(ValueError, match="finish_reason='length'"):
         call(
             messages,
@@ -252,15 +298,9 @@ def test_messages_model_fn_logs_length_response_before_rejecting_it(
                 "messages": messages,
                 "max_tokens": 2048,
                 "temperature": 1.0,
-                "_nemo_gym_return_message": True,
                 "_nemo_gym_require_stop": True,
             },
         )
-
-    rows = [json.loads(line) for line in log_path.read_text().splitlines()]
-    assert [row["event"] for row in rows] == ["model_request", "model_response"]
-    assert rows[-1]["finish_reason"] == "length"
-    assert rows[-1]["normalized_response"]["generation_token_ids"] == [3, 4]
 
 
 @patch("openai.DefaultHttpxClient")
@@ -785,8 +825,107 @@ def test_build_response_always_emits_semantic_trajectory() -> None:
     assert contract["identity_source"] == "derived"
     assert contract["capabilities"]["semantic_trajectory"] is True
     assert contract["capabilities"]["exact_model_call_evidence"] is False
+    assert contract["runtime_admission"] == {
+        "eligible": True,
+        "reason": "valid_evaluated_outcome",
+        "policy_id": RUNTIME_ADMISSION_POLICY_ID,
+    }
+    assert contract["exact_trace_admission"] == {
+        "decision_owner": "training_consumer",
+        "evidence_complete": False,
+        "caller_identity_available": False,
+        "incomplete_reasons": [
+            "caller_owned_rollout_identity_unavailable",
+            "model_call_evidence_unavailable",
+        ],
+    }
+    assert response.runtime_eligible is True
+    assert response.mask_sample is False
     assert response.response.context_compaction_contract is None
     assert len(response.response.trajectory_transitions or []) == 2
+
+
+@pytest.mark.parametrize(("score", "reward"), [(0.0, 0.0), (1.0, 1.0)])
+def test_build_response_preserves_evaluated_horizon_without_runtime_mask(score: float, reward: float) -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "score": score,
+        "reward": reward,
+        "finished": False,
+        "horizon_reached": True,
+        "termination_reason": "max_steps",
+    }
+
+    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+
+    assert response.reward == reward
+    assert response.horizon_reached is True
+    assert response.evaluation_completed is True
+    assert response.runtime_eligible is True
+    assert response.mask_sample is False
+    assert response.verifier_metadata["osworld_termination_reason"] == "max_steps"
+    assert response.verifier_metadata["osworld_horizon_reached"] is True
+
+
+def test_build_response_rejects_inconsistent_legacy_runtime_mask() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {**DEFAULT_RUN_RESULT, "mask_sample": True}
+
+    with pytest.raises(ValueError, match="mask_sample must equal not runtime_eligible"):
+        _build_response(request, result, "test-policy", 1.0, 0.9)
+
+
+def test_build_response_rejects_runtime_eligible_before_evaluation() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {**DEFAULT_RUN_RESULT, "evaluation_completed": False}
+
+    with pytest.raises(ValueError, match="before evaluation completes"):
+        _build_response(request, result, "test-policy", 1.0, 0.9)
+
+
+def test_build_response_accepts_legacy_mask_only_child_result() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    legacy_result = {
+        key: value
+        for key, value in DEFAULT_RUN_RESULT.items()
+        if key
+        not in {
+            "horizon_reached",
+            "evaluation_completed",
+            "runtime_eligible",
+            "runtime_admission_reason",
+            "runtime_admission_policy_id",
+        }
+    }
+
+    response = _build_response(request, legacy_result, "test-policy", 1.0, 0.9)
+
+    assert response.runtime_eligible is True
+    assert response.evaluation_completed is True
+    assert response.mask_sample is False
+    assert response.runtime_admission_reason == "legacy_runtime_valid"
+    assert response.runtime_admission_policy_id == LEGACY_RUNTIME_ADMISSION_POLICY_ID
+
+
+def test_build_response_rejects_child_result_without_any_runtime_admission_field() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    malformed_result = {
+        key: value
+        for key, value in DEFAULT_RUN_RESULT.items()
+        if key
+        not in {
+            "horizon_reached",
+            "evaluation_completed",
+            "runtime_eligible",
+            "runtime_admission_reason",
+            "runtime_admission_policy_id",
+            "mask_sample",
+        }
+    }
+
+    with pytest.raises(ValueError, match="must include mask_sample"):
+        _build_response(request, malformed_result, "test-policy", 1.0, 0.9)
 
 
 def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
@@ -1011,6 +1150,81 @@ def test_build_exact_trace_response_derives_identity_for_benchmarking() -> None:
     assert exact_contract["rollout_id"] == trajectory_contract["rollout_id"]
 
 
+def test_runtime_and_exact_trace_admission_are_independent() -> None:
+    request = OSWorldRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        verifier_metadata={"task_id": "task-001"},
+        trajectory_identity={
+            "schema_version": 1,
+            "rollout_id": "rollout-runtime-failure-001",
+            "group_id": "group-runtime-failure-001",
+            "task_id": "task-001",
+            "rollout_index": 0,
+            "attempt_index": 0,
+        },
+    )
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "reward": 0.0,
+        "score": 0.0,
+        "evaluation_completed": False,
+        "runtime_eligible": False,
+        "runtime_admission_reason": "evaluator_error",
+        "mask_sample": True,
+        "termination_reason": "evaluator_error",
+        "steps": [
+            {
+                "step": 0,
+                "model_text": "sampled action",
+                "actions": ["pyautogui.click(1, 2)"],
+                "reward": 0.0,
+                "done": False,
+                "info": {
+                    "agent": {
+                        "model_calls": [
+                            {
+                                "parse_attempt": 1,
+                                "prompt_messages": [{"role": "user", "content": "inspect"}],
+                                "response": {
+                                    "raw_content": "sampled action",
+                                    "prompt_token_ids": [1],
+                                    "generation_token_ids": [2],
+                                    "generation_log_probs": [-0.1],
+                                },
+                                "accepted": True,
+                                "parse_error": None,
+                                "parsed_actions": ["pyautogui.click(1, 2)"],
+                            }
+                        ]
+                    }
+                },
+            }
+        ],
+    }
+
+    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+
+    contract = response.response.trajectory_contract
+    assert contract is not None
+    assert contract["runtime_admission"] == {
+        "eligible": False,
+        "reason": "evaluator_error",
+        "policy_id": RUNTIME_ADMISSION_POLICY_ID,
+    }
+    assert contract["exact_trace_admission"] == {
+        "decision_owner": "training_consumer",
+        "evidence_complete": True,
+        "caller_identity_available": True,
+        "incomplete_reasons": [],
+    }
+    assert contract["training_eligibility"] == {
+        "status": "ineligible",
+        "incomplete_reasons": ["rollout_sample_masked"],
+    }
+    assert response.runtime_eligible is False
+    assert response.mask_sample is True
+
+
 def test_build_response_accepts_generic_caller_trajectory_identity() -> None:
     request = OSWorldRunRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
@@ -1165,6 +1379,12 @@ def test_empty_response_preserves_explicit_semantic_execution_join() -> None:
         "group_id": "group-evaluation-001",
         "task_id": "task-001",
     }
+    assert response.evaluation_completed is False
+    assert response.runtime_eligible is False
+    assert response.mask_sample is True
+    assert response.runtime_admission_reason == "rollout_error"
+    assert response.runtime_admission_policy_id == RUNTIME_ADMISSION_POLICY_ID
+    assert response.verifier_metadata["osworld_termination_reason"] == "rollout_error"
 
 
 def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
@@ -1367,8 +1587,12 @@ class TestApp:
         response = TestClient(agent.setup_webserver()).post("/run", json=payload)
 
         assert response.status_code == 200
-        assert response.json()["rollout_purpose"] == "evaluation"
-        assert response.json()["response"]["execution_context"] == {
+        payload = response.json()
+        assert payload["rollout_purpose"] == "evaluation"
+        assert payload["runtime_eligible"] is True
+        assert payload["runtime_admission_policy_id"] == RUNTIME_ADMISSION_POLICY_ID
+        assert payload["mask_sample"] is False
+        assert payload["response"]["execution_context"] == {
             "schema_version": 1,
             "execution_id": "execution-http-test",
             "sampling_event_id": "sampling-evaluation-http",
@@ -1913,10 +2137,10 @@ class TestApp:
         setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         mock_remote.options.return_value.remote.return_value = MagicMock()
         mock_to_thread.return_value = {
+            **DEFAULT_RUN_RESULT,
             "reward": 0.0,
             "score": 0.4,
             "finished": False,
-            "error": None,
             "steps": [],
         }
 

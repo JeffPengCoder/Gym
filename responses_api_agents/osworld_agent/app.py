@@ -68,6 +68,11 @@ from responses_api_agents.osworld_agent.proxy import (
     parse_env_bool,
     task_requires_proxy,
 )
+from responses_api_agents.osworld_agent.rollout_outcome import (
+    LEGACY_RUNTIME_ADMISSION_POLICY_ID,
+    RolloutOutcomeFacts,
+    classify_rollout_outcome,
+)
 from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NAME, load_attr, resolve_runner_spec
 from responses_api_agents.osworld_agent.trajectory import (
     build_trajectory_envelope,
@@ -513,9 +518,26 @@ class OSWorldAgentResponse(NeMoGymResponse):
 class OSWorldVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     response: OSWorldAgentResponse
-    # NeMo-RL trainer drops the gradient when reward is unreliable. Set true on
-    # timeout / max_steps exhaustion (no DONE/FAIL) / evaluator throw.
+    horizon_reached: bool = False
+    evaluation_completed: bool = True
+    runtime_eligible: bool = True
+    runtime_admission_reason: str = "legacy_runtime_valid"
+    runtime_admission_policy_id: str = LEGACY_RUNTIME_ADMISSION_POLICY_ID
+    # Backward-compatible mirror of runtime admission. Exact-trace and loss
+    # admission remain the training consumer's responsibility.
     mask_sample: bool = False
+
+    @model_validator(mode="after")
+    def validate_runtime_admission(self) -> "OSWorldVerifyResponse":
+        if self.mask_sample == self.runtime_eligible:
+            raise ValueError("mask_sample must equal not runtime_eligible")
+        if self.runtime_eligible and not self.evaluation_completed:
+            raise ValueError("runtime-eligible response requires completed evaluation")
+        for field_name in ("runtime_admission_reason", "runtime_admission_policy_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be a non-empty string")
+        return self
 
 
 def _explicit_trajectory_identity(
@@ -758,13 +780,17 @@ def _build_messages_model_fn(
             finish_reason_error = ValueError(
                 f"Model response did not finish cleanly: finish_reason={choice.finish_reason!r}"
             )
+        structured_response = bool(payload.get("_nemo_gym_return_message"))
         if not model_io_enabled:
-            if finish_reason_error is not None:
+            if finish_reason_error is not None and not structured_response:
                 raise finish_reason_error
-            return _normalize_chat_message(
+            normalized = _normalize_chat_message(
                 choice.message,
-                structured=bool(payload.get("_nemo_gym_return_message")),
+                structured=structured_response,
             )
+            if structured_response and isinstance(normalized, dict):
+                normalized["finish_reason"] = choice.finish_reason
+            return normalized
 
         normalization_error = None
         normalization_exc: Exception | None = None
@@ -772,8 +798,10 @@ def _build_messages_model_fn(
         try:
             normalized = _normalize_chat_message(
                 choice.message,
-                structured=bool(payload.get("_nemo_gym_return_message")),
+                structured=structured_response,
             )
+            if structured_response and isinstance(normalized, dict):
+                normalized["finish_reason"] = choice.finish_reason
         except Exception as exc:  # noqa: BLE001 - log raw output before preserving the original error.
             normalization_exc = exc
             normalization_error = {"type": type(exc).__name__, "message": repr(exc)}
@@ -795,9 +823,10 @@ def _build_messages_model_fn(
             }
         )
         # A length/content-filter termination is not executable, but the raw
-        # response is still essential diagnostic evidence.  Log it before
-        # surfacing the failure to the selected agent.
-        if finish_reason_error is not None:
+        # response is still exact evidence. Structured adapters receive the
+        # finish reason and report it as a parse fact; older text-only callers
+        # retain the fail-fast exception contract.
+        if finish_reason_error is not None and not structured_response:
             raise finish_reason_error
         if normalization_exc is not None:
             raise normalization_exc
@@ -1110,6 +1139,11 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "reward": result.reward,
         "score": result.score,
         "finished": result.finished,
+        "horizon_reached": result.horizon_reached,
+        "evaluation_completed": result.evaluation_completed,
+        "runtime_eligible": result.runtime_eligible,
+        "runtime_admission_reason": result.runtime_admission_reason,
+        "runtime_admission_policy_id": result.runtime_admission_policy_id,
         "error": result.error,
         "mask_sample": result.mask_sample,
         "artifact_dir": result.artifact_dir,
@@ -1590,6 +1624,60 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             )
 
 
+def _runtime_admission_fields(result: Mapping[str, Any]) -> Dict[str, Any]:
+    """Normalize current and legacy child results without weakening fail-closed checks."""
+
+    if "runtime_eligible" not in result:
+        if "mask_sample" not in result:
+            raise ValueError("Legacy OSWorld rollout result must include mask_sample")
+        raw_mask = result["mask_sample"]
+        if not isinstance(raw_mask, bool):
+            raise TypeError("OSWorld rollout mask_sample must be boolean")
+        runtime_eligible = not raw_mask
+        runtime_admission_reason = (
+            "legacy_runtime_valid"
+            if runtime_eligible
+            else str(result.get("termination_reason") or "legacy_runtime_masked")
+        )
+        runtime_admission_policy_id = LEGACY_RUNTIME_ADMISSION_POLICY_ID
+        evaluation_completed = runtime_eligible
+    else:
+        runtime_eligible = result["runtime_eligible"]
+        if not isinstance(runtime_eligible, bool):
+            raise TypeError("OSWorld rollout runtime_eligible must be boolean")
+        raw_mask = result.get("mask_sample", not runtime_eligible)
+        if not isinstance(raw_mask, bool):
+            raise TypeError("OSWorld rollout mask_sample must be boolean")
+        if raw_mask == runtime_eligible:
+            raise ValueError("OSWorld rollout mask_sample must equal not runtime_eligible")
+        runtime_admission_reason = result.get("runtime_admission_reason")
+        runtime_admission_policy_id = result.get("runtime_admission_policy_id")
+        for field, value in (
+            ("runtime_admission_reason", runtime_admission_reason),
+            ("runtime_admission_policy_id", runtime_admission_policy_id),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"OSWorld rollout {field} must be a non-empty string")
+        evaluation_completed = result.get("evaluation_completed")
+        if not isinstance(evaluation_completed, bool):
+            raise TypeError("OSWorld rollout evaluation_completed must be boolean")
+        if runtime_eligible and not evaluation_completed:
+            raise ValueError("OSWorld rollout cannot be runtime_eligible before evaluation completes")
+
+    horizon_reached = result.get("horizon_reached", result.get("termination_reason") == "max_steps")
+    if not isinstance(horizon_reached, bool):
+        raise TypeError("OSWorld rollout horizon_reached must be boolean")
+
+    return {
+        "horizon_reached": horizon_reached,
+        "evaluation_completed": evaluation_completed,
+        "runtime_eligible": runtime_eligible,
+        "runtime_admission_reason": runtime_admission_reason,
+        "runtime_admission_policy_id": runtime_admission_policy_id,
+        "mask_sample": not runtime_eligible,
+    }
+
+
 def _build_response(
     body: OSWorldRunRequest,
     result: Dict[str, Any],
@@ -1612,13 +1700,16 @@ def _build_response(
     steps = result.get("steps", [])
     if not isinstance(steps, list):
         raise TypeError("OSWorld rollout steps must be a list")
+    runtime_admission = _runtime_admission_fields(result)
     verifier_metadata = body.verifier_metadata or {}
     trajectory_fields, model_calls = build_trajectory_envelope(
         steps=steps,
         request_extra=body.model_extra or {},
         verifier_metadata=verifier_metadata,
         model_name=policy_model_name,
-        sample_eligible=not bool(result.get("mask_sample", False)),
+        runtime_eligible=runtime_admission["runtime_eligible"],
+        runtime_admission_reason=runtime_admission["runtime_admission_reason"],
+        runtime_admission_policy_id=runtime_admission["runtime_admission_policy_id"],
     )
     output: List[Dict[str, Any]] = [
         {
@@ -1719,6 +1810,11 @@ def _build_response(
         metadata_steps.append(projected_step)
     metadata["osworld_score"] = result.get("score", 0.0)
     metadata["osworld_finished"] = result.get("finished", False)
+    metadata["osworld_horizon_reached"] = runtime_admission["horizon_reached"]
+    metadata["osworld_evaluation_completed"] = runtime_admission["evaluation_completed"]
+    metadata["osworld_runtime_eligible"] = runtime_admission["runtime_eligible"]
+    metadata["osworld_runtime_admission_reason"] = runtime_admission["runtime_admission_reason"]
+    metadata["osworld_runtime_admission_policy_id"] = runtime_admission["runtime_admission_policy_id"]
     metadata["osworld_error"] = result.get("error")
     metadata["osworld_steps"] = metadata_steps
     metadata["osworld_artifact_dir"] = result.get("artifact_dir")
@@ -1739,7 +1835,7 @@ def _build_response(
         "reward": float(result.get("reward", 0.0)),
         "response": response_dict,
         "verifier_metadata": metadata,
-        "mask_sample": bool(result.get("mask_sample", False)),
+        **runtime_admission,
     }
     return OSWorldVerifyResponse(**response_fields)
 
@@ -1754,11 +1850,21 @@ def _empty_response(
     proxy_configured: Optional[bool] = None,
 ) -> OSWorldVerifyResponse:
     LOG.warning("Returning empty OSWorld response: %s", error)
+    outcome = classify_rollout_outcome(
+        RolloutOutcomeFacts(
+            evaluation_completed=False,
+            infrastructure_failure_reason=termination_reason or "rollout_error",
+        )
+    )
     execution_id = maybe_explicit_execution_id_from_run_body(body)
     metadata = dict(body.verifier_metadata or {})
     metadata["osworld_error"] = error
-    if termination_reason:
-        metadata["osworld_termination_reason"] = termination_reason
+    metadata["osworld_termination_reason"] = outcome.termination_reason
+    metadata["osworld_horizon_reached"] = outcome.horizon_reached
+    metadata["osworld_evaluation_completed"] = outcome.evaluation_completed
+    metadata["osworld_runtime_eligible"] = outcome.runtime_eligible
+    metadata["osworld_runtime_admission_reason"] = outcome.runtime_admission_reason
+    metadata["osworld_runtime_admission_policy_id"] = outcome.runtime_admission_policy_id
     metadata["osworld_proxy_required"] = proxy_required
     metadata["osworld_proxy_enabled"] = proxy_enabled
     metadata["osworld_proxy_configured"] = (
@@ -1795,7 +1901,12 @@ def _empty_response(
         "reward": 0.0,
         "response": response_dict,
         "verifier_metadata": metadata,
-        "mask_sample": True,
+        "horizon_reached": outcome.horizon_reached,
+        "evaluation_completed": outcome.evaluation_completed,
+        "runtime_eligible": outcome.runtime_eligible,
+        "runtime_admission_reason": outcome.runtime_admission_reason,
+        "runtime_admission_policy_id": outcome.runtime_admission_policy_id,
+        "mask_sample": outcome.mask_sample,
     }
     return OSWorldVerifyResponse(**response_fields)
 

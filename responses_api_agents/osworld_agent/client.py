@@ -38,6 +38,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
 from responses_api_agents.osworld_agent.proxy import inspect_proxy_config_file, task_requires_proxy
+from responses_api_agents.osworld_agent.rollout_outcome import (
+    RUNTIME_ADMISSION_POLICY_ID,
+    RolloutOutcomeFacts,
+    classify_rollout_outcome,
+)
 from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
 
 
@@ -132,11 +137,17 @@ class RolloutResult:
     steps: List[StepRecord]
     error: Optional[str] = None
     finished: bool = False  # True iff the loop ended on DONE/FAIL or env.done
-    # NeMo-RL drops the gradient for this sample when reward is unreliable. True iff:
-    #  • error is set (model/evaluator/timeout), or
-    #  • loop exhausted max_steps without DONE/FAIL (finished=False), or
-    #  • task_timeout tripped.
-    mask_sample: bool = False
+    horizon_reached: bool = False
+    evaluation_completed: bool = False
+    # Runtime admission is intentionally narrower than trainer admission.  It
+    # says only whether execution/evaluation is trustworthy; exact trace and
+    # loss-token admission remain trainer-owned.
+    runtime_eligible: bool = False
+    runtime_admission_reason: str = "evaluation_incomplete"
+    runtime_admission_policy_id: str = RUNTIME_ADMISSION_POLICY_ID
+    # Backward-compatible NeMo-RL carrier. Internal constructors keep this
+    # equal to ``not runtime_eligible``.
+    mask_sample: bool = True
     # Absolute path to the per-task log and artifact directory when
     # OSWORLD_TASK_ARTIFACT_ROOT is configured.
     artifact_dir: Optional[str] = None
@@ -144,6 +155,27 @@ class RolloutResult:
     # Resolved Gym-owned model/history behavior. It is deliberately distinct
     # from request-owned sampling parameters and infrastructure provenance.
     agent_contract: Optional[Dict[str, Any]] = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "finished",
+            "horizon_reached",
+            "evaluation_completed",
+            "runtime_eligible",
+            "mask_sample",
+        ):
+            if not isinstance(getattr(self, field_name), bool):
+                raise TypeError(f"RolloutResult.{field_name} must be boolean")
+        if self.mask_sample == self.runtime_eligible:
+            raise ValueError("RolloutResult.mask_sample must equal not runtime_eligible")
+        if self.runtime_eligible and not self.evaluation_completed:
+            raise ValueError("RolloutResult cannot be runtime-eligible before evaluation completes")
+        for field_name in ("runtime_admission_reason", "runtime_admission_policy_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"RolloutResult.{field_name} must be a non-empty string")
+        if self.termination_reason == "max_steps" and not self.horizon_reached:
+            raise ValueError("RolloutResult max_steps termination requires horizon_reached")
 
 
 def _assert_observed_agent_contract(
@@ -1635,10 +1667,13 @@ def _finalize_task_artifacts(
 
     try:
         artifacts.task_logger.info(
-            "OSWorld rollout finished: score=%s reward=%s finished=%s mask_sample=%s error=%r",
+            "OSWorld rollout finished: score=%s reward=%s finished=%s horizon_reached=%s "
+            "runtime_eligible=%s mask_sample=%s error=%r",
             result.score,
             result.reward,
             result.finished,
+            result.horizon_reached,
+            result.runtime_eligible,
             result.mask_sample,
             result.error,
         )
@@ -1652,6 +1687,11 @@ def _finalize_task_artifacts(
                 "reward": result.reward,
                 "score": result.score,
                 "finished": result.finished,
+                "horizon_reached": result.horizon_reached,
+                "evaluation_completed": result.evaluation_completed,
+                "runtime_eligible": result.runtime_eligible,
+                "runtime_admission_reason": result.runtime_admission_reason,
+                "runtime_admission_policy_id": result.runtime_admission_policy_id,
                 "mask_sample": result.mask_sample,
                 "error": result.error,
                 "termination_reason": result.termination_reason,
@@ -1872,14 +1912,25 @@ def run_osworld_task(
 
     def proxy_precondition_failure(reason: str, message: str) -> RolloutResult:
         LOG.error("OSWorld proxy precondition failed for task %s: %s", _safe_task_id(task_config), message)
+        outcome = classify_rollout_outcome(
+            RolloutOutcomeFacts(
+                evaluation_completed=False,
+                infrastructure_failure_reason=reason,
+            )
+        )
         return RolloutResult(
             reward=0.0,
             score=0.0,
             steps=[],
             error=message,
             finished=False,
-            mask_sample=True,
-            termination_reason=reason,
+            horizon_reached=outcome.horizon_reached,
+            evaluation_completed=outcome.evaluation_completed,
+            runtime_eligible=outcome.runtime_eligible,
+            runtime_admission_reason=outcome.runtime_admission_reason,
+            runtime_admission_policy_id=outcome.runtime_admission_policy_id,
+            mask_sample=outcome.mask_sample,
+            termination_reason=outcome.termination_reason,
             agent_contract=effective_agent_contract,
         )
 
@@ -1987,9 +2038,11 @@ def run_osworld_task(
     final_score = 0.0
     timed_out = False
     setup_score_zero = False
+    horizon_reached = False
+    evaluation_completed = False
     agent_terminal_action: Optional[str] = None
-    agent_mask_sample = False
-    agent_mask_reason: Optional[str] = None
+    agent_stop_reason: Optional[str] = None
+    agent_model_call_completed: Optional[bool] = None
     evaluation_error: Optional[str] = None
     proxy_setup_error = False
     rollout_phase = "before_environment"
@@ -2445,14 +2498,24 @@ def run_osworld_task(
                     model_text, actions = prediction[:2]
                     if len(prediction) == 3 and isinstance(prediction[2], dict):
                         agent_step_info = prediction[2]
-                        if agent_step_info.get("mask_sample"):
-                            agent_mask_sample = True
-                            raw_reason = agent_step_info.get("termination_reason")
-                            agent_mask_reason = (
-                                raw_reason if isinstance(raw_reason, str) and raw_reason else "agent_response_invalid"
-                            )
                     model_text = strip_thinking(_model_response_content(model_text))
                     actions = _flatten_actions(actions)
+                    stop_rollout = agent_step_info.get("stop_rollout", False)
+                    if not isinstance(stop_rollout, bool):
+                        raise TypeError("Native OSWorld agent stop_rollout fact must be boolean")
+                    if stop_rollout:
+                        raw_outcome = agent_step_info.get("agent_outcome")
+                        if not isinstance(raw_outcome, str) or not raw_outcome:
+                            raise ValueError("Native OSWorld agent stop_rollout requires agent_outcome")
+                        raw_model_call_completed = agent_step_info.get("model_call_completed")
+                        if not isinstance(raw_model_call_completed, bool):
+                            raise TypeError(
+                                "Native OSWorld agent stop_rollout requires boolean model_call_completed evidence"
+                            )
+                        if actions:
+                            raise ValueError("Native OSWorld agent cannot request stop_rollout and return actions")
+                        agent_stop_reason = raw_outcome
+                        agent_model_call_completed = raw_model_call_completed
                     if runner_spec.kind == "qwen3_omni_agent":
                         actions = _merge_consecutive_pyautogui_actions(actions)
                     if runner_spec.action_space == "computer_13":
@@ -2527,6 +2590,14 @@ def run_osworld_task(
                         **_observation_identity(obs),
                     },
                 )
+                if agent_stop_reason is not None:
+                    if agent_model_call_completed is False:
+                        parse_failure = agent_step_info.get("parse_failure")
+                        failure_message = (
+                            parse_failure.get("last_error") if isinstance(parse_failure, Mapping) else None
+                        )
+                        error = f"model call failed at step {step_idx}: {failure_message or model_text}"
+                    break
                 continue
 
             step_done = False
@@ -2598,12 +2669,16 @@ def run_osworld_task(
             if error:
                 break
 
+        else:
+            horizon_reached = True
+
         # Let the VM settle before scoring, mirroring lib_run_single.py.
         time.sleep(2)
         rollout_error_before_evaluation = error
         try:
             eval_logger = pointer_logger if pointer_agent is not None else task_logger
             final_score = _evaluate_osworld_env(env, eval_logger, disable_gpu=evaluator_disable_gpu)
+            evaluation_completed = True
         except Exception as exc:  # noqa: BLE001
             evaluation_error = f"env.evaluate() failed: {exc}"
             error = evaluation_error
@@ -2644,6 +2719,7 @@ def run_osworld_task(
     except _EvaluatorScoreZero as exc:
         setup_score_zero = True
         finished = True
+        evaluation_completed = True
         final_score = 0.0
         error = None
         task_logger.info("OSWorld setup established score zero before evaluation: %s", exc)
@@ -2687,37 +2763,46 @@ def run_osworld_task(
         reward = float(final_score)
     else:
         reward = 1.0 if final_score >= 1.0 else 0.0
-    # mask_sample: reward is unreliable if (a) anything errored, (b) timeout,
-    # or (c) loop exhausted max_steps without the model emitting DONE/FAIL, or
-    # (d) the selected agent generated a synthetic terminal action after an
-    # invalid/truncated response.  Explicit model-authored DONE/FAIL remains
-    # eligible; only the agent's explicit mask carrier changes admission.
-    mask_sample = bool(error) or timed_out or not finished or agent_mask_sample
-    if timed_out:
-        termination_reason = "timeout"
-    elif setup_score_zero:
-        termination_reason = "setup_score_zero"
-    elif evaluation_error:
-        termination_reason = "evaluator_error"
-    elif proxy_setup_error:
-        termination_reason = "proxy_setup_error"
-    elif error:
-        termination_reason = "rollout_error"
-    elif agent_mask_sample:
-        termination_reason = agent_mask_reason or "agent_response_invalid"
-    elif agent_terminal_action is not None:
-        termination_reason = f"agent_{agent_terminal_action.lower()}"
-    elif finished:
-        termination_reason = "environment_done"
-    else:
-        termination_reason = "max_steps"
 
-    if mask_sample:
+    if timed_out:
+        infrastructure_failure_reason = "timeout"
+    elif evaluation_error:
+        infrastructure_failure_reason = "evaluator_error"
+    elif proxy_setup_error:
+        infrastructure_failure_reason = "proxy_setup_error"
+    elif agent_stop_reason is not None and agent_model_call_completed is False:
+        infrastructure_failure_reason = "model_call_failed"
+    elif error:
+        infrastructure_failure_reason = "rollout_error"
+    else:
+        infrastructure_failure_reason = None
+
+    outcome = classify_rollout_outcome(
+        RolloutOutcomeFacts(
+            evaluation_completed=evaluation_completed,
+            infrastructure_failure_reason=infrastructure_failure_reason,
+            setup_score_zero=setup_score_zero,
+            terminal_action=agent_terminal_action,
+            environment_done=finished and agent_terminal_action is None and not setup_score_zero,
+            horizon_reached=horizon_reached,
+            policy_stop_reason=agent_stop_reason,
+        )
+    )
+
+    if outcome.mask_sample:
         task_logger.warning(
-            "OSWORLD_ROLLOUT_MASK|reason=%s|finished=%s|error=%r",
-            termination_reason,
+            "OSWORLD_RUNTIME_ADMISSION|eligible=false|reason=%s|termination=%s|finished=%s|error=%r",
+            outcome.runtime_admission_reason,
+            outcome.termination_reason,
             finished,
             error,
+        )
+    else:
+        task_logger.info(
+            "OSWORLD_RUNTIME_ADMISSION|eligible=true|reason=%s|termination=%s|horizon_reached=%s",
+            outcome.runtime_admission_reason,
+            outcome.termination_reason,
+            outcome.horizon_reached,
         )
 
     result = RolloutResult(
@@ -2726,9 +2811,14 @@ def run_osworld_task(
         steps=steps,
         error=error,
         finished=finished,
-        mask_sample=mask_sample,
+        horizon_reached=outcome.horizon_reached,
+        evaluation_completed=outcome.evaluation_completed,
+        runtime_eligible=outcome.runtime_eligible,
+        runtime_admission_reason=outcome.runtime_admission_reason,
+        runtime_admission_policy_id=outcome.runtime_admission_policy_id,
+        mask_sample=outcome.mask_sample,
         artifact_dir=task_artifacts.directory if task_artifacts is not None else None,
-        termination_reason=termination_reason,
+        termination_reason=outcome.termination_reason,
         agent_contract=effective_agent_contract,
     )
     _finalize_task_artifacts(

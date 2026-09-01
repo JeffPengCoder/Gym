@@ -132,7 +132,7 @@ def test_parse_nemotron_rejects_unlabelled_global_code_block() -> None:
     )
 
     assert action == "<Error>: no explicit ## Code section found"
-    assert commands == ["FAIL"]
+    assert commands == []
 
 
 @pytest.mark.parametrize(
@@ -178,7 +178,7 @@ computer.terminate()
     )
 
     assert action.startswith("<Error>")
-    assert commands == ["FAIL"]
+    assert commands == []
 
 
 def test_parse_nemotron_does_not_infer_status_from_answer_text() -> None:
@@ -197,7 +197,7 @@ Stop.
     )
 
     assert action.startswith("<Error>")
-    assert commands == ["FAIL"]
+    assert commands == []
 
 
 def test_parse_nemotron_accepts_unfenced_code_section() -> None:
@@ -531,8 +531,14 @@ def test_nemotron_preserves_model_call_when_python_is_invalid() -> None:
 
     error, actions, info = agent.predict("Type the text.", {"screenshot": b"fake-png"})
 
-    assert actions == ["FAIL"]
+    assert actions == []
     assert "unterminated string literal" in error
+    assert info["agent_outcome"] == "model_response_invalid"
+    assert info["stop_rollout"] is True
+    assert info["model_call_completed"] is True
+    assert info["parse_failure"]["last_failure_stage"] == "response_parse"
+    assert "mask_sample" not in info
+    assert "termination_reason" not in info
     assert info["model_calls"][0]["response"] == response
     assert info["model_calls"][0]["prompt_messages"][-1]["role"] == "user"
     assert info["model_calls"][0]["accepted"] is False
@@ -573,21 +579,58 @@ def test_nemotron_agent_preserves_last_nonterminal_action_for_runner() -> None:
     assert "termination_reason" not in info
 
 
-def test_nemotron_agent_masks_exhausted_length_response() -> None:
+def test_nemotron_agent_reports_exhausted_length_response_without_deciding_admission() -> None:
     agent = NemotronV3NanoOmniAgent(model="policy", max_steps=2, parse_retries=1)
 
     def truncated(_payload, _model):
-        raise ValueError("Model response did not finish cleanly: finish_reason='length'")
+        return {
+            "content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(1, 2)",
+            "raw_content": "truncated sampled response",
+            "prompt_token_ids": [1],
+            "generation_token_ids": [2],
+            "generation_log_probs": [-0.1],
+            "finish_reason": "length",
+        }
 
     agent.call_llm = truncated  # type: ignore[method-assign]
 
     response, actions, info = agent.predict("Try the task.", {"screenshot": b"fake-png"})
 
     assert "finish_reason='length'" in response
-    assert actions == ["FAIL"]
-    assert info["mask_sample"] is True
-    assert info["termination_reason"] == "model_response_invalid"
+    assert actions == []
+    assert info["agent_outcome"] == "model_response_invalid"
+    assert info["stop_rollout"] is True
+    assert info["model_call_completed"] is True
+    assert info["parse_failure"]["last_failure_stage"] == "response_parse"
+    assert "mask_sample" not in info
+    assert "termination_reason" not in info
     assert info["model_calls"][0]["accepted"] is False
+    assert info["model_calls"][0]["response"]["finish_reason"] == "length"
+
+
+def test_nemotron_agent_reports_model_transport_failure_as_a_fact() -> None:
+    agent = NemotronV3NanoOmniAgent(model="policy", max_steps=2, parse_retries=1)
+
+    def unavailable(_payload, _model):
+        raise ConnectionError("policy endpoint unreachable")
+
+    agent.call_llm = unavailable  # type: ignore[method-assign]
+
+    response, actions, info = agent.predict("Try the task.", {"screenshot": b"fake-png"})
+
+    assert response == "policy endpoint unreachable"
+    assert actions == []
+    assert info["agent_outcome"] == "model_response_invalid"
+    assert info["stop_rollout"] is True
+    assert info["model_call_completed"] is False
+    assert info["parse_failure"] == {
+        "attempt_count": 1,
+        "completed_model_call_count": 0,
+        "last_failure_stage": "model_call",
+        "last_error_type": "ConnectionError",
+        "last_error": "policy endpoint unreachable",
+    }
+    assert "mask_sample" not in info
 
 
 def test_nemotron_agent_retries_invalid_python_action() -> None:

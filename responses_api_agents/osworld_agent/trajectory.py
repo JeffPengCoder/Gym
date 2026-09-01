@@ -333,7 +333,7 @@ def collect_model_calls(
     steps: Sequence[Mapping[str, Any]],
     *,
     trajectory_id: str,
-    sample_eligible: bool,
+    runtime_eligible: bool,
     media_assets: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Collect model-call records without assuming one call per env step."""
@@ -428,7 +428,11 @@ def collect_model_calls(
                     "parsed_actions": list(parsed_actions),
                     "reward": reward,
                     "done": bool(step.get("done", False)),
-                    "eligible": sample_eligible,
+                    # ``eligible`` is the legacy wire carrier. It mirrors only
+                    # Gym runtime admission; exact-trace/loss admission is a
+                    # separate trainer decision.
+                    "eligible": runtime_eligible,
+                    "runtime_eligible": runtime_eligible,
                 }
             )
     return model_calls, sorted(incomplete_reasons)
@@ -440,9 +444,20 @@ def build_trajectory_envelope(
     request_extra: Mapping[str, Any],
     verifier_metadata: Mapping[str, Any],
     model_name: str,
-    sample_eligible: bool,
+    runtime_eligible: bool,
+    runtime_admission_reason: str,
+    runtime_admission_policy_id: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Build the universal semantic trajectory and evidence capability report."""
+
+    if not isinstance(runtime_eligible, bool):
+        raise TypeError("runtime_eligible must be boolean")
+    for field, value in (
+        ("runtime_admission_reason", runtime_admission_reason),
+        ("runtime_admission_policy_id", runtime_admission_policy_id),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field} must be a non-empty string")
 
     identity = resolve_trajectory_identity(
         request_extra=request_extra,
@@ -454,7 +469,7 @@ def build_trajectory_envelope(
     model_calls, evidence_reasons = collect_model_calls(
         steps,
         trajectory_id=trajectory_id,
-        sample_eligible=sample_eligible,
+        runtime_eligible=runtime_eligible,
         media_assets=media_assets,
     )
     calls_by_step: dict[int, list[dict[str, Any]]] = {}
@@ -495,19 +510,21 @@ def build_trajectory_envelope(
                     "observation": dict(step.get("next_state") or {}),
                 },
                 "done": bool(step.get("done", False)),
-                "eligible": sample_eligible,
+                "eligible": runtime_eligible,
+                "runtime_eligible": runtime_eligible,
             }
         )
 
     exact_model_call_evidence = bool(model_calls) and not evidence_reasons
-    eligibility_reasons = list(evidence_reasons)
-    if not sample_eligible:
-        eligibility_reasons.append("rollout_sample_masked")
+    exact_trace_reasons = list(evidence_reasons)
     if identity["identity_source"] != "caller":
-        eligibility_reasons.append("caller_owned_rollout_identity_unavailable")
+        exact_trace_reasons.append("caller_owned_rollout_identity_unavailable")
+    eligibility_reasons = list(exact_trace_reasons)
+    if not runtime_eligible:
+        eligibility_reasons.append("rollout_sample_masked")
     status = (
         "requires_runtime_admission"
-        if exact_model_call_evidence and sample_eligible and identity["identity_source"] == "caller"
+        if exact_model_call_evidence and runtime_eligible and identity["identity_source"] == "caller"
         else "ineligible"
     )
     contract_without_id = {
@@ -524,6 +541,20 @@ def build_trajectory_envelope(
             "arbitrary_prompt_rewrites": exact_model_call_evidence,
             "trainable_token_reconstruction": exact_model_call_evidence,
         },
+        "runtime_admission": {
+            "eligible": runtime_eligible,
+            "reason": runtime_admission_reason,
+            "policy_id": runtime_admission_policy_id,
+        },
+        "exact_trace_admission": {
+            "decision_owner": "training_consumer",
+            "evidence_complete": exact_model_call_evidence,
+            "caller_identity_available": identity["identity_source"] == "caller",
+            "incomplete_reasons": sorted(set(exact_trace_reasons)),
+        },
+        # Compatibility view for existing exact-trace consumers. New code
+        # should combine runtime_admission with exact_trace_admission instead
+        # of treating this field as a Gym-owned algorithm decision.
         "training_eligibility": {
             "status": status,
             "incomplete_reasons": sorted(set(eligibility_reasons)),
@@ -553,6 +584,7 @@ def build_trajectory_envelope(
             "reward": call["reward"],
             "done": call["done"],
             "eligible": call["eligible"],
+            "runtime_eligible": call["runtime_eligible"],
             "accepted": call["accepted"],
             "parse_error": call["parse_error"],
             "generation_evidence": {

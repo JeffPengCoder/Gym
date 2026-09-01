@@ -688,6 +688,50 @@ def test_raw_reward_mode_preserves_partial_osworld_score(monkeypatch) -> None:
     assert result.finished is True
 
 
+def test_evaluator_failure_remains_runtime_ineligible(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    def fail_evaluation(_self):
+        raise RuntimeError("evaluator unavailable")
+
+    monkeypatch.setattr(FakeEnv, "evaluate", fail_evaluation)
+    result = osworld_client.run_osworld_task(
+        {"id": "evaluator-failure", "instruction": "Finish the task."},
+        model_fn=lambda _system, _instruction, _history: "```DONE```",
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.finished is True
+    assert result.evaluation_completed is False
+    assert result.runtime_eligible is False
+    assert result.mask_sample is True
+    assert result.termination_reason == "evaluator_error"
+    assert "evaluator unavailable" in (result.error or "")
+
+
+def test_rollout_result_rejects_admission_field_drift() -> None:
+    with pytest.raises(ValueError, match="mask_sample must equal not runtime_eligible"):
+        osworld_client.RolloutResult(
+            reward=0.0,
+            score=0.0,
+            steps=[],
+            evaluation_completed=True,
+            runtime_eligible=True,
+            mask_sample=True,
+        )
+    with pytest.raises(ValueError, match="before evaluation completes"):
+        osworld_client.RolloutResult(
+            reward=0.0,
+            score=0.0,
+            steps=[],
+            evaluation_completed=False,
+            runtime_eligible=True,
+            mask_sample=False,
+        )
+
+
 def test_setup_score_zero_returns_valid_unmasked_zero(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 
@@ -883,8 +927,39 @@ def test_prompt_agent_runner_normalizes_computer_13_actions(monkeypatch) -> None
         {"action_type": "CLICK", "parameters": {"x": 753, "y": 45, "button": "left"}}
     ]
     assert result.finished is False
+    assert result.horizon_reached is True
+    assert result.evaluation_completed is True
     assert result.reward == 1.0
-    assert result.mask_sample is True
+    assert result.runtime_eligible is True
+    assert result.mask_sample is False
+    assert result.termination_reason == "max_steps"
+
+
+def test_horizon_preserves_evaluated_zero_as_runtime_eligible(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    FakePromptAgent.next_actions = [{"action_type": "LEFT_CLICK", "x": 753, "varies": 45}]
+    monkeypatch.setattr(FakeEnv, "evaluate", lambda _self: 0.0)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-horizon-zero", "instruction": "Try once, then evaluate."},
+        model_fn=lambda *_args: "unused",
+        runner_name="prompt_agent_computer_13",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePromptAgent",
+        messages_model_fn=lambda _messages, _payload: "native response",
+        max_steps=1,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert len(FakeEnv.instances[0].actions) == 1
+    assert result.finished is False
+    assert result.horizon_reached is True
+    assert result.evaluation_completed is True
+    assert result.score == 0.0
+    assert result.reward == 0.0
+    assert result.runtime_eligible is True
+    assert result.mask_sample is False
     assert result.termination_reason == "max_steps"
 
 
@@ -1124,21 +1199,23 @@ def test_nemotron_v3_nano_omni_runner_uses_gym_messages_transport(monkeypatch) -
     assert FakeNemotronAgent.instances[0].kwargs["max_steps"] == 100
 
 
-def test_nemotron_synthetic_fail_is_masked(monkeypatch) -> None:
+def test_nemotron_invalid_sample_stops_without_synthetic_fail(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 
-    def synthetic_fail(_self, _instruction, _obs):
+    def invalid_sample(_self, _instruction, _obs):
         return (
             "Model response did not finish cleanly: finish_reason='length'",
-            ["FAIL"],
+            [],
             {
-                "mask_sample": True,
-                "termination_reason": "model_response_invalid",
+                "agent_outcome": "model_response_invalid",
+                "stop_rollout": True,
+                "model_call_completed": True,
+                "parse_failure": {"last_error": "finish_reason='length'"},
                 "model_calls": [],
             },
         )
 
-    monkeypatch.setattr(FakeNemotronAgent, "predict", synthetic_fail)
+    monkeypatch.setattr(FakeNemotronAgent, "predict", invalid_sample)
     result = osworld_client.run_osworld_task(
         {"id": "task-nano-length", "instruction": "Use the scaffold."},
         model_fn=lambda *_args: pytest.fail("Nemotron should not use model_fn"),
@@ -1156,10 +1233,52 @@ def test_nemotron_synthetic_fail_is_masked(monkeypatch) -> None:
         task_timeout=10,
     )
 
-    assert result.finished is True
-    assert result.mask_sample is True
+    assert result.finished is False
+    assert result.horizon_reached is False
+    assert result.evaluation_completed is True
+    assert result.runtime_eligible is True
+    assert result.mask_sample is False
     assert result.termination_reason == "model_response_invalid"
-    assert result.steps[0].actions == ["FAIL"]
+    assert result.steps[0].actions == []
+    assert FakeEnv.instances[0].actions == []
+
+
+def test_nemotron_model_transport_failure_stops_and_masks(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    def unavailable(_self, _instruction, _obs):
+        return (
+            "policy endpoint unreachable",
+            [],
+            {
+                "agent_outcome": "model_response_invalid",
+                "stop_rollout": True,
+                "model_call_completed": False,
+                "parse_failure": {"last_error": "policy endpoint unreachable"},
+                "model_calls": [],
+            },
+        )
+
+    monkeypatch.setattr(FakeNemotronAgent, "predict", unavailable)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-nano-unreachable", "instruction": "Use the scaffold."},
+        model_fn=lambda *_args: pytest.fail("Nemotron should not use model_fn"),
+        runner_name="nemotron_v3_nano_omni_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakeNemotronAgent",
+        messages_model_fn=lambda *_args: pytest.fail("predict is stubbed"),
+        policy_model_name="nemotron-3-nano-omni-under-test",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.finished is False
+    assert result.evaluation_completed is True
+    assert result.runtime_eligible is False
+    assert result.mask_sample is True
+    assert result.termination_reason == "model_call_failed"
+    assert "policy endpoint unreachable" in (result.error or "")
+    assert FakeEnv.instances[0].actions == []
 
 
 def test_nemotron_model_authored_fail_remains_unmasked(monkeypatch) -> None:

@@ -381,19 +381,19 @@ def parse_nemotron_response(
     code_section = _extract_markdown_section(content, "Code")
     if code_section is None:
         error = "<Error>: no explicit ## Code section found"
-        return error, ["FAIL"], sections
+        return error, [], sections
     code_blocks = _CODE_BLOCK_RE.findall(code_section)
     if code_blocks:
         raw_code = code_blocks[-1].strip()
     else:
         if code_section.startswith("```"):
             error = "<Error>: unsupported or unterminated Code fence"
-            return error, ["FAIL"], sections
+            return error, [], sections
         raw_code = code_section
     original_code = normalize_python_code_newlines(raw_code).strip()
     if not original_code:
         error = "<Error>: the ## Code section is empty"
-        return error, ["FAIL"], sections
+        return error, [], sections
     if original_code != raw_code:
         sections["raw_code"] = raw_code
     sections["original_code"] = original_code
@@ -409,7 +409,7 @@ def parse_nemotron_response(
         )
         if not status_match:
             error = "<Error>: computer.terminate is missing a success/failure status"
-            return error, ["FAIL"], sections
+            return error, [], sections
         terminal = "DONE" if status_match.group(1).lower() == "success" else "FAIL"
         sections["code"] = terminal
         return action or original_code, [terminal], sections
@@ -423,7 +423,7 @@ def parse_nemotron_response(
     sections["code"] = projected
     if not projected:
         error = "<Error>: the ## Code section is empty"
-        return error, ["FAIL"], sections
+        return error, [], sections
     # Action and Thought are descriptive metadata; a missing description must
     # not discard an explicit, validated Code section. Keep the inference
     # visible in parser logs and textual history.
@@ -836,6 +836,9 @@ class NemotronV3NanoOmniAgent:
         request_messages = messages
         repeated_action_warning = bool(self._repeated_action_guidance())
         last_error = "No response"
+        last_error_type = "RuntimeError"
+        last_failure_stage = "model_call"
+        completed_model_calls = 0
         model_calls: List[Dict[str, Any]] = []
         parsed_info: Dict[str, Any] = {"model_calls": model_calls}
 
@@ -876,9 +879,15 @@ class NemotronV3NanoOmniAgent:
                 "parsed_actions": [],
                 **self.snapshot_window,
             }
+            model_call_completed = False
             try:
                 response = self.call_llm(payload, self.model)
+                model_call_completed = True
+                completed_model_calls += 1
                 model_call_record["response"] = _jsonable(response)
+                finish_reason = response.get("finish_reason") if isinstance(response, Mapping) else None
+                if finish_reason is not None and finish_reason not in {"stop", "tool_calls"}:
+                    raise ValueError(f"Model response did not finish cleanly: finish_reason={finish_reason!r}")
                 content, _reasoning = _response_parts(response)
                 if not content:
                     raise ValueError("model response has no content")
@@ -916,6 +925,9 @@ class NemotronV3NanoOmniAgent:
                 break
             except Exception as exc:  # noqa: BLE001 - malformed model output is retryable.
                 last_error = str(exc)
+                last_error_type = type(exc).__name__
+                last_failure_stage = "response_parse" if model_call_completed else "model_call"
+                model_call_record["failure_stage"] = last_failure_stage
                 model_call_record["parse_error"] = last_error
                 model_call_record["parsed_actions"] = attempt_actions
                 model_calls.append(model_call_record)
@@ -949,9 +961,25 @@ class NemotronV3NanoOmniAgent:
                 if feedback_next:
                     request_messages = self._parse_retry_messages(messages, response, last_error)
         else:
-            parsed_info["mask_sample"] = True
-            parsed_info["termination_reason"] = "model_response_invalid"
-            return last_error, ["FAIL"], parsed_info
+            # Report facts only.  The runner owns rollout termination and the
+            # runtime-admission policy decides whether the result is masked.
+            # In particular, do not turn malformed sampled output into a
+            # synthetic model-authored FAIL action.
+            parsed_info.update(
+                {
+                    "agent_outcome": "model_response_invalid",
+                    "stop_rollout": True,
+                    "model_call_completed": completed_model_calls > 0,
+                    "parse_failure": {
+                        "attempt_count": len(model_calls),
+                        "completed_model_call_count": completed_model_calls,
+                        "last_failure_stage": last_failure_stage,
+                        "last_error_type": last_error_type,
+                        "last_error": last_error,
+                    },
+                }
+            )
+            return last_error, [], parsed_info
 
         actions = [self._scale_windows_scroll(action) for action in actions]
         self.observations.append(obs)
