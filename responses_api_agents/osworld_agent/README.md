@@ -167,6 +167,54 @@ Code, literal newline escaping, reasoning/content separation, tool calls, and
 terminal status syntax. Supported formats should remain explicit rather than
 recovering executable code from arbitrary prose.
 
+### Model protocol and history policy
+
+The Nemotron adapter keeps two independently selectable identities:
+
+- `model_protocol_id` selects prompts, message templates, and response parser;
+- `history_policy` selects which completed turns remain live screenshots and
+  which are folded into text.
+
+Fixed three-image evaluation is explicit:
+
+```yaml
+model_protocol_id: nano-omni-v3-osworld-v1
+history_policy:
+  name: fixed
+  params: {keep_images: 3}
+```
+
+The append-stable 3-10-3 training window is a hysteresis policy:
+
+```yaml
+history_policy:
+  name: hysteresis
+  params: {low_water: 3, high_water: 10}
+```
+
+`agent_contract_parity_mode: strict` is the default. It resolves the training
+and evaluation profiles at startup and refuses to start if their model
+protocol, history policy, or other Gym-owned adapter options differ. To run an
+intentional train/eval comparison, set the mode to `declared` and use
+`history_policy_by_rollout_purpose`; each response then records the selected
+`agent_contract_id`, `history_policy_id`, and `model_protocol_id`.
+
+```yaml
+agent_contract_parity_mode: declared
+history_policy_by_rollout_purpose:
+  training: {name: hysteresis, params: {low_water: 3, high_water: 10}}
+  evaluation: {name: fixed, params: {keep_images: 3}}
+```
+
+Legacy `max_trajectory_length` and `agent_kwargs.max_live_images` settings are
+accepted and normalized to the same identities. The legacy
+`agent_kwargs.max_image_history_length` / `max_live_images` fields cannot be
+mixed with an explicit `history_policy`; once the explicit form is present,
+the top-level `max_trajectory_length` remains only a compatibility field for
+other runners. Runtime exact-trace logic still measures the actual token/media
+prefix. A policy's structural append expectation never overrides that measured
+evidence.
+
 ### PromptAgent variants
 
 The registered upstream PromptAgent variants are:

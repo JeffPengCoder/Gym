@@ -362,8 +362,9 @@ def test_nemotron_automatically_records_exact_calls_with_bounded_images() -> Non
             "Complete the task.",
             {"screenshot": f"png-{index + 1}".encode()},
         )
-        expected_actions = ["pyautogui.click(960, 540)"] if index < 3 else ["FAIL"]
-        assert actions == expected_actions
+        # max_steps termination is runner-owned; the adapter must preserve a
+        # valid model-authored action even on its configured last step.
+        assert actions == ["pyautogui.click(960, 540)"]
         model_call_infos.append(info["model_calls"][0])
 
     image_counts = [

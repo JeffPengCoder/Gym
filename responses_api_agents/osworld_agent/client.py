@@ -141,6 +141,23 @@ class RolloutResult:
     # OSWORLD_TASK_ARTIFACT_ROOT is configured.
     artifact_dir: Optional[str] = None
     termination_reason: Optional[str] = None
+    # Resolved Gym-owned model/history behavior. It is deliberately distinct
+    # from request-owned sampling parameters and infrastructure provenance.
+    agent_contract: Optional[Dict[str, Any]] = None
+
+
+def _assert_observed_agent_contract(
+    expected: Mapping[str, Any],
+    observed: Mapping[str, Any],
+) -> None:
+    """Verify that the instantiated adapter honored both independent axes."""
+
+    for field in ("model_protocol", "history_policy", "agent_options"):
+        if expected.get(field) != observed.get(field):
+            raise ValueError(
+                f"Instantiated OSWorld agent {field} disagrees with the resolved contract: "
+                f"expected={expected.get(field)!r}, observed={observed.get(field)!r}"
+            )
 
 
 @dataclass
@@ -1829,6 +1846,9 @@ def run_osworld_task(
     env_class_path: Optional[str] = None,
     agent_class_path: Optional[str] = None,
     agent_kwargs: Optional[Dict[str, Any]] = None,
+    history_policy: Optional[Mapping[str, Any]] = None,
+    model_protocol_id: Optional[str] = None,
+    agent_contract: Optional[Mapping[str, Any]] = None,
     messages_model_fn: Optional[MessagesModelFn] = None,
     policy_base_url: str = "",
     policy_api_key: str = "",
@@ -1848,6 +1868,7 @@ def run_osworld_task(
     """
     if reward_mode not in {"raw", "binary"}:
         raise ValueError(f"Unsupported reward_mode: {reward_mode!r}")
+    effective_agent_contract = dict(agent_contract) if agent_contract is not None else None
 
     def proxy_precondition_failure(reason: str, message: str) -> RolloutResult:
         LOG.error("OSWorld proxy precondition failed for task %s: %s", _safe_task_id(task_config), message)
@@ -1859,6 +1880,7 @@ def run_osworld_task(
             finished=False,
             mask_sample=True,
             termination_reason=reason,
+            agent_contract=effective_agent_contract,
         )
 
     try:
@@ -1994,6 +2016,15 @@ def run_osworld_task(
             "screen_size": list(screen_size),
             "max_steps": max_steps,
             "max_trajectory_length": max_trajectory_length,
+            "agent_contract_id": (
+                effective_agent_contract.get("agent_contract_id") if effective_agent_contract is not None else None
+            ),
+            "history_policy_id": (
+                (effective_agent_contract.get("history_policy") or {}).get("history_policy_id")
+                if effective_agent_contract is not None
+                else None
+            ),
+            "model_protocol_id": model_protocol_id,
             "sleep_after_execution": sleep_after_execution,
             "task_timeout": task_timeout,
             "model_name": policy_model_name,
@@ -2127,11 +2158,28 @@ def run_osworld_task(
                 "observation_type": runner_spec.observation_type,
                 "screen_size": screen_size,
                 "client_password": client_password,
-                "max_image_history_length": max_trajectory_length,
             }
+            if history_policy is None:
+                nemotron_kwargs["max_image_history_length"] = max_trajectory_length
+            else:
+                nemotron_kwargs["history_policy"] = dict(history_policy)
+            if model_protocol_id is not None:
+                nemotron_kwargs["model_protocol_id"] = model_protocol_id
             nemotron_kwargs.update(runner_spec.agent_kwargs)
             nemotron_kwargs["log_context"] = event_context
             native_agent = agent_cls(**nemotron_kwargs)
+            observed_agent_contract = getattr(native_agent, "agent_contract", None)
+            if effective_agent_contract is not None:
+                if not isinstance(observed_agent_contract, Mapping):
+                    raise ValueError(
+                        "Configured OSWorld agent contract requires the instantiated adapter "
+                        "to expose agent_contract evidence"
+                    )
+                _assert_observed_agent_contract(effective_agent_contract, observed_agent_contract)
+            elif isinstance(observed_agent_contract, Mapping):
+                # Direct library callers do not need to construct the outer
+                # app contract merely to use the adapter.
+                effective_agent_contract = dict(observed_agent_contract)
 
             def _call_nemotron_llm(payload: Dict[str, Any], _model: Optional[str] = None) -> Any:
                 return messages_model_fn(payload["messages"], payload)
@@ -2681,6 +2729,7 @@ def run_osworld_task(
         mask_sample=mask_sample,
         artifact_dir=task_artifacts.directory if task_artifacts is not None else None,
         termination_reason=termination_reason,
+        agent_contract=effective_agent_contract,
     )
     _finalize_task_artifacts(
         task_artifacts,

@@ -35,11 +35,12 @@ from responses_api_agents.osworld_agent.app import (
     _log_context_headers,
     _model_io_images,
     _normalize_chat_message,
+    _resolve_configured_agent_contract,
     _resolve_policy_model_name,
     _resolve_run_rollout_purpose,
     _validate_runner_runtime,
 )
-from responses_api_agents.osworld_agent.trajectory import resolve_trajectory_identity
+from responses_api_agents.osworld_agent.trajectory import resolve_trajectory_identity, stable_id
 
 
 DEFAULT_OSWORLD_TASK: Dict[str, Any] = {
@@ -733,6 +734,46 @@ def test_resolve_run_rollout_purpose_rejects_carrier_conflict() -> None:
         _resolve_run_rollout_purpose(request)
 
 
+def test_strict_agent_contract_rejects_train_eval_history_drift() -> None:
+    config = make_config(
+        runner_name="nemotron_v3_nano_omni_agent",
+        history_policy_by_rollout_purpose={
+            "training": {
+                "name": "hysteresis",
+                "params": {"low_water": 3, "high_water": 10},
+            },
+            "evaluation": {"name": "fixed", "params": {"keep_images": 3}},
+        },
+    )
+
+    with pytest.raises(ValueError, match="contracts differ"):
+        OSWorldAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def test_declared_agent_contract_selects_and_identifies_each_purpose() -> None:
+    config = make_config(
+        runner_name="nemotron_v3_nano_omni_agent",
+        model_protocol_id="nano-omni-v3-osworld-v1",
+        agent_contract_parity_mode="declared",
+        history_policy_by_rollout_purpose={
+            "training": {
+                "name": "hysteresis",
+                "params": {"low_water": 3, "high_water": 10},
+            },
+            "evaluation": {"name": "fixed", "params": {"keep_images": 3}},
+        },
+    )
+
+    OSWorldAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    training = _resolve_configured_agent_contract(config, "training")
+    evaluation = _resolve_configured_agent_contract(config, "evaluation")
+
+    assert training.contract_id != evaluation.contract_id
+    assert training.contract["history_policy"]["name"] == "hysteresis"
+    assert evaluation.contract["history_policy"]["name"] == "fixed"
+    assert training.contract["model_protocol"] == evaluation.contract["model_protocol"]
+
+
 def test_build_response_always_emits_semantic_trajectory() -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
     response = _build_response(request, DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9)
@@ -761,6 +802,22 @@ def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
     )
     result = {
         **DEFAULT_RUN_RESULT,
+        "agent_contract": {
+            "schema_version": 1,
+            "agent_contract_id": "osworld-agent-contract-fixed-three",
+            "model_protocol": {
+                "protocol_id": "nano-omni-v3-osworld-v1",
+                "wire_contract_id": "wire-contract-test",
+            },
+            "history_policy": {
+                "name": "fixed",
+                "params": {"keep_images": 3},
+                "history_policy_id": "history-policy-fixed-three",
+            },
+            "agent_options": {"thinking": True},
+            "rollout_purpose": "training",
+            "parity_mode": "strict",
+        },
         "steps": [
             {
                 "step": 0,
@@ -863,6 +920,18 @@ def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
     assert contract["rollout_index"] == 0
     assert contract["attempt_index"] == 0
     assert contract["identity_source"] == "caller"
+    assert trace_response.agent_contract == result["agent_contract"]
+    assert response.verifier_metadata["osworld_agent_contract_id"] == ("osworld-agent-contract-fixed-three")
+    assert contract["generation_contract"]["compaction_policy_id"] == stable_id(
+        "compaction-policy",
+        {
+            "adapter": "osworld_agent",
+            "agent_contract_id": "osworld-agent-contract-fixed-three",
+            "model_protocol": result["agent_contract"]["model_protocol"],
+            "history_policy": result["agent_contract"]["history_policy"],
+            "agent_options": result["agent_contract"]["agent_options"],
+        },
+    )
     evidence = trace_response.completion_evidence
     assert evidence is not None
     assert [item["segment_index"] for item in evidence] == [0, 1]
@@ -1443,6 +1512,7 @@ class TestApp:
             "task_id": "test-task-001",
             "domain": "chrome",
             "task_attempt": 1,
+            "agent_contract_id": positional_args[1]["agent_contract"]["agent_contract_id"],
         }
         runtime_env = mock_remote.options.call_args.kwargs["runtime_env"]
         assert runtime_env["py_executable"]

@@ -57,6 +57,11 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_first_server_config_dict,
 )
+from responses_api_agents.osworld_agent.agent_contract import (
+    ResolvedAgentContract,
+    assert_train_eval_parity,
+    resolve_agent_contract,
+)
 from responses_api_agents.osworld_agent.exact_trace import build_exact_trace_envelope
 from responses_api_agents.osworld_agent.proxy import (
     inspect_proxy_config_file,
@@ -89,6 +94,9 @@ _OSWORLD_LOG_CONTEXT_FIELDS = (
     "task_id",
     "domain",
     "task_attempt",
+    "agent_contract_id",
+    "history_policy_id",
+    "model_protocol_id",
     "step",
     "parse_attempt",
 )
@@ -364,11 +372,24 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # A NeMo-RL scheduler may stamp the request purpose. Keep the default
     # agent kwargs as the standalone benchmark behavior and apply only the
     # explicitly configured purpose-specific delta here. Gym never infers a
-    # purpose from trajectory/token evidence because all rollout modes emit
-    # the same semantic contract.
+    # purpose from trajectory/token evidence. Strict parity is the default;
+    # declared mode permits an explicit, recorded difference.
     agent_kwargs_by_rollout_purpose: Dict[Literal["training", "evaluation"], Dict[str, Any]] = Field(
         default_factory=dict
     )
+    # Model wire format and history selection are independent axes. Legacy
+    # max_trajectory_length / agent_kwargs.max_live_images remain accepted and
+    # are normalized into the same contract at runtime.
+    model_protocol_id: Optional[str] = None
+    model_protocol_id_by_rollout_purpose: Dict[Literal["training", "evaluation"], str] = Field(default_factory=dict)
+    history_policy: Optional[Dict[str, Any]] = None
+    history_policy_by_rollout_purpose: Dict[Literal["training", "evaluation"], Dict[str, Any]] = Field(
+        default_factory=dict
+    )
+    # strict: train/eval must resolve to one semantic agent contract.
+    # declared: an intentional difference is allowed and both identities are
+    # emitted in runtime evidence.
+    agent_contract_parity_mode: Literal["strict", "declared"] = "strict"
 
     @model_validator(mode="before")
     @classmethod
@@ -380,6 +401,47 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
             if removed:
                 raise ValueError("OSWorld trajectory evidence is now automatic; remove: " + ", ".join(removed))
         return value
+
+
+def _resolve_configured_agent_contract(
+    config: OSWorldAgentConfig,
+    rollout_purpose: Optional[Literal["training", "evaluation"]],
+) -> ResolvedAgentContract:
+    """Resolve one purpose without mutating the shared server config."""
+
+    effective_agent_kwargs = dict(config.agent_kwargs)
+    if rollout_purpose is not None:
+        effective_agent_kwargs.update(config.agent_kwargs_by_rollout_purpose.get(rollout_purpose, {}))
+    runner_spec = resolve_runner_spec(
+        config.runner_name,
+        action_space=config.action_space,
+        observation_type=config.observation_type,
+        env_class_path=config.env_class_path,
+        agent_class_path=config.agent_class_path,
+        agent_kwargs=effective_agent_kwargs,
+    )
+    explicit_history_policy = config.history_policy
+    model_protocol_id = config.model_protocol_id
+    if rollout_purpose is not None:
+        explicit_history_policy = config.history_policy_by_rollout_purpose.get(
+            rollout_purpose,
+            explicit_history_policy,
+        )
+        model_protocol_id = config.model_protocol_id_by_rollout_purpose.get(
+            rollout_purpose,
+            model_protocol_id,
+        )
+    return resolve_agent_contract(
+        runner_spec=runner_spec,
+        max_steps=config.max_steps,
+        max_trajectory_length=config.max_trajectory_length,
+        screen_size=(config.screen_width, config.screen_height),
+        platform="ubuntu",
+        explicit_history_policy=explicit_history_policy,
+        model_protocol_id=model_protocol_id,
+        rollout_purpose=rollout_purpose,
+        parity_mode=config.agent_contract_parity_mode,
+    )
 
 
 class OSWorldRunRequest(BaseRunRequest):
@@ -445,6 +507,7 @@ class OSWorldAgentResponse(NeMoGymResponse):
     model_call_summaries: Optional[List[Dict[str, Any]]] = None
     context_compaction_contract: Optional[Dict[str, Any]] = None
     execution_context: Optional[Dict[str, Any]] = None
+    agent_contract: Optional[Dict[str, Any]] = None
 
 
 class OSWorldVerifyResponse(BaseVerifyResponse):
@@ -1051,6 +1114,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "mask_sample": result.mask_sample,
         "artifact_dir": result.artifact_dir,
         "termination_reason": result.termination_reason,
+        "agent_contract": result.agent_contract,
         "steps": [
             {
                 "step": s.step,
@@ -1073,8 +1137,11 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        all_agent_kwargs = [self.config.agent_kwargs, *self.config.agent_kwargs_by_rollout_purpose.values()]
         removed_agent_kwargs = sorted(
-            field for field in ("training_mode", "training_turn_strategy") if field in self.config.agent_kwargs
+            field
+            for field in ("training_mode", "training_turn_strategy")
+            if any(field in agent_kwargs for agent_kwargs in all_agent_kwargs)
         )
         if removed_agent_kwargs:
             raise ValueError(
@@ -1084,6 +1151,13 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             )
         if self.config.resources_server is not None and self.config.sandbox_provider is not None:
             raise ValueError("OSWorld resources_server and sandbox_provider cannot be enabled together")
+        training_contract = _resolve_configured_agent_contract(self.config, "training")
+        evaluation_contract = _resolve_configured_agent_contract(self.config, "evaluation")
+        assert_train_eval_parity(
+            training_contract,
+            evaluation_contract,
+            parity_mode=self.config.agent_contract_parity_mode,
+        )
         _validate_runner_runtime(self.config)
         self.sem = Semaphore(self.config.concurrency)
 
@@ -1181,6 +1255,10 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             # the same checked value even if the generic HTTP boundary retained
             # only the metadata carrier.
             body.rollout_purpose = resolved_rollout_purpose
+            resolved_agent_contract = _resolve_configured_agent_contract(
+                self.config,
+                resolved_rollout_purpose,
+            )
             print(
                 "OSWORLD_RUN_PURPOSE|"
                 f"top_level={top_level_rollout_purpose or 'none'}|"
@@ -1349,14 +1427,24 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     "task_id": trajectory_identity["task_id"],
                     "domain": metadata.get("domain") or task_config.get("domain") or task_config.get("snapshot"),
                     "task_attempt": task_attempt,
+                    "agent_contract_id": resolved_agent_contract.contract_id,
+                    "history_policy_id": (
+                        (resolved_agent_contract.contract.get("history_policy") or {}).get("history_policy_id")
+                    ),
+                    "model_protocol_id": resolved_agent_contract.model_protocol_id,
                 }
             )
 
-            effective_agent_kwargs = dict(self.config.agent_kwargs)
-            if body.rollout_purpose is not None:
-                effective_agent_kwargs.update(
-                    self.config.agent_kwargs_by_rollout_purpose.get(body.rollout_purpose, {})
-                )
+            print(
+                "OSWORLD_AGENT_CONTRACT|"
+                f"purpose={resolved_rollout_purpose or 'none'}|"
+                f"parity={self.config.agent_contract_parity_mode}|"
+                f"agent_contract_id={resolved_agent_contract.contract_id}|"
+                f"history_policy_id="
+                f"{(resolved_agent_contract.contract.get('history_policy') or {}).get('history_policy_id', 'none')}|"
+                f"model_protocol_id={resolved_agent_contract.model_protocol_id or 'none'}",
+                flush=True,
+            )
 
             runner_kwargs: Dict[str, Any] = {
                 "provider_name": self.config.provider_name,
@@ -1408,7 +1496,14 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "observation_type": self.config.observation_type,
                 "env_class_path": self.config.env_class_path,
                 "agent_class_path": self.config.agent_class_path,
-                "agent_kwargs": effective_agent_kwargs,
+                "agent_kwargs": resolved_agent_contract.agent_kwargs,
+                "history_policy": (
+                    resolved_agent_contract.history_policy.to_config()
+                    if resolved_agent_contract.history_policy is not None
+                    else None
+                ),
+                "model_protocol_id": resolved_agent_contract.model_protocol_id,
+                "agent_contract": resolved_agent_contract.contract,
                 "log_context": log_context,
             }
 
@@ -1543,8 +1638,28 @@ def _build_response(
     ]
 
     exact_fields: Dict[str, Any] = {}
+    agent_contract = result.get("agent_contract")
+    if agent_contract is not None and not isinstance(agent_contract, Mapping):
+        raise TypeError("OSWorld rollout agent_contract must be a mapping")
     capabilities = trajectory_fields["trajectory_contract"]["capabilities"]
     if capabilities["exact_model_call_evidence"]:
+        if agent_contract is not None:
+            policy_config: Dict[str, Any] = {
+                "adapter": "osworld_agent",
+                "agent_contract_id": agent_contract.get("agent_contract_id"),
+                "model_protocol": agent_contract.get("model_protocol"),
+                "history_policy": agent_contract.get("history_policy"),
+                "agent_options": agent_contract.get("agent_options"),
+            }
+        else:
+            # Compatibility for direct/older callers. New server-dispatched
+            # rollouts always carry the resolved contract, which distinguishes
+            # fixed-3 from hysteresis 3-10-3.
+            policy_config = {
+                "adapter": "osworld_agent",
+                "prompt_materialization_contract": "nemotron_v3_nano_omni_bounded_history_v1",
+                "max_trajectory_length": max_trajectory_length,
+            }
         exact_fields = build_exact_trace_envelope(
             model_calls=model_calls,
             trajectory_contract=trajectory_fields["trajectory_contract"],
@@ -1554,11 +1669,7 @@ def _build_response(
                 "top_p": top_p,
                 "max_output_tokens": max_output_tokens,
             },
-            policy_config={
-                "adapter": "osworld_agent",
-                "prompt_materialization_contract": ("nemotron_v3_nano_omni_bounded_history_v1"),
-                "max_trajectory_length": max_trajectory_length,
-            },
+            policy_config=policy_config,
         )
         if exact_fields.get("media_assets") != trajectory_fields.get("media_assets"):
             raise ValueError("Semantic trajectory and exact evidence disagree about media assets")
@@ -1581,6 +1692,8 @@ def _build_response(
         **trajectory_fields,
         **exact_fields,
     }
+    if agent_contract is not None:
+        response_dict["agent_contract"] = dict(agent_contract)
     if execution_id is not None:
         # Physical execution correlation is intentionally outside both semantic
         # trajectory contracts, so VM retries cannot alter their digests.
@@ -1611,6 +1724,9 @@ def _build_response(
     metadata["osworld_artifact_dir"] = result.get("artifact_dir")
     metadata["osworld_model_name"] = policy_model_name
     metadata["osworld_termination_reason"] = result.get("termination_reason")
+    metadata["osworld_agent_contract_id"] = (
+        agent_contract.get("agent_contract_id") if isinstance(agent_contract, Mapping) else None
+    )
     metadata["osworld_proxy_required"] = bool(result.get("proxy_required", False))
     metadata["osworld_proxy_enabled"] = bool(result.get("proxy_enabled", False))
     metadata["osworld_proxy_configured"] = bool(result.get("proxy_configured", False))

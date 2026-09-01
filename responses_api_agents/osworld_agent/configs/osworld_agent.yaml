@@ -77,6 +77,17 @@ osworld_simple_agent:
       env_class_path: null        # null = runner default DesktopEnv. Custom runners can point at an OSWorld custom env class.
       agent_class_path: null      # null = runner default agent class.
       agent_kwargs: {}            # extra kwargs merged into the runner's native mm_agent constructor.
+      # Nemotron adapter protocol/history axes. Legacy max_trajectory_length
+      # and agent_kwargs.max_live_images remain accepted and normalize to the
+      # same runtime contract. New recipes should prefer the explicit form:
+      # history_policy: {name: hysteresis, params: {low_water: 3, high_water: 10}}
+      model_protocol_id: null
+      model_protocol_id_by_rollout_purpose: {}
+      history_policy: null
+      history_policy_by_rollout_purpose: {}
+      # strict requires identical training/evaluation agent contracts;
+      # declared permits an intentional difference and records both IDs.
+      agent_contract_parity_mode: strict
       mem_limit_mb: 0           # upstream Docker owns QEMU/container limits; nonzero only emits a warning
       step_timeout: 60          # per-action subprocess timeout
       task_timeout: 1800        # end-to-end attempt deadline: VM create/setup + agent steps + evaluation
