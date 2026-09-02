@@ -327,6 +327,42 @@ def test_vnc_guest_port_must_not_collide_with_another_service() -> None:
         )
 
 
+def test_vnc_guest_port_reaches_every_hop() -> None:
+    """The port is configured in yaml and consumed five modules away.
+
+    It travelled prepare.py -> app.py -> sandbox_desktop_env.py -> the adapter
+    but not into run_osworld_task, so every rollout died with
+    `unexpected keyword argument 'sandbox_vnc_guest_port'` -- after the servers
+    were up, which reads as a backend fault rather than a plumbing gap.
+
+    Checked statically so the assertion holds without OSWorld's runtime, which
+    only the managed agent environment installs.
+    """
+    import ast
+    from pathlib import Path
+
+    agent_dir = Path(__file__).resolve().parents[1]
+    hops = {
+        "client.py": "run_osworld_task",
+        "sandbox_desktop_env.py": "__init__",
+    }
+    for filename, function in hops.items():
+        tree = ast.parse((agent_dir / filename).read_text())
+        found = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function
+        ]
+        assert found, f"{filename} has no {function}"
+        assert any(
+            "sandbox_vnc_guest_port" in [a.arg for a in n.args.args + n.args.kwonlyargs]
+            for n in found
+        ), f"{filename}:{function} does not accept sandbox_vnc_guest_port"
+
+    # And the value has to be forwarded, not merely accepted.
+    assert "\"sandbox_vnc_guest_port\": sandbox_vnc_guest_port" in (agent_dir / "client.py").read_text()
+
+
 def test_docker_keeps_its_own_vnc_port() -> None:
     """The AgentENV default must not move the Docker image's noVNC port."""
     provider = osworld_sandbox.GymSandboxDesktopProvider(
