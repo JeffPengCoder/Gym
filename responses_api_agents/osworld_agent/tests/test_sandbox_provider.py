@@ -327,6 +327,36 @@ def test_vnc_guest_port_must_not_collide_with_another_service() -> None:
         )
 
 
+def test_agentenv_drops_provider_options_e2b_does_not_accept() -> None:
+    """OmegaConf merges, so the base config's OpenSandbox options survive.
+
+    Writing `provider_options: {}` into the generated env.yaml does not clear
+    `skip_health_check` and `extensions.poolRef`; they arrive anyway and E2B
+    rejects every option it does not know, failing all 361 rollouts.
+    """
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"e2b": {}},
+        {
+            "image": "osworld-slim",
+            "provider_options": {
+                "skip_health_check": True,
+                "extensions": {"poolRef": "osworld-kvm"},
+            },
+        },
+    )
+    spec = provider._build_spec("", headless=True, os_type="Ubuntu")
+    assert spec.provider_options == {}
+
+
+def test_agentenv_keeps_an_explicit_template_option() -> None:
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"e2b": {}},
+        {"provider_options": {"template": "tpl-123", "skip_health_check": True}},
+    )
+    spec = provider._build_spec("", headless=True, os_type="Ubuntu")
+    assert spec.provider_options == {"template": "tpl-123"}
+
+
 def test_agentenv_gets_a_sentinel_vm_path_not_an_empty_one() -> None:
     """An empty path sends DesktopEnv to DockerVMManager, which downloads.
 
