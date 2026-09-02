@@ -324,6 +324,7 @@ def write_env(
     head_port: int = 11000,
     server_venv_root: Path | None = None,
     max_steps: int | None = None,
+    task_timeout: int | None = None,
     force: bool = False,
 ) -> bool:
     """Create a private env.yaml; return False when an existing file is kept."""
@@ -439,6 +440,12 @@ def write_env(
                 ]
             ),
             *([] if max_steps is None else [f"      max_steps: {max_steps}"]),
+            # The end-to-end attempt deadline covers VM create/setup, every agent
+            # step and the evaluation, so it has to grow with max_steps and with any
+            # per-step cost the backend adds -- a remote sandbox pays a round trip
+            # per screenshot. Tripping it masks the rollout and retries it, so a
+            # merely tight value burns environments rather than failing honestly.
+            *([] if task_timeout is None else [f"      task_timeout: {task_timeout}"]),
             "",
         ]
     )
@@ -486,6 +493,12 @@ def main() -> None:
         choices=tuple(PROFILE_CONFIGS),
         default="default",
         help="Model/agent composition written to env.yaml",
+    )
+    parser.add_argument(
+        "--task-timeout",
+        type=int,
+        default=None,
+        help="End-to-end per-attempt deadline in seconds; defaults to the agent config value",
     )
     parser.add_argument(
         "--execution-backend",
@@ -631,6 +644,7 @@ def main() -> None:
             head_port=args.head_port,
             server_venv_root=args.server_venv_root,
             max_steps=args.max_steps,
+            task_timeout=args.task_timeout,
             force=args.force_env,
         )
 
