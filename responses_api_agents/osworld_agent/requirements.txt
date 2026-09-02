@@ -10,7 +10,7 @@ tenacity>=9.1.4
 # setup/evaluator contracts. This revision preserves the canonical task configs.
 # Use an archive because uv recursively initializes git submodules, while
 # optional SurferH submodules are not needed here.
-osworld @ https://github.com/JeffPengCoder/OSWorld/archive/69aabb346477454349202e48b53a5f265161f914.tar.gz
+osworld @ https://github.com/JeffPengCoder/OSWorld/archive/0a65076f6f686588697343da59295cefc6bb7e56.tar.gz
 
 numkong==7.7.0
 docker==7.1.0

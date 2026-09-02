@@ -125,12 +125,13 @@ service endpoints, status, and cleanup.
 
 This agent intentionally installs the immutable
 [`JeffPengCoder/OSWorld`](https://github.com/JeffPengCoder/OSWorld) fork at
-commit `69aabb346477454349202e48b53a5f265161f914`, as declared in
+commit `0a65076f6f686588697343da59295cefc6bb7e56`, as declared in
 [`requirements.txt`](requirements.txt). That revision starts from upstream
 OSWorld `83e85344` and includes the `nv-gym` provider overlay, proxy-runtime
 repair, logging hardening, VLC gateway-auth fallback, the per-environment
-provider contract, and opt-in setup/evaluator return-code semantics without
-rewriting canonical OSWorld task configs. Gym supplies orchestration and the
+provider contract, opt-in setup/evaluator return-code semantics, and the
+restricted-guest Chrome ownership fix without rewriting canonical OSWorld task
+configs. Gym supplies orchestration and the
 worker control plane; OSWorld remains independent of Gym.
 
 The dependency is consumed as a commit-addressed source archive so uv does not
