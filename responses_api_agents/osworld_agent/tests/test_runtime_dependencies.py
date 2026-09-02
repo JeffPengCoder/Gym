@@ -158,3 +158,34 @@ def test_optional_runtime_installer_matches_agent_torch_backend(tmp_path: Path) 
     assert "numpy>=2.1,<2.5" in argv
     assert "opencv-python-headless~=4.10.0.84" in argv
     assert "torchvision==0.26.0" in argv
+
+
+def test_managed_requirements_cover_the_e2b_provider_imports() -> None:
+    """The managed agent venv is built from requirements.txt, not the sandbox extra.
+
+    Both misses cost a full 361-task attempt: `e2b` itself, then
+    `httpx_aiohttp`, which the provider imports at configure time rather than
+    lazily, so nothing surfaces until a rollout actually starts.
+    """
+    import ast
+    import sys
+    from pathlib import Path
+
+    agent_dir = Path(__file__).resolve().parents[1]
+    repo_root = agent_dir.parents[1]
+    third_party: set[str] = set()
+    for name in ("_sdk.py", "provider.py"):
+        tree = ast.parse((repo_root / "nemo_gym/sandbox/providers/e2b" / name).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                third_party.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                third_party.add(node.module.split(".")[0])
+    third_party -= set(sys.stdlib_module_names) | {"nemo_gym"}
+
+    requirements = (agent_dir / "requirements.txt").read_text()
+    # httpx arrives with the e2b SDK; the rest must be pinned here by name.
+    for module in sorted(third_party - {"httpx"}):
+        assert module.replace("_", "-") in requirements, (
+            f"{module} is imported by the e2b provider but absent from requirements.txt"
+        )
