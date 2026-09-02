@@ -205,7 +205,16 @@ class GymSandboxDesktopProvider:
         values["metadata"] = metadata
 
         if self._sandbox_provider_name == "e2b":
-            provider_options = dict(values.get("provider_options") or {})
+            # The reusable agent config declares OpenSandbox's provider options,
+            # and OmegaConf merges rather than replaces, so an empty override in
+            # the generated env.yaml still arrives carrying `skip_health_check`
+            # and `extensions`. E2B rejects any option it does not know, so keep
+            # only the one it accepts instead of trusting the merged mapping.
+            provider_options = {
+                key: value
+                for key, value in (values.get("provider_options") or {}).items()
+                if key == "template" and value is not None
+            }
             if not values.get("image") and not provider_options.get("template"):
                 raise ValueError(
                     "E2B OSWorld sandboxes start from a prebuilt template; set "
