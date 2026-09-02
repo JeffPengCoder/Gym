@@ -1,8 +1,11 @@
 -e nemo-gym[dev] @ ../../
 
-# OSWorld supports Gym's OpenSandbox backend without installing every optional
-# Sandbox provider SDK into this managed server environment.
+# The Sandbox provider SDKs OSWorld's backends actually use. Only these two;
+# this managed server environment does not carry every optional provider.
+# e2b lower bound 2.46: gateway port routing reads
+# ConnectionConfig.sandbox_headers, which 2.36 does not expose.
 opensandbox>=0.1.15
+e2b>=2.46.0,<3.0.0
 tenacity>=9.1.4
 
 # JeffPengCoder/OSWorld nv-gym at an immutable commit: upstream main
