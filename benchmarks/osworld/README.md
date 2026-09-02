@@ -641,7 +641,7 @@ overlay.
 | --- | --- |
 | Gym OSWorld benchmark | No manual checkout. The agent package installs the exact SHA from `responses_api_agents/osworld_agent/requirements.txt`. |
 | Direct OSWorld, plain Docker/VMware, no proxy-required tasks | Upstream xlang OSWorld main is sufficient; this adapter's pre-fix baseline was `83e8534451ba8b3ab6477448ef3f0a8e563f05be`. |
-| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `4858905d1ddfecc1cee979742d0f113a6d19728e` or a documented successor. |
+| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `feature/gym-runtime-contracts`, pinned to `69aabb346477454349202e48b53a5f265161f914` or a reviewed successor that preserves the selected task corpus. |
 | Direct OSWorld with proxy-required tasks | The same `nv-gym` pinned SHA; set `PROXY_CONFIG_FILE` and construct `DesktopEnv(enable_proxy=True)`. |
 | Direct OSWorld with both features | The same `nv-gym` pinned SHA provides both independent capabilities. |
 
@@ -650,33 +650,16 @@ For a direct integration of the tested version:
 ```bash
 git clone https://github.com/JeffPengCoder/OSWorld.git
 cd OSWorld
-git checkout 4858905d1ddfecc1cee979742d0f113a6d19728e
+git checkout 69aabb346477454349202e48b53a5f265161f914
 ```
 
-Use an immutable SHA in a lockfile or deployment manifest. The `nv-gym`
-branch is the integration line that follows upstream main, but its tip can
-move as new upstream changes are merged.
+Use an immutable SHA in a lockfile or deployment manifest. The integration
+branch may move; a recipe always records the exact revision it actually ran.
 
-This pinned revision also prevents OSWorld's Chrome setup DEBUG logging from
+This pinned revision prevents OSWorld's Chrome setup DEBUG logging from
 serializing the complete worker environment into task artifacts. Model and
 proxy credentials must remain runtime secrets and are never useful setup
 diagnostics.
-
-It also prepares the canonical restricted-home fixture through OSWorld's
-trusted setup controller with `sudo`, while the evaluated desktop agent
-continues to run as the ordinary guest user. This keeps strict setup return-
-code validation without silently evaluating against a broken initial state.
-
-It also keeps the canonical VS Code theme fixture portable to the OpenSandbox
-guest image, which has `python3` but not `jq`. The fixture uses Python only for
-the prior `jq` fallback, preserves unrelated settings, and still establishes
-the same `Red` baseline before the evaluated agent starts.
-
-The same revision feeds the regular guest password to the Chrome-history
-ownership repair, restricts `update-desktop-database` to the user's
-applications directory, and removes the contradictory setup-time `su` from
-the missing-Charles infeasible task. These are fixture-initialization repairs;
-they do not grant passwordless sudo or change the evaluated agent's policy.
 
 It also guards dynamic `tinyproxy` installation against PackageKit holding
 APT locks after VM boot. PackageKit is stopped and runtime-masked only during
@@ -720,7 +703,12 @@ Task setup commands may optionally declare `expected_returncodes` and
 than model behavior: an allowed return code continues normally, while
 `score_zero` records a valid evaluator score of zero instead of masking the
 rollout as a harness failure. Tasks that omit both fields continue through the
-pinned upstream setup implementation unchanged.
+pinned upstream setup implementation unchanged, including its best-effort
+handling of non-zero command results. Absence of a policy must not be inferred
+as `expected_returncodes: [0]`, and evaluator type must not be used to guess a
+setup contract. Gym-owned setup that is required for runtime correctness must
+declare its expected return codes explicitly; the adapter must not rewrite a
+canonical task to make an implicit strict policy pass.
 
 The Docker port-allocation lock wait is configurable because concurrent VM
 startup can legitimately take longer than the pinned upstream default. Raising

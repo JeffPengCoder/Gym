@@ -24,7 +24,6 @@ class RolloutOutcomeFacts:
 
     evaluation_completed: bool
     infrastructure_failure_reason: Optional[str] = None
-    setup_score_zero: bool = False
     terminal_action: Optional[str] = None
     environment_done: bool = False
     horizon_reached: bool = False
@@ -33,7 +32,6 @@ class RolloutOutcomeFacts:
     def __post_init__(self) -> None:
         for name in (
             "evaluation_completed",
-            "setup_score_zero",
             "environment_done",
             "horizon_reached",
         ):
@@ -49,14 +47,6 @@ class RolloutOutcomeFacts:
                 raise ValueError(f"{name} must be a non-empty string when provided")
         if self.terminal_action is not None and self.terminal_action.upper() not in {"DONE", "FAIL"}:
             raise ValueError(f"unsupported terminal_action: {self.terminal_action!r}")
-        if self.setup_score_zero and self.infrastructure_failure_reason is not None:
-            raise ValueError("setup_score_zero cannot also be an infrastructure failure")
-        if self.setup_score_zero and not self.evaluation_completed:
-            raise ValueError("setup_score_zero must be an evaluated outcome")
-        if self.setup_score_zero and any(
-            (self.terminal_action, self.environment_done, self.horizon_reached, self.policy_stop_reason)
-        ):
-            raise ValueError("setup_score_zero cannot also carry another termination fact")
         if self.horizon_reached and any((self.terminal_action, self.environment_done, self.policy_stop_reason)):
             raise ValueError("horizon_reached cannot also carry a terminal or policy-stop fact")
         if self.policy_stop_reason is not None and any((self.terminal_action, self.environment_done)):
@@ -89,15 +79,6 @@ def classify_rollout_outcome(facts: RolloutOutcomeFacts) -> RolloutOutcome:
     environment termination, and a sampled response that the adapter could not
     parse.  Infrastructure and evaluator failures remain masked.
     """
-
-    if facts.setup_score_zero:
-        return RolloutOutcome(
-            termination_reason="setup_score_zero",
-            horizon_reached=False,
-            evaluation_completed=True,
-            runtime_eligible=True,
-            runtime_admission_reason="valid_setup_score_zero",
-        )
 
     if facts.infrastructure_failure_reason is not None:
         reason = facts.infrastructure_failure_reason.strip()

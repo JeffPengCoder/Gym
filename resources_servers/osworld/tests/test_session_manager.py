@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -156,3 +157,50 @@ async def test_proxy_task_is_rejected_before_environment_creation(tmp_path: Path
         assert FakeEnvironment.instances == []
     finally:
         await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_worker_discovery_is_scoped_to_deployment(monkeypatch, tmp_path: Path) -> None:
+    config = make_config(
+        tmp_path,
+        deployment_id="selected-deployment",
+        discover_workers=True,
+        workers=[],
+    )
+    manager = OSWorldSessionManager(config, env_factory=FakeEnvironment)
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            def record(worker_id: str, deployment_id: str) -> dict[str, Any]:
+                return {
+                    "service_id": worker_id,
+                    "service_type": "osworld_worker",
+                    "url": f"http://{worker_id}.example:28080",
+                    "capacity": 2,
+                    "status": "ready",
+                    "metadata": {
+                        "deployment_id": deployment_id,
+                        "data_host": f"{worker_id}.example",
+                    },
+                }
+
+            return [
+                record("selected-worker", "selected-deployment"),
+                record("foreign-worker", "other-deployment"),
+            ]
+
+    monkeypatch.setattr(
+        "resources_servers.osworld.session_manager.ServerClient.load_head_server_config",
+        lambda: SimpleNamespace(host="head.example", port=8080),
+    )
+    monkeypatch.setattr(
+        "resources_servers.osworld.session_manager.requests.get",
+        lambda *_args, **_kwargs: Response(),
+    )
+
+    await manager.refresh_registered_workers()
+
+    assert set(manager._workers) == {"selected-worker"}  # noqa: SLF001

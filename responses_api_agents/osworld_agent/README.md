@@ -125,23 +125,21 @@ service endpoints, status, and cleanup.
 
 This agent intentionally installs the immutable
 [`JeffPengCoder/OSWorld`](https://github.com/JeffPengCoder/OSWorld) fork at
-commit `4858905d1ddfecc1cee979742d0f113a6d19728e`, as declared in
+commit `69aabb346477454349202e48b53a5f265161f914`, as declared in
 [`requirements.txt`](requirements.txt). That revision starts from upstream
 OSWorld `83e85344` and includes the `nv-gym` provider overlay, proxy-runtime
-repair, VLC gateway-auth fallback, and the privileged-setup fix used by the
-canonical restricted-home fixture. It also removes the canonical VS Code
-theme fixture's undeclared `jq` dependency, feeds the normal guest password to
-the Chrome-history ownership repair, scopes desktop-database updates to the
-user directory, and lets the missing-Charles infeasible task reach the agent
-instead of executing the impossible operation during setup. It is therefore a
-runtime dependency of this branch, not an interchangeable link to upstream
-OSWorld `main`.
+repair, logging hardening, VLC gateway-auth fallback, the per-environment
+provider contract, and opt-in setup/evaluator return-code semantics without
+rewriting canonical OSWorld task configs. Gym supplies orchestration and the
+worker control plane; OSWorld remains independent of Gym.
 
 The dependency is consumed as a commit-addressed source archive so uv does not
 initialize optional OSWorld submodules. Gym does not mutate the installed
-checkout at runtime: additional compatibility behavior remains opt-in or
-narrowly scoped in this adapter. Update the fork URL or commit only together
-with resolver tests, the restricted-home fixture, and a real OSWorld rollout.
+checkout at runtime, and the adapter does not monkeypatch OSWorld setup
+semantics. Update the fork URL or commit only together with contract tests and
+a real OSWorld rollout. Do not rewrite task setup to
+compensate for adapter behavior; task-corpus changes require their own dataset
+authority and evaluation review.
 
 ## Supported runners
 

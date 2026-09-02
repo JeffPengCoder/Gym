@@ -106,10 +106,6 @@ exit 24
 """
 
 
-class _EvaluatorScoreZero(BaseException):
-    """Control signal for declarative evaluator setup that proves a zero score."""
-
-
 class _PointerRetryDeadline(BaseException):
     """Exit Pointer's nested retry loops at the Gym rollout boundary."""
 
@@ -414,168 +410,6 @@ def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str, setup_cache_
     for name in setup_cache_names:
         linked += int(_link_if_present(os.path.join(source_dir, name), os.path.join(task_cache_dir, name)))
     return linked
-
-
-def _patch_setup_execute_contract() -> None:
-    """Enforce setup return codes and retry transient guest package locks.
-
-    Older OSWorld setup code labels any HTTP-200 response as successful even
-    when the guest command returns non-zero.  That can silently continue after
-    ``apt install jq`` failed and later misclassify an environment failure as
-    an agent failure.  Default to return code zero, while retaining explicit
-    policies used by newer tasks.
-    """
-
-    try:
-        from desktop_env.controllers import setup as setup_module  # type: ignore
-    except Exception:  # noqa: BLE001 - OSWorld is optional outside the runtime.
-        return
-
-    controller_class = setup_module.SetupController
-    current = controller_class._execute_setup
-    if getattr(current, "_nemo_gym_returncode_contract", False):
-        return
-    try:
-        parameters = inspect.signature(current).parameters
-    except (TypeError, ValueError):
-        parameters = {}
-    if {"expected_returncodes", "on_nonzero"}.issubset(parameters):
-        return
-
-    requests = setup_module.requests
-
-    def execute_setup(
-        self: Any,
-        command: List[str] | str,
-        stdout: str = "",
-        stderr: str = "",
-        shell: bool = False,
-        until: Optional[Dict[str, Any]] = None,
-        expected_returncodes: List[int] | int | None = None,
-        on_nonzero: str | None = None,
-    ) -> Any:
-        if not command:
-            raise RuntimeError("Empty setup command")
-        explicit_returncode_policy = (
-            expected_returncodes is not None or on_nonzero is not None or bool(until and "returncode" in until)
-        )
-        if getattr(self, "_nemo_gym_evaluator_phase", False) and not explicit_returncode_policy:
-            # Upstream OSWorld evaluator postconfig frequently transforms
-            # agent-created artifacts before the result getter runs. A
-            # missing artifact is a task score of zero, not an environment
-            # failure. Preserve upstream best-effort command semantics here;
-            # task initialization remains strict, and newer tasks can opt in
-            # to an explicit evaluator return-code policy.
-            return current(
-                self,
-                command,
-                stdout=stdout,
-                stderr=stderr,
-                shell=shell,
-                until=until,
-            )
-        if expected_returncodes is None:
-            expected_returncodes = [int(until["returncode"])] if until and "returncode" in until else [0]
-        elif isinstance(expected_returncodes, int):
-            expected_returncodes = [expected_returncodes]
-        allowed = {int(code) for code in expected_returncodes}
-        if not allowed:
-            raise ValueError("expected_returncodes must not be empty")
-        if on_nonzero not in {None, "score_zero"}:
-            raise ValueError(f"unsupported on_nonzero policy: {on_nonzero!r}")
-
-        replacements = {
-            "{CLIENT_PASSWORD}": self.client_password,
-            "{SCREEN_WIDTH_HALF}": str(self.screen_width // 2),
-            "{SCREEN_HEIGHT_HALF}": str(self.screen_height // 2),
-            "{SCREEN_WIDTH}": str(self.screen_width),
-            "{SCREEN_HEIGHT}": str(self.screen_height),
-        }
-        rendered = [command] if isinstance(command, str) else list(command)
-        for index, item in enumerate(rendered):
-            for old, new in replacements.items():
-                item = item.replace(old, new)
-            rendered[index] = item
-        rendered_command: List[str] | str = rendered[0] if isinstance(command, str) else rendered
-        payload = json.dumps({"command": rendered_command, "shell": shell})
-        headers = {"Content-Type": "application/json"}
-        until = until or {}
-        failures = 0
-        package_lock_retries = 0
-        package_lock_markers = (
-            "Could not get lock /var/lib/apt/lists/lock",
-            "Could not get lock /var/lib/dpkg/lock",
-            "Could not get lock /var/lib/dpkg/lock-frontend",
-            "Unable to acquire the dpkg frontend lock",
-            "is another process using it?",
-        )
-
-        while True:
-            result = None
-            try:
-                response = requests.post(
-                    self.http_server + "/setup/execute",
-                    headers=headers,
-                    data=payload,
-                    timeout=130,
-                )
-                if response.status_code == 200:
-                    result = response.json()
-                    if "returncode" not in result:
-                        raise RuntimeError("setup response omitted returncode")
-                    if stdout:
-                        with open(os.path.join(self.cache_dir, stdout), "w", encoding="utf-8") as handle:
-                            handle.write(result.get("output", ""))
-                    if stderr:
-                        with open(os.path.join(self.cache_dir, stderr), "w", encoding="utf-8") as handle:
-                            handle.write(result.get("error", ""))
-                else:
-                    failures += 1
-            except requests.exceptions.RequestException:
-                failures += 1
-            if failures >= 5:
-                raise RuntimeError(f"setup command failed after five request attempts: {rendered_command!r}")
-            if result is None:
-                continue
-
-            returncode = int(result["returncode"])
-            command_text = " ".join(rendered_command) if isinstance(rendered_command, list) else rendered_command
-            if self.client_password:
-                # The rendered payload must contain the password for sudo -S,
-                # but diagnostics and raised errors are durable artifacts.
-                # Preserve the task placeholder there instead of leaking the
-                # guest credential.
-                command_text = command_text.replace(self.client_password, "{CLIENT_PASSWORD}")
-            if returncode not in allowed:
-                command_output = f"{result.get('output', '')}\n{result.get('error', '')}"
-                if any(marker in command_output for marker in package_lock_markers) and package_lock_retries < 30:
-                    package_lock_retries += 1
-                    LOG.warning(
-                        "Guest package manager lock blocked setup command; retrying %d/30: %s",
-                        package_lock_retries,
-                        command_text,
-                    )
-                    time.sleep(2)
-                    continue
-                if on_nonzero == "score_zero" and returncode not in {126, 127}:
-                    raise _EvaluatorScoreZero(
-                        f"evaluator command established score zero with return code {returncode}: {command_text}"
-                    )
-                raise RuntimeError(
-                    f"setup command returned {returncode}; expected {sorted(allowed)}: {command_text}; "
-                    f"stdout={result.get('output', '')!r}; stderr={result.get('error', '')!r}"
-                )
-            if (
-                not until
-                or ("returncode" in until and returncode == int(until["returncode"]))
-                or ("stdout" in until and str(until["stdout"]) in result.get("output", ""))
-                or ("stderr" in until and str(until["stderr"]) in result.get("error", ""))
-            ):
-                return result
-            time.sleep(0.3)
-
-    execute_setup._nemo_gym_returncode_contract = True  # type: ignore[attr-defined]
-    controller_class._execute_setup = execute_setup
 
 
 def _patch_chrome_setup_cdp_lifecycle() -> None:
@@ -1791,12 +1625,6 @@ def _evaluate_osworld_env(
     """
 
     evaluate = env.evaluate
-    setup_controller = getattr(env, "setup_controller", None)
-    evaluator_phase_attribute = "_nemo_gym_evaluator_phase"
-    had_evaluator_phase = bool(setup_controller is not None and hasattr(setup_controller, evaluator_phase_attribute))
-    original_evaluator_phase = getattr(setup_controller, evaluator_phase_attribute) if had_evaluator_phase else None
-    if setup_controller is not None:
-        setattr(setup_controller, evaluator_phase_attribute, True)
     original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     easyocr_module: Optional[Any] = None
     original_easyocr_reader: Optional[Any] = None
@@ -1819,23 +1647,10 @@ def _evaluate_osworld_env(
             params = inspect.signature(evaluate).parameters
         except (TypeError, ValueError):
             params = {}
-        try:
-            if not params:
-                return float(evaluate())
-            return float(evaluate(eval_logger))
-        except _EvaluatorScoreZero as exc:
-            eval_logger.info("OSWorld evaluator setup established score zero: %s", exc)
-            return 0.0
+        if not params:
+            return float(evaluate())
+        return float(evaluate(eval_logger))
     finally:
-        if setup_controller is not None:
-            if had_evaluator_phase:
-                setattr(
-                    setup_controller,
-                    evaluator_phase_attribute,
-                    original_evaluator_phase,
-                )
-            else:
-                delattr(setup_controller, evaluator_phase_attribute)
         if disable_gpu:
             if easyocr_module is not None and original_easyocr_reader is not None:
                 easyocr_module.Reader = original_easyocr_reader
@@ -2010,7 +1825,6 @@ def run_osworld_task(
     else:
         env_cls = load_attr(runner_spec.env_class_path)
     if not use_remote_resources:
-        _patch_setup_execute_contract()
         _patch_chrome_setup_cdp_lifecycle()
         if provider_name == "docker" and not use_gym_sandbox:
             _configure_docker_port_lock_timeout(docker_port_lock_timeout)
@@ -2037,7 +1851,6 @@ def run_osworld_task(
     finished = False
     final_score = 0.0
     timed_out = False
-    setup_score_zero = False
     horizon_reached = False
     evaluation_completed = False
     agent_terminal_action: Optional[str] = None
@@ -2716,17 +2529,6 @@ def run_osworld_task(
         timed_out = exc.task_deadline
         error = f"{type(exc).__name__}: {exc}"
         task_logger.exception("Pointer provider retry stopped outside an agent step")
-    except _EvaluatorScoreZero as exc:
-        setup_score_zero = True
-        finished = True
-        evaluation_completed = True
-        final_score = 0.0
-        error = None
-        task_logger.info("OSWorld setup established score zero before evaluation: %s", exc)
-        _append_task_trajectory(
-            task_artifacts,
-            {"event": "evaluation", "score": 0.0, "status": "completed", "reason": "setup_score_zero"},
-        )
     except Exception as exc:  # noqa: BLE001 — top-level guard so caller sees error not crash.
         proxy_setup_error = bool(requires_proxy and enable_proxy and rollout_phase == "environment_reset")
         error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
@@ -2781,9 +2583,8 @@ def run_osworld_task(
         RolloutOutcomeFacts(
             evaluation_completed=evaluation_completed,
             infrastructure_failure_reason=infrastructure_failure_reason,
-            setup_score_zero=setup_score_zero,
             terminal_action=agent_terminal_action,
-            environment_done=finished and agent_terminal_action is None and not setup_score_zero,
+            environment_done=finished and agent_terminal_action is None,
             horizon_reached=horizon_reached,
             policy_stop_reason=agent_stop_reason,
         )

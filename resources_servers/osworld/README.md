@@ -25,11 +25,28 @@ Production-like deployments should set:
 
 - `OSWORLD_RESOURCES_TOKEN` when `require_auth=true`;
 - `NEMO_GYM_REGISTRATION_TOKEN` when worker registration is protected;
+- the same `deployment_id` in the Resources Server config and
+  `OSWORLD_DEPLOYMENT_ID` on every worker;
 - a private `proxy_config_file` only when proxy tasks are explicitly enabled.
 
 Tokens, SSH keys, proxy credentials, and host-specific runtime state must not
 be committed. `num_workers` must remain one because live `DesktopEnv` objects
 are process-local.
+
+The dynamically registered worker is Gym control-plane code, not an OSWorld
+provider module. Start it on each Docker/KVM worker with:
+
+```bash
+python -m resources_servers.osworld.worker
+```
+
+It reads the `OSWORLD_WORKER_*`, `NEMO_GYM_HEAD_URL`, and
+`NEMO_GYM_REGISTRATION_TOKEN` runtime settings, publishes the OSWorld service
+ports, and registers capacity plus the non-secret VM resource contract with
+the Gym head. Discovery and create requests are scoped by deployment ID; a
+worker rejects requests for another deployment. The pinned OSWorld dependency
+contains only the provider client and generic `DesktopEnv` contracts; it does
+not depend on Gym's worker registry.
 
 ## Tests and example data
 

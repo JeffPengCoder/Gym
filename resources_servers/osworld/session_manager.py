@@ -526,6 +526,8 @@ class OSWorldSessionManager:
             if record.get("status") != "ready":
                 continue
             metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+            if metadata.get("deployment_id") != self.config.deployment_id:
+                continue
             capacity = max(1, int(record.get("capacity") or 1))
             discovered[str(record["service_id"])] = RemoteDockerWorkerConfig(
                 name=str(record["service_id"]),

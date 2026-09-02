@@ -87,20 +87,6 @@ def test_infrastructure_failures_are_runtime_ineligible(reason: str) -> None:
     assert outcome.runtime_admission_reason == reason
 
 
-def test_setup_score_zero_is_a_valid_evaluator_outcome() -> None:
-    outcome = classify_rollout_outcome(
-        RolloutOutcomeFacts(
-            evaluation_completed=True,
-            setup_score_zero=True,
-        )
-    )
-
-    assert outcome.termination_reason == "setup_score_zero"
-    assert outcome.evaluation_completed is True
-    assert outcome.runtime_eligible is True
-    assert outcome.mask_sample is False
-
-
 def test_unclassified_or_unevaluated_rollouts_fail_closed() -> None:
     unevaluated = classify_rollout_outcome(RolloutOutcomeFacts(evaluation_completed=False, horizon_reached=True))
     unclassified = classify_rollout_outcome(RolloutOutcomeFacts(evaluation_completed=True))
@@ -116,12 +102,6 @@ def test_outcome_facts_reject_conflicting_or_invalid_states() -> None:
         RolloutOutcomeFacts(evaluation_completed=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="unsupported terminal_action"):
         RolloutOutcomeFacts(evaluation_completed=True, terminal_action="WAIT")
-    with pytest.raises(ValueError, match="cannot also be an infrastructure failure"):
-        RolloutOutcomeFacts(
-            evaluation_completed=True,
-            setup_score_zero=True,
-            infrastructure_failure_reason="rollout_error",
-        )
     with pytest.raises(ValueError, match="horizon_reached cannot also carry"):
         RolloutOutcomeFacts(
             evaluation_completed=True,
