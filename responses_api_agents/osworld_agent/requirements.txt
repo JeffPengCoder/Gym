@@ -6,6 +6,9 @@
 # ConnectionConfig.sandbox_headers, which 2.36 does not expose.
 opensandbox>=0.1.15
 e2b>=2.46.0,<3.0.0
+# The e2b provider routes its control plane through an aiohttp-backed
+# httpx transport at import time, so this is not optional for it.
+httpx-aiohttp>=0.2.0
 tenacity>=9.1.4
 
 # JeffPengCoder/OSWorld nv-gym at an immutable commit: upstream main
