@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.osworld.assets import DEFAULT_SETUP_CACHE, ensure_osworld_assets
+from responses_api_agents.osworld_agent.sandbox_provider import AGENTENV_TEMPLATE_VM_PATH
 from responses_api_agents.osworld_agent.runtime_dependencies import managed_agent_venv_path
 
 
@@ -427,7 +428,11 @@ def write_env(
                     "      sandbox_require_kvm: false",
                     "      sandbox_ready_timeout_s: 900.0",
                     "      sandbox_vnc_guest_port: 6901",
-                    "      vm_path: \"\"",
+                    # A sentinel, not a file: DesktopEnv would otherwise ask
+                    # DockerVMManager to resolve an empty path, which downloads
+                    # OSWorld's ~11 GB qcow2 once per task. The template already
+                    # holds the guest.
+                    f"      vm_path: {_yaml_string(AGENTENV_TEMPLATE_VM_PATH)}",
                     "      sandbox_spec:",
                     "        # An AgentENV template name or ID, not an OCI reference.",
                     "        image: ${oc.env:AGENTENV_TEMPLATE}",
