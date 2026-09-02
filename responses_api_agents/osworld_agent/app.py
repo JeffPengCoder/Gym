@@ -54,7 +54,6 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_correlation import maybe_explicit_execution_id_from_run_body
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
-    ServerClient,
     get_first_server_config_dict,
 )
 from responses_api_agents.osworld_agent.agent_contract import (
@@ -1369,7 +1368,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     )
 
             model_server_name = self.config.model_server.name
-            global_config_dict = ServerClient.load_from_global_config().global_config_dict
+            global_config_dict = self.server_client.global_config_dict
             model_server_config = get_first_server_config_dict(global_config_dict, model_server_name)
             policy_model_name = _resolve_policy_model_name(global_config_dict, self.config.runner_name)
             policy_api_key = global_config_dict.get("policy_api_key", "")
