@@ -15,6 +15,7 @@
 
 """Lazy E2B SDK loading, traffic attribution, and async HTTP adaptation."""
 
+import logging
 import threading
 from typing import Any
 
@@ -93,6 +94,23 @@ def require_e2b_sdk(feature: str) -> Any:
     with _CONFIGURE_LOCK:
         if _CONFIGURED_SDK_MODULES.get(module_id) is not e2b:
             e2b.ConnectionConfig.set_integration(_INTEGRATION)
-            _configure_async_http()
+            try:
+                _configure_async_http()
+            except BaseException as exc:
+                # Sharing Gym's aiohttp pool is a performance integration, not a
+                # correctness requirement: the SDK's own httpx transport works.
+                # It must therefore never be able to fail sandbox creation.
+                #
+                # BaseException, not Exception, is deliberate. This runs lazily,
+                # so the first call can land inside a Ray worker, where importing
+                # nemo_gym.server_utils reaches Hydra's argument parser. Hydra
+                # parses that worker's argv, does not recognise Ray's flags, and
+                # raises SystemExit(2) -- which `except Exception` would not
+                # catch. Every rollout then died before creating a sandbox.
+                logging.getLogger(__name__).warning(
+                    "Falling back to the e2b SDK's own HTTP transport: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
             _CONFIGURED_SDK_MODULES[module_id] = e2b
     return e2b
