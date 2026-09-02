@@ -42,7 +42,22 @@ def _configure_async_http() -> None:
     from e2b.sandbox_async import main as sandbox_async
     from httpx_aiohttp import AiohttpTransport
 
+    from nemo_gym import server_utils
     from nemo_gym.server_utils import get_global_aiohttp_client
+
+    # Only borrow Gym's pool when this process can already answer for its own
+    # global config. Otherwise the first request would resolve it *from the CLI*
+    # -- and in a Ray worker the CLI is Ray's, which Hydra's parser rejects with
+    # sys.exit(2), killing the rollout rather than the request. The SDK's own
+    # transport needs no Gym config at all, so that is the safe default here.
+    if (
+        getattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None) is None
+        and not server_utils._has_injected_global_config_env()
+    ):
+        raise RuntimeError(
+            "Gym's global config is not established in this process; "
+            "leaving the e2b SDK on its own HTTP transport"
+        )
 
     class E2BAiohttpTransport(AiohttpTransport):
         async def aclose(self) -> None:
