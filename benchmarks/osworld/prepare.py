@@ -47,6 +47,7 @@ POINTER_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_pointer.yaml"
 NANO_OMNI_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_nano_omni.yaml"
 OSWORLD_PROVIDER_CONFIG = BENCHMARK_DIR / "configs" / "osworld_docker_pinned.yaml"
 OPENSANDBOX_CONFIG = BENCHMARK_DIR / "configs" / "osworld_opensandbox.yaml"
+AGENTENV_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agentenv.yaml"
 OPENSANDBOX_VM_SENTINEL = "/opensandbox/Ubuntu.qcow2"
 OPENSANDBOX_COMPAT_IMAGE = "busybox:1.36"
 
@@ -65,6 +66,9 @@ BACKEND_CONFIGS: dict[str, Path | None] = {
     # env.yaml activates it for this backend.
     "gym_sandbox": None,
     "gym_opensandbox": OPENSANDBOX_CONFIG,
+    # AgentENV speaks the E2B control-plane API, so it is driven through Gym's
+    # e2b provider rather than one of its own.
+    "gym_agentenv": AGENTENV_CONFIG,
     "osworld_provider": OSWORLD_PROVIDER_CONFIG,
 }
 
@@ -348,9 +352,12 @@ def write_env(
         raise ValueError("gym_sandbox execution requires an explicit vm_path")
     if execution_backend == "gym_opensandbox" and resolved_vm_path is not None:
         raise ValueError("gym_opensandbox uses the server-side Pool image and does not accept vm_path")
+    if execution_backend == "gym_agentenv" and resolved_vm_path is not None:
+        raise ValueError("gym_agentenv restores a prebuilt AgentENV template and does not accept vm_path")
     sandbox_provider_name = {
         "gym_sandbox": "osworld_sandbox",
         "gym_opensandbox": "osworld_opensandbox",
+        "gym_agentenv": "osworld_agentenv",
     }.get(execution_backend)
     emitted_vm_path: str | Path | None = (
         OPENSANDBOX_VM_SENTINEL if execution_backend == "gym_opensandbox" else resolved_vm_path
@@ -407,6 +414,28 @@ def write_env(
                     "          skip_health_check: true",
                     "          extensions:",
                     "            poolRef: ${oc.env:OPENSANDBOX_POOL_REF,osworld-kvm}",
+                ]
+            ),
+            *(
+                []
+                if execution_backend != "gym_agentenv"
+                else [
+                    # No qcow2 to mount and no inner QEMU: the sandbox restores a
+                    # template snapshot. osworld-slim serves noVNC on 6901, not
+                    # the Docker image's 8006.
+                    "      sandbox_require_kvm: false",
+                    "      sandbox_ready_timeout_s: 900.0",
+                    "      sandbox_vnc_guest_port: 6901",
+                    "      vm_path: \"\"",
+                    "      sandbox_spec:",
+                    "        # An AgentENV template name or ID, not an OCI reference.",
+                    "        image: ${oc.env:AGENTENV_TEMPLATE}",
+                    "        ttl_s: 14400",
+                    "        ready_timeout_s: 900",
+                    "        entrypoint: null",
+                    "        env: {}",
+                    "        resources: {}",
+                    "        provider_options: {}",
                 ]
             ),
             *([] if max_steps is None else [f"      max_steps: {max_steps}"]),
