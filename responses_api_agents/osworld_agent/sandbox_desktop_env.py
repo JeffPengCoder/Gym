@@ -43,6 +43,7 @@ class _SandboxProviderInjectionMixin:
         sandbox_require_kvm: bool = True,
         sandbox_ready_timeout_s: float = 600.0,
         sandbox_ready_poll_s: float = 2.0,
+        sandbox_vnc_guest_port: int | None = None,
         **kwargs: Any,
     ) -> None:
         had_path_to_vm = "path_to_vm" in kwargs
@@ -60,6 +61,7 @@ class _SandboxProviderInjectionMixin:
             require_kvm=sandbox_require_kvm,
             ready_timeout_s=sandbox_ready_timeout_s,
             ready_poll_s=sandbox_ready_poll_s,
+            vnc_guest_port=sandbox_vnc_guest_port,
         )
         manager = DockerVMManager()
         requested_provider = str(kwargs.get("provider_name", "docker")).lower().strip()

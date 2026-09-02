@@ -332,6 +332,9 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_require_kvm: bool = True
     sandbox_ready_timeout_s: float = Field(default=600.0, gt=0)
     sandbox_ready_poll_s: float = Field(default=2.0, gt=0)
+    # Guest port of the template's noVNC. None follows the provider default:
+    # 8006 for the OSWorld Docker image, 6901 for AgentENV's osworld-slim.
+    sandbox_vnc_guest_port: int | None = Field(default=None, ge=1, le=65535)
     headless: bool = True
     screen_width: int = 1920
     screen_height: int = 1080
@@ -1504,6 +1507,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "sandbox_require_kvm": self.config.sandbox_require_kvm,
                 "sandbox_ready_timeout_s": self.config.sandbox_ready_timeout_s,
                 "sandbox_ready_poll_s": self.config.sandbox_ready_poll_s,
+                "sandbox_vnc_guest_port": self.config.sandbox_vnc_guest_port,
                 "max_steps": self.config.max_steps,
                 "max_trajectory_length": self.config.max_trajectory_length,
                 "sleep_after_execution": self.config.sleep_after_execution,

@@ -271,11 +271,86 @@ def test_build_spec_rejects_invalid_opensandbox_pool_spec() -> None:
 
 
 def test_provider_rejects_non_docker_config() -> None:
-    with pytest.raises(ValueError, match="Docker or OpenSandbox provider"):
+    with pytest.raises(ValueError, match="Docker, OpenSandbox or E2B provider"):
         osworld_sandbox.GymSandboxDesktopProvider(
             {"apptainer": {}},
             {"image": "osworld:fixed"},
         )
+
+
+def test_build_spec_uses_template_and_slim_vnc_port_for_agentenv(monkeypatch) -> None:
+    """AgentENV boots a template snapshot: no qcow2, no entrypoint, noVNC on 6901."""
+    monkeypatch.setenv("OSWORLD_RUN_ID", "agentenv-run")
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"e2b": {"connection": {"api_url": "http://agentenv.example"}}},
+        {
+            "image": "osworld-slim",
+            "ttl_s": 7200,
+            # Docker-profile leftovers that do not apply to a prebuilt template.
+            "entrypoint": ["/usr/bin/tini", "-s", "/run/entry.sh"],
+            "env": {"KVM": "Y", "RAM_SIZE": "4G"},
+            "resources": {"cpu": 4, "memory_mib": 16384},
+        },
+    )
+
+    # No local qcow2 exists; AgentENV restores a snapshot instead of booting one.
+    spec = provider._build_spec("", headless=True, os_type="Ubuntu")
+
+    assert spec.image == "osworld-slim"
+    assert spec.ttl_s == 7200
+    # 6901, not the Docker image's 8006.
+    assert spec.ports == (5000, 9222, 6901, 8080)
+    assert osworld_sandbox.OSWORLD_DOCKER_VNC_PORT not in spec.ports
+    assert spec.metadata["osworld-provider"] == "gym-e2b-sandbox"
+    assert spec.metadata["run-id"] == "agentenv-run"
+    # E2B rejects entrypoint outright and the template fixes the machine shape.
+    assert spec.entrypoint is None
+    assert spec.env == {}
+    assert spec.resources.cpu is None
+
+
+def test_agentenv_vnc_guest_port_is_overridable() -> None:
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"e2b": {}},
+        {"image": "osworld-slim"},
+        vnc_guest_port=5901,
+    )
+    assert provider._service_ports == (5000, 9222, 5901, 8080)
+
+
+def test_vnc_guest_port_must_not_collide_with_another_service() -> None:
+    with pytest.raises(ValueError, match="collides with another OSWorld service port"):
+        osworld_sandbox.GymSandboxDesktopProvider(
+            {"e2b": {}},
+            {"image": "osworld-slim"},
+            vnc_guest_port=5000,
+        )
+
+
+def test_docker_keeps_its_own_vnc_port() -> None:
+    """The AgentENV default must not move the Docker image's noVNC port."""
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"docker": {}},
+        {"image": "osworld:fixed"},
+    )
+    assert provider._service_ports == (5000, 9222, 8006, 8080)
+
+
+def test_build_spec_rejects_agentenv_spec_without_a_template() -> None:
+    provider = osworld_sandbox.GymSandboxDesktopProvider({"e2b": {}}, {})
+    with pytest.raises(ValueError, match="prebuilt template"):
+        provider._build_spec("", headless=True, os_type="Ubuntu")
+
+
+def test_build_spec_accepts_agentenv_template_via_provider_options() -> None:
+    """A tagged name or template ID is ambiguous in `image`, so it goes here."""
+    provider = osworld_sandbox.GymSandboxDesktopProvider(
+        {"e2b": {}},
+        {"provider_options": {"template": "01a04eb6-dcca-73c3-ac7b-f1988d17be60"}},
+    )
+    spec = provider._build_spec("", headless=True, os_type="Ubuntu")
+    assert spec.provider_options == {"template": "01a04eb6-dcca-73c3-ac7b-f1988d17be60"}
+    assert spec.image is None
 
 
 def test_build_spec_rejects_non_string_docker_options(tmp_path) -> None:
