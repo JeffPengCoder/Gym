@@ -277,10 +277,20 @@ async def request(
     # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
     if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
         return await _traced_request(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_connection_retries=_max_connection_retries,
+            _retry_transport_errors=_retry_transport_errors,
+            **kwargs,
         )
     return await _request_with_retries(
-        method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        method,
+        url,
+        _internal=_internal,
+        _max_connection_retries=_max_connection_retries,
+        _retry_transport_errors=_retry_transport_errors,
+        **kwargs,
     )
 
 
@@ -289,6 +299,7 @@ async def _traced_request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _retry_transport_errors: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -324,7 +335,12 @@ async def _traced_request(
             safe_set_span_attributes(span, attributes)
 
         response = await _request_with_retries(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_connection_retries=_max_connection_retries,
+            _retry_transport_errors=_retry_transport_errors,
+            **kwargs,
         )
 
         if span is not None:
@@ -346,6 +362,7 @@ async def _request_with_retries(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _retry_transport_errors: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()

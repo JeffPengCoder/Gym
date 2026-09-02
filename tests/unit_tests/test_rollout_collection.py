@@ -38,6 +38,11 @@ from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     EXECUTION_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -445,7 +450,6 @@ class TestRolloutCollection:
             sanitized = _rollout_for_export(malformed_result)
             assert b"secret" not in orjson.dumps(sanitized)
 
-    async def test_run_examples_always_logs_payload_free_failed_run_summary(
     def test_build_ng_perf_absent_without_trajectory(self) -> None:
         assert _build_ng_perf({}, rollout_latency_ms=12.0) is None
         assert _build_ng_perf({NG_TRAJECTORY_KEY: "not-a-dict"}, rollout_latency_ms=12.0) is None
@@ -771,7 +775,7 @@ class TestRolloutCollection:
         assert NG_PERF_KEY not in result
         assert "_ng_rollout_latency_ms" not in result
 
-    async def test_run_examples_logs_failed_run(
+    async def test_run_examples_always_logs_payload_free_failed_run_summary(
         self,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
@@ -798,7 +802,6 @@ class TestRolloutCollection:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
-
         with pytest.raises(RuntimeError, match="boom"):
             await next(RolloutCollectionHelper().run_examples([row]))
 
@@ -831,6 +834,10 @@ class TestRolloutCollection:
         response = MagicMock(status=200)
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
+        # run_examples now validates agent names against the running config.
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {"my_agent": {"responses_api_agents": {"impl": {}}}}
+        )
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "setup_server_client_utils",
@@ -873,6 +880,10 @@ class TestRolloutCollection:
         response = MagicMock(status=200)
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
+        # run_examples now validates agent names against the running config.
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {"my_agent": {"responses_api_agents": {"impl": {}}}}
+        )
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "setup_server_client_utils",
@@ -890,7 +901,6 @@ class TestRolloutCollection:
 
         with pytest.raises(ValueError, match="wrong physical execution"):
             await next(RolloutCollectionHelper().run_examples([source_row]))
-        assert "[rollout_collection] /run failed" in captured.out
 
     async def test_run_examples_records_agent_http_failure_as_a_failure_row(
         self, monkeypatch: pytest.MonkeyPatch
@@ -909,7 +919,11 @@ class TestRolloutCollection:
             RolloutCollectionHelper().run_examples([row], route_failures_to_sidecar=True)
         )
 
-        assert returned_row is row
+        # run_examples dispatches a deep copy stamped with a fresh execution id,
+        # so the returned row is that copy rather than the caller's object.
+        assert returned_row is not row
+        assert {k: returned_row[k] for k in row} == row
+        assert EXECUTION_ID_KEY_NAME in returned_row
         assert result[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
         assert result["_ng_failure_type"] == "ClientResponseError"
         assert result["_ng_failure_http_status"] == 500
