@@ -28,7 +28,16 @@ from responses_api_agents.osworld_agent.local_forwarder import start_forwarder
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.sandbox_provider")
 
-OSWORLD_SERVICE_PORTS = (5000, 9222, 8006, 8080)
+OSWORLD_SERVER_PORT = 5000
+OSWORLD_CHROMIUM_PORT = 9222
+OSWORLD_VLC_PORT = 8080
+# The noVNC port is the one service whose guest port is image-specific: the
+# upstream OSWorld Docker image publishes 8006, while the AgentENV
+# ``osworld-slim`` template runs noVNC on 6901. Everything else is fixed by
+# OSWorld itself.
+OSWORLD_DOCKER_VNC_PORT = 8006
+OSWORLD_SLIM_VNC_PORT = 6901
+OSWORLD_SERVICE_PORTS = (OSWORLD_SERVER_PORT, OSWORLD_CHROMIUM_PORT, OSWORLD_DOCKER_VNC_PORT, OSWORLD_VLC_PORT)
 OSWORLD_IMAGE_ENTRYPOINT = ("/usr/bin/tini", "-s", "/run/entry.sh")
 OSWORLD_QCOW2_MOUNT = "/System.qcow2"
 OSWORLD_WORKLOAD_LABEL = "nemo-gym.workload=osworld"
@@ -118,6 +127,7 @@ class GymSandboxDesktopProvider:
         require_kvm: bool = True,
         ready_timeout_s: float = 600.0,
         ready_poll_s: float = 2.0,
+        vnc_guest_port: int | None = None,
     ) -> None:
         if not isinstance(sandbox_provider, Mapping) or len(sandbox_provider) != 1:
             raise ValueError("sandbox_provider must be a single-key Gym Sandbox provider config")
@@ -130,13 +140,29 @@ class GymSandboxDesktopProvider:
 
         self._sandbox_provider = copy.deepcopy(dict(sandbox_provider))
         self._sandbox_provider_name = str(next(iter(self._sandbox_provider))).lower().strip()
-        if self._sandbox_provider_name not in {"docker", "opensandbox"}:
+        if self._sandbox_provider_name not in {"docker", "opensandbox", "e2b"}:
             raise ValueError(
-                "The OSWorld Gym Sandbox deployment requires Gym's Docker or "
-                "OpenSandbox provider, "
+                "The OSWorld Gym Sandbox deployment requires Gym's Docker, "
+                "OpenSandbox or E2B provider, "
                 f"got {self._sandbox_provider_name!r}"
             )
         self._sandbox_spec = copy.deepcopy(dict(sandbox_spec))
+        # E2B templates carry their own service layout; osworld-slim's noVNC
+        # listens on 6901 rather than the Docker image's 8006. An explicit
+        # value always wins so a differently-built template can say so.
+        if vnc_guest_port is None:
+            vnc_guest_port = OSWORLD_SLIM_VNC_PORT if self._sandbox_provider_name == "e2b" else OSWORLD_DOCKER_VNC_PORT
+        if isinstance(vnc_guest_port, bool) or not isinstance(vnc_guest_port, int) or not 1 <= vnc_guest_port <= 65535:
+            raise ValueError(f"vnc_guest_port must be a TCP port between 1 and 65535, got {vnc_guest_port!r}")
+        self._vnc_guest_port = vnc_guest_port
+        self._service_ports = (
+            OSWORLD_SERVER_PORT,
+            OSWORLD_CHROMIUM_PORT,
+            self._vnc_guest_port,
+            OSWORLD_VLC_PORT,
+        )
+        if len(set(self._service_ports)) != len(self._service_ports):
+            raise ValueError(f"vnc_guest_port {vnc_guest_port} collides with another OSWorld service port")
         self._require_kvm = bool(require_kvm)
         self._ready_timeout_s = float(ready_timeout_s)
         self._ready_poll_s = float(ready_poll_s)
@@ -153,7 +179,7 @@ class GymSandboxDesktopProvider:
             raise ValueError(f"Gym Sandbox OSWorld adapter currently supports Ubuntu only, got {os_type!r}")
 
         values = copy.deepcopy(self._sandbox_spec)
-        values["ports"] = list(dict.fromkeys([*(values.get("ports") or ()), *OSWORLD_SERVICE_PORTS]))
+        values["ports"] = list(dict.fromkeys([*(values.get("ports") or ()), *self._service_ports]))
 
         metadata = dict(values.get("metadata") or {})
         metadata.setdefault("workload", "osworld")
@@ -165,6 +191,36 @@ class GymSandboxDesktopProvider:
         if run_id:
             metadata.setdefault("run-id", run_id)
         values["metadata"] = metadata
+
+        if self._sandbox_provider_name == "e2b":
+            provider_options = dict(values.get("provider_options") or {})
+            if not values.get("image") and not provider_options.get("template"):
+                raise ValueError(
+                    "E2B OSWorld sandboxes start from a prebuilt template; set "
+                    "sandbox_spec.image to the template name or "
+                    "sandbox_spec.provider_options.template to a tagged name or template ID"
+                )
+            values["provider_options"] = provider_options
+            values.setdefault("ttl_s", 7200)
+            values.setdefault("ready_timeout_s", self._ready_timeout_s)
+            # The template fixes the entrypoint, the CPU/memory shape and the
+            # qcow2-free boot, so the Docker profile's entrypoint, resources and
+            # QEMU sizing env are meaningless here. E2B rejects `entrypoint`
+            # outright, and warns or raises on `resources`, so they are dropped
+            # rather than forwarded.
+            template_fields = {
+                key: values[key]
+                for key in (
+                    "image",
+                    "ttl_s",
+                    "ready_timeout_s",
+                    "ports",
+                    "metadata",
+                    "provider_options",
+                )
+                if key in values
+            }
+            return SandboxSpec(**template_fields)
 
         if self._sandbox_provider_name == "opensandbox":
             if not values.get("image"):
@@ -246,7 +302,7 @@ class GymSandboxDesktopProvider:
         return SandboxSpec(**values)
 
     def _resolve_service_endpoints(self, sandbox: Sandbox) -> tuple[str, dict[int, int]]:
-        endpoints = {container_port: sandbox.endpoint(container_port) for container_port in OSWORLD_SERVICE_PORTS}
+        endpoints = {container_port: sandbox.endpoint(container_port) for container_port in self._service_ports}
 
         # Preserve the zero-hop path for local Docker or a routed Pod network.
         try:
@@ -329,7 +385,7 @@ class GymSandboxDesktopProvider:
         try:
             sandbox.start(self._build_spec(path_to_vm, headless=headless, os_type=os_type))
             host, ports = self._resolve_service_endpoints(sandbox)
-            self._wait_for_vm_ready(sandbox, host, ports[5000])
+            self._wait_for_vm_ready(sandbox, host, ports[OSWORLD_SERVER_PORT])
         except BaseException:
             self._stop_forwarders()
             # Preserve the startup failure if best-effort cleanup also fails.
@@ -339,10 +395,10 @@ class GymSandboxDesktopProvider:
 
         self._sandbox = sandbox
         self._host = host
-        self.server_port = ports[5000]
-        self.chromium_port = ports[9222]
-        self.vnc_port = ports[8006]
-        self.vlc_port = ports[8080]
+        self.server_port = ports[OSWORLD_SERVER_PORT]
+        self.chromium_port = ports[OSWORLD_CHROMIUM_PORT]
+        self.vnc_port = ports[self._vnc_guest_port]
+        self.vlc_port = ports[OSWORLD_VLC_PORT]
         LOG.info("OSWorld guest is ready in Gym Sandbox provider=%s", self._sandbox_provider_name)
 
     def get_ip_address(self, path_to_vm: str) -> str:
