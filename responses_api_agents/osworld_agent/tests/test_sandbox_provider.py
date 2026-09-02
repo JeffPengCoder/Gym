@@ -327,6 +327,53 @@ def test_vnc_guest_port_must_not_collide_with_another_service() -> None:
         )
 
 
+def test_agentenv_gets_a_sentinel_vm_path_not_an_empty_one() -> None:
+    """An empty path sends DesktopEnv to DockerVMManager, which downloads.
+
+    The template already holds the guest, so resolving a local qcow2 is pure
+    waste -- ~11 GB per task, 361 times over. The sentinel exists only to stop
+    DesktopEnv reaching for the manager.
+    """
+    assert (
+        osworld_sandbox._resolve_pool_vm_path({"e2b": {}}, "")
+        == osworld_sandbox.AGENTENV_TEMPLATE_VM_PATH
+    )
+    assert (
+        osworld_sandbox._resolve_pool_vm_path({"e2b": {}}, None)
+        == osworld_sandbox.AGENTENV_TEMPLATE_VM_PATH
+    )
+    # An explicit path still wins, and the other backends are unchanged.
+    assert osworld_sandbox._resolve_pool_vm_path({"e2b": {}}, "/tmp/x.qcow2") == "/tmp/x.qcow2"
+    assert (
+        osworld_sandbox._resolve_pool_vm_path({"opensandbox": {}}, "")
+        == osworld_sandbox.OPENSANDBOX_POOL_VM_PATH
+    )
+    assert osworld_sandbox._resolve_pool_vm_path({"docker": {}}, "") == ""
+
+
+def test_generated_env_yaml_never_gives_agentenv_an_empty_vm_path(tmp_path) -> None:
+    from benchmarks.osworld import prepare
+
+    env_path = tmp_path / "env.yaml"
+    prepare.write_env(
+        env_path=env_path,
+        config_paths=prepare.PROFILE_CONFIGS["nano_omni"] + (prepare.AGENTENV_CONFIG,),
+        input_jsonl=tmp_path / "in.jsonl",
+        output_jsonl=tmp_path / "out.jsonl",
+        policy_base_url="http://127.0.0.1:8000/v1",
+        policy_api_key="EMPTY",  # pragma: allowlist secret
+        policy_model_name="m",
+        setup_cache_dir=tmp_path,
+        agent_name="osworld_nano_omni_agent",
+        execution_backend="gym_agentenv",
+        max_steps=200,
+        force=True,
+    )
+    text = env_path.read_text()
+    assert f'vm_path: "{osworld_sandbox.AGENTENV_TEMPLATE_VM_PATH}"' in text
+    assert 'vm_path: ""' not in text
+
+
 def test_vnc_guest_port_reaches_every_hop() -> None:
     """The port is configured in yaml and consumed five modules away.
 

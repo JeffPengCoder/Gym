@@ -44,14 +44,26 @@ OSWORLD_WORKLOAD_LABEL = "nemo-gym.workload=osworld"
 OSWORLD_RUN_ID_LABEL = "nemo-gym.run-id"
 OSWORLD_EXECUTION_ID_LABEL = EXECUTION_ID_SANDBOX_METADATA_KEY
 OPENSANDBOX_POOL_VM_PATH = "opensandbox-pool-managed"
+AGENTENV_TEMPLATE_VM_PATH = "agentenv-template-managed"
 
 
 def _resolve_pool_vm_path(sandbox_provider: Mapping[str, Any], path_to_vm: Any) -> Any:
-    """Avoid local qcow2 resolution when an OpenSandbox pool owns the guest image."""
+    """Return a sentinel when the guest image is owned server-side.
+
+    DesktopEnv asks its VM manager to resolve an empty path, and
+    DockerVMManager answers by downloading OSWorld's ~11 GB qcow2 -- once per
+    task. Both an OpenSandbox pool and an AgentENV template already hold the
+    guest, so the path exists only to keep DesktopEnv from reaching for the
+    manager at all.
+    """
 
     provider_name = str(next(iter(sandbox_provider), "")).lower().strip()
-    if provider_name == "opensandbox" and not path_to_vm:
+    if path_to_vm:
+        return path_to_vm
+    if provider_name == "opensandbox":
         return OPENSANDBOX_POOL_VM_PATH
+    if provider_name == "e2b":
+        return AGENTENV_TEMPLATE_VM_PATH
     return path_to_vm
 
 
