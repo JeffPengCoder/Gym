@@ -17,6 +17,18 @@ from nemo_gym.sandbox.providers.base import SandboxHandle
 from nemo_gym.sandbox.providers.e2b import E2BProvider
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_sandbox_url(monkeypatch):
+    """Pin the routing input these tests are about.
+
+    ``auto`` deliberately reads E2B_SANDBOX_URL, the same signal the SDK uses,
+    so any process that exports it -- a runner sourcing a credential file, for
+    instance -- flips the default from hostname to gateway. Tests asserting
+    hostname routing must say so rather than depend on the variable's absence.
+    """
+    monkeypatch.delenv("E2B_SANDBOX_URL", raising=False)
+
+
 ENVD_PORT = 49983
 SANDBOX_ID = "01a06156-bb35-7c00-a322-47e691e634f0"
 GATEWAY = "http://10.57.212.63:8000"
