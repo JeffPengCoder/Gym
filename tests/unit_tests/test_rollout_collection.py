@@ -793,7 +793,6 @@ class TestRolloutCollection:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
-
         with pytest.raises(RuntimeError, match="boom"):
             await next(RolloutCollectionHelper().run_examples([row]))
 
@@ -826,7 +825,10 @@ class TestRolloutCollection:
         response = MagicMock(status=200)
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
-        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        # run_examples now validates agent names against the running config.
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {"my_agent": {"responses_api_agents": {"impl": {}}}}
+        )
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "setup_server_client_utils",
@@ -869,7 +871,10 @@ class TestRolloutCollection:
         response = MagicMock(status=200)
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
-        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        # run_examples now validates agent names against the running config.
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {"my_agent": {"responses_api_agents": {"impl": {}}}}
+        )
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "setup_server_client_utils",
@@ -905,8 +910,11 @@ class TestRolloutCollection:
             RolloutCollectionHelper().run_examples([row], route_failures_to_sidecar=True)
         )
 
+        # run_examples dispatches a deep copy stamped with a fresh execution id,
+        # so the returned row is that copy rather than the caller's object.
         assert returned_row is not row
         assert EXECUTION_ID_KEY_NAME not in row
+        assert {key: returned_row[key] for key in row} == row
         assert returned_row[EXECUTION_ID_KEY_NAME].startswith("execution-")
         assert result[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
         assert result["_ng_failure_type"] == "ClientResponseError"
