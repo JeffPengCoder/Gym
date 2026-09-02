@@ -1684,6 +1684,9 @@ def run_osworld_task(
     sandbox_vm_path: Optional[str] = None,
     sandbox_require_kvm: bool = True,
     sandbox_ready_timeout_s: float = 600.0,
+    # Guest port of the template's noVNC. None follows the adapter's per-provider
+    # default: 8006 for the OSWorld Docker image, 6901 for AgentENV's osworld-slim.
+    sandbox_vnc_guest_port: Optional[int] = None,
     sandbox_ready_poll_s: float = 2.0,
     max_steps: int = 15,
     max_trajectory_length: int = 3,
@@ -1959,6 +1962,7 @@ def run_osworld_task(
                     "sandbox_require_kvm": sandbox_require_kvm,
                     "sandbox_ready_timeout_s": sandbox_ready_timeout_s,
                     "sandbox_ready_poll_s": sandbox_ready_poll_s,
+                    "sandbox_vnc_guest_port": sandbox_vnc_guest_port,
                 }
             )
         if not use_remote_resources and effective_vm_path:
