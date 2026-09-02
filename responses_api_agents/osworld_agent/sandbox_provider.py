@@ -13,6 +13,7 @@ import contextlib
 import copy
 import logging
 import os
+import threading
 import time
 from collections.abc import Mapping
 from http.server import ThreadingHTTPServer
@@ -140,6 +141,7 @@ class GymSandboxDesktopProvider:
         ready_timeout_s: float = 600.0,
         ready_poll_s: float = 2.0,
         vnc_guest_port: int | None = None,
+        cleanup_timeout_s: float = 120.0,
     ) -> None:
         if not isinstance(sandbox_provider, Mapping) or len(sandbox_provider) != 1:
             raise ValueError("sandbox_provider must be a single-key Gym Sandbox provider config")
@@ -178,6 +180,7 @@ class GymSandboxDesktopProvider:
         self._require_kvm = bool(require_kvm)
         self._ready_timeout_s = float(ready_timeout_s)
         self._ready_poll_s = float(ready_poll_s)
+        self._cleanup_timeout_s = float(cleanup_timeout_s)
         self._sandbox: Sandbox | None = None
         self._forwarders: list[ThreadingHTTPServer] = []
         self._host: str | None = None
@@ -407,11 +410,28 @@ class GymSandboxDesktopProvider:
             sandbox.start(self._build_spec(path_to_vm, headless=headless, os_type=os_type))
             host, ports = self._resolve_service_endpoints(sandbox)
             self._wait_for_vm_ready(sandbox, host, ports[OSWORLD_SERVER_PORT])
-        except BaseException:
+        except BaseException as startup_error:
+            # Log before cleaning up. `Sandbox.stop()` waits on the sync loop for
+            # SYNC_OPERATION_TIMEOUT_S, an hour by default, and the raise below
+            # is what carries the diagnosis -- so a slow cleanup does not just
+            # delay recovery, it hides why the start failed for that whole hour.
+            LOG.warning(
+                "OSWorld sandbox start failed on provider=%s: %s: %s",
+                self._sandbox_provider_name,
+                type(startup_error).__name__,
+                startup_error,
+            )
             self._stop_forwarders()
-            # Preserve the startup failure if best-effort cleanup also fails.
-            with contextlib.suppress(Exception):
-                sandbox.stop()
+            # Best-effort, and bounded: a cleanup that cannot finish must not
+            # outlive the failure it is cleaning up after.
+            cleanup = threading.Thread(target=self._stop_quietly, args=(sandbox,), daemon=True)
+            cleanup.start()
+            cleanup.join(self._cleanup_timeout_s)
+            if cleanup.is_alive():
+                LOG.warning(
+                    "OSWorld sandbox cleanup did not finish within %.0fs; abandoning it to the TTL",
+                    self._cleanup_timeout_s,
+                )
             raise
 
         self._sandbox = sandbox
@@ -421,6 +441,11 @@ class GymSandboxDesktopProvider:
         self.vnc_port = ports[self._vnc_guest_port]
         self.vlc_port = ports[OSWORLD_VLC_PORT]
         LOG.info("OSWorld guest is ready in Gym Sandbox provider=%s", self._sandbox_provider_name)
+
+    @staticmethod
+    def _stop_quietly(sandbox: Sandbox) -> None:
+        with contextlib.suppress(Exception):
+            sandbox.stop()
 
     def get_ip_address(self, path_to_vm: str) -> str:
         del path_to_vm
