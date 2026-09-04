@@ -279,3 +279,171 @@ def test_parse_failures_still_retry_normally_and_do_not_shrink() -> None:
     assert len(payloads) == 2
     assert info["model_calls"][0]["failure_kind"] == "unparseable"
     assert _image_turns(payloads[0]) == _image_turns(payloads[1]), "prompt unchanged on a parse retry"
+
+
+def test_overflow_shrinking_terminates_when_even_one_image_is_rejected() -> None:
+    """The shrink must bottom out, not spin or drop the current observation."""
+
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=30,
+        max_image_history_length=3,
+        max_live_images=10,
+        parse_retries=6,
+    )
+    payloads: List[Dict[str, Any]] = []
+
+    def always_too_long(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        payloads.append(payload)
+        raise ValueError("Error code: 400 - Input length (99999) exceeds model's maximum context length (64000).")
+
+    agent.call_llm = always_too_long  # type: ignore[method-assign]
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+
+    assert actions == []
+    assert len(payloads) == 6, "exactly parse_retries attempts, no more and no spinning"
+    assert all(len(_image_turns(payload)) >= 1 for payload in payloads), "never sends zero images"
+    assert info["agent_outcome"] == "model_context_overflow"
+    assert info["parse_failure"]["failure_kind_counts"] == {"context_overflow": 6}
+
+
+def test_overflow_shrink_under_a_sink_policy_keeps_the_sink() -> None:
+    """Budget pressure may shrink the recent window; it must not drop the sink."""
+
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=30,
+        history_policy={
+            "schema_version": 1,
+            "name": "sink_window",
+            "params": {"sink": 2, "low_water": 5, "high_water": 8},
+        },
+        parse_retries=4,
+    )
+    payloads: List[Dict[str, Any]] = []
+    limit = {"images": 3}
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        payloads.append(payload)
+        if len(_image_turns(payload)) > limit["images"]:
+            raise ValueError("Error code: 400 - maximum context length exceeded")
+        return _reply(len(payloads) - 1)
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    for index in range(10):
+        _, actions, _ = agent.predict(
+            "Complete the task.", {"screenshot": f"png-{index + 1}".encode()}
+        )
+        assert actions == ["pyautogui.click(960, 540)"], f"step {index + 1} must still act"
+
+    accepted = [payload for payload in payloads if len(_image_turns(payload)) <= limit["images"]]
+    for payload in accepted:
+        turns = _image_turns(payload)
+        assert turns[0] == 1, "the sink screenshot survives every shrink"
+        assert turns[-1] == max(turns), "the current observation is always last and present"
+
+
+def test_shrink_events_are_recorded_on_the_step_that_recovered() -> None:
+    """A recovered step must still say it was rejected and shrunk.
+
+    Recording the evidence only on rollouts that died is how twenty HTTP 400s
+    left no trace in a whole benchmark release.
+    """
+
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=30,
+        max_image_history_length=3,
+        max_live_images=10,
+        parse_retries=5,
+    )
+    calls = {"n": 0}
+    reject_at_call = 4  # step 4, where the window first carries four images
+
+    def reject_once(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == reject_at_call:
+            raise ValueError(
+                "Error code: 400 - Input length (70000) exceeds model's maximum context length (64000)."
+            )
+        return _reply(calls["n"])
+
+    agent.call_llm = reject_once  # type: ignore[method-assign]
+    infos = []
+    for index in range(5):
+        _, actions, info = agent.predict(
+            "Complete the task.", {"screenshot": f"png-{index + 1}".encode()}
+        )
+        assert actions == ["pyautogui.click(960, 540)"], f"step {index + 1} recovered"
+        infos.append(info)
+
+    rejected_step = infos[3]
+    assert rejected_step["prompt_shrink_events"] == [
+        {"parse_attempt": 1, "from_images": 4, "to_images": 3, "reason": "context_overflow"}
+    ]
+    assert rejected_step["failure_kind_counts"] == {"context_overflow": 1}
+    # Steps that never hit a rejection stay byte-clean: no extra keys at all.
+    for index, info in enumerate(infos):
+        if index == 3:
+            continue
+        assert "prompt_shrink_events" not in info, f"step {index + 1} should carry no shrink evidence"
+        assert "failure_kind_counts" not in info
+
+
+def test_sink_window_agent_exposes_its_policy_in_the_agent_contract() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=10,
+        history_policy={
+            "schema_version": 1,
+            "name": "sink_window",
+            "params": {"sink": 1, "low_water": 3, "high_water": 10},
+        },
+        parse_retries=1,
+    )
+    contract = agent.agent_contract["history_policy"]
+
+    assert contract["name"] == "sink_window"
+    assert contract["params"] == {"sink": 1, "low_water": 3, "high_water": 10}
+    assert contract["supports_append_stable_intervals"] is True
+    assert contract["history_policy_id"].startswith("osworld-history-policy-")
+    # A sliding sink window is not append stable, and must say so.
+    sliding = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=10,
+        history_policy={
+            "schema_version": 1,
+            "name": "sink_window",
+            "params": {"sink": 1, "low_water": 4, "high_water": 4},
+        },
+        parse_retries=1,
+    )
+    assert sliding.agent_contract["history_policy"]["supports_append_stable_intervals"] is False
+
+
+def test_sink_window_telemetry_reaches_the_model_call_records() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=20,
+        history_policy={
+            "schema_version": 1,
+            "name": "sink_window",
+            "params": {"sink": 1, "low_water": 4, "high_water": 4},
+        },
+        parse_retries=1,
+    )
+    infos = []
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        return _reply(0)
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    for index in range(9):
+        _, _, info = agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
+        infos.append(info["model_calls"][0])
+
+    last = infos[-1]
+    assert last["prompt_snapshot_count"] == 4
+    assert last["snapshot_sink_size"] == 1
+    assert last["snapshot_image_intervals"] == [[0, 1], [6, 9]]
+    assert last["history_policy_name"] == "sink_window"
