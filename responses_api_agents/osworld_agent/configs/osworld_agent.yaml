@@ -92,6 +92,7 @@ osworld_simple_agent:
       step_timeout: 60          # per-action subprocess timeout
       task_timeout: 1800        # end-to-end attempt deadline: VM create/setup + agent steps + evaluation
       task_cancel_grace_s: 30.0 # graceful env.close()/sandbox release before force-cancelling the Ray worker
+      ray_task_resources: {}    # optional semantic Ray resources that pin each rollout task to eligible hosts
       docker_port_lock_timeout: 300.0  # infrastructure-only wait for concurrent Docker VM port allocation
       evaluator_disable_gpu: true  # keep EasyOCR from reserving rollout GPU memory
       reward_mode: binary          # raw preserves OSWorld partial scores; binary keeps the historical Gym training convention
