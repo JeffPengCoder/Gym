@@ -1446,6 +1446,11 @@ class TestApp:
     def test_sanity(self) -> None:
         OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
 
+    @pytest.mark.parametrize("resources", [{"": 1.0}, {"nrl_gym_node": 0.0}, {"nrl_gym_node": float("inf")}])
+    def test_ray_task_resources_reject_invalid_requirements(self, resources) -> None:
+        with pytest.raises(ValueError, match="ray_task_resources"):
+            make_config(ray_task_resources=resources)
+
     def test_removed_training_switches_fail_loudly(self) -> None:
         with pytest.raises(ValueError, match="trajectory evidence is now automatic"):
             OSWorldAgent(
@@ -1663,6 +1668,7 @@ class TestApp:
         server_client.global_config_dict = {"observability_enabled": True}
         agent = OSWorldAgent(
             config=make_config(
+                ray_task_resources={"nrl_gym_node": 0.001},
                 agent_kwargs={"parse_retries": 5},
                 agent_kwargs_by_rollout_purpose={
                     "training": {"parse_retries": 1},
@@ -1741,6 +1747,7 @@ class TestApp:
         runtime_env = mock_remote.options.call_args.kwargs["runtime_env"]
         assert runtime_env["py_executable"]
         assert runtime_env["env_vars"]["RUN_TAG"] == "run-001"
+        assert mock_remote.options.call_args.kwargs["resources"] == {"nrl_gym_node": 0.001}
 
     def test_derived_run_identity_is_stable_for_standalone_benchmark(self) -> None:
         identity_a = resolve_trajectory_identity(

@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 import ray
 from fastapi import Body
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -365,6 +365,10 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # can stop cleanly before the parent has to cancel the Ray task.
     task_timeout: int = 1800
     task_cancel_grace_s: float = Field(default=30.0, gt=0)
+    # Optional semantic Ray resources for each OSWorld rollout task. This lets
+    # an embedding scheduler keep image-heavy environment work off trainer
+    # hosts without coupling Gym to site-specific node names.
+    ray_task_resources: Dict[str, float] = Field(default_factory=dict)
     docker_port_lock_timeout: float = Field(default=300.0, gt=0)  # concurrent Docker VM port allocation
     evaluator_disable_gpu: bool = True
     reward_mode: Literal["binary", "raw"] = "binary"
@@ -395,6 +399,16 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # declared: an intentional difference is allowed and both identities are
     # emitted in runtime evidence.
     agent_contract_parity_mode: Literal["strict", "declared"] = "strict"
+
+    @field_validator("ray_task_resources")
+    @classmethod
+    def validate_ray_task_resources(cls, value: Dict[str, float]) -> Dict[str, float]:
+        for name, quantity in value.items():
+            if not name.strip():
+                raise ValueError("ray_task_resources keys must be non-empty")
+            if not math.isfinite(quantity) or quantity <= 0:
+                raise ValueError("ray_task_resources values must be finite and greater than zero")
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -1550,9 +1564,10 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 runtime_env: Dict[str, Any] = {"py_executable": sys.executable}
                 if rollout_env:
                     runtime_env["env_vars"] = rollout_env
-                future = _run_osworld_task_remote.options(
-                    runtime_env=runtime_env,
-                ).remote(task_config, runner_kwargs)
+                ray_task_options: Dict[str, Any] = {"runtime_env": runtime_env}
+                if self.config.ray_task_resources:
+                    ray_task_options["resources"] = dict(self.config.ray_task_resources)
+                future = _run_osworld_task_remote.options(**ray_task_options).remote(task_config, runner_kwargs)
                 # ``run_osworld_task`` checks task_timeout only after DesktopEnv
                 # has been constructed.  A wedged sandbox create therefore used
                 # to leave ``ray.get`` waiting indefinitely.  Keep the child-side
