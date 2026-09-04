@@ -188,3 +188,55 @@ def test_plan_history_rejects_a_non_positive_budget() -> None:
     spec = HistoryPolicySpec.fixed(3)
     with pytest.raises(ValueError, match="max_images must be a positive integer"):
         plan_history(spec, HistoryPolicyState(), completed_turns=3, max_images=0)
+
+
+def test_randomised_policies_never_violate_the_selection_invariants() -> None:
+    """Sweep the parameter space a fixed table cannot cover.
+
+    Seeded so a failure is reproducible from the printed case rather than
+    flaky. Every invariant here is one a wrong plan would break silently:
+    a duplicated turn inflates the image count past the budget, a missing
+    current observation blinds the model, and a gap in the text/image union
+    would drop a turn the docstring promises is never dropped.
+    """
+
+    import random
+
+    rng = random.Random(20260904)
+    for _ in range(300):
+        kind = rng.choice(["fixed", "hysteresis", "sink_window"])
+        if kind == "fixed":
+            keep = rng.randint(1, 12)
+            spec = HistoryPolicySpec.fixed(keep)
+        elif kind == "hysteresis":
+            low = rng.randint(1, 8)
+            spec = HistoryPolicySpec.hysteresis(low_water=low, high_water=low + rng.randint(1, 12))
+        else:
+            sink = rng.randint(1, 4)
+            low = sink + rng.randint(1, 6)
+            spec = HistoryPolicySpec.sink_window(
+                sink=sink, low_water=low, high_water=low + rng.choice([0, 1, 5, 12])
+            )
+        budget = rng.choice([None, None, 1, 2, 3, 7])
+        turns = rng.randint(1, 120)
+
+        state = HistoryPolicyState()
+        for completed in range(turns):
+            plan = plan_history(spec, state, completed_turns=completed, max_images=budget)
+            case = f"{spec.to_config()} budget={budget} n={completed}"
+            images = plan.image_turns
+            assert images == tuple(sorted(set(images))), case
+            assert completed in images, f"current observation missing: {case}"
+            assert set(images) | set(plan.text_turns) == set(range(completed + 1)), case
+            assert not plan.dropped_turns, case
+            if budget is not None:
+                assert len(images) <= max(budget, spec.sink + 1), case
+            else:
+                assert len(images) <= spec.high_water, case
+            if spec.name == "sink_window":
+                assert set(range(min(spec.sink, completed + 1))) <= set(images), case
+            else:
+                assert len(plan.image_intervals) == 1, case
+            for (_, previous_high), (next_low, _) in zip(plan.image_intervals, plan.image_intervals[1:]):
+                assert previous_high < next_low, f"intervals must be disjoint and ordered: {case}"
+            state = plan.next_state

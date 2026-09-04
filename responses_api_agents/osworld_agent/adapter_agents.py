@@ -1114,6 +1114,17 @@ class NemotronV3NanoOmniAgent:
             )
             return last_error, [], parsed_info
 
+        # A step that recovered after shrinking its prompt still consumed extra
+        # sampling and rendered a smaller history than the policy asked for.
+        # Record that on the successful step too, otherwise the only trace of a
+        # server rejection would be on rollouts that died -- which is exactly
+        # how twenty HTTP 400s went missing from a whole benchmark release.
+        # Emitted only when non-empty, so the clean path keeps its byte shape.
+        if prompt_shrink_events:
+            parsed_info["prompt_shrink_events"] = list(prompt_shrink_events)
+        if failure_kind_counts:
+            parsed_info["failure_kind_counts"] = dict(failure_kind_counts)
+
         actions = [self._scale_windows_scroll(action) for action in actions]
         self.observations.append(obs)
         self.actions.append(low_level)
