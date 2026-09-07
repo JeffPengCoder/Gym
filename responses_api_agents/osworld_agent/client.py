@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+import requests
+
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
 from responses_api_agents.osworld_agent.proxy import inspect_proxy_config_file, task_requires_proxy
 from responses_api_agents.osworld_agent.rollout_outcome import (
@@ -44,6 +46,10 @@ from responses_api_agents.osworld_agent.rollout_outcome import (
     classify_rollout_outcome,
 )
 from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
+from responses_api_agents.osworld_agent.runtime_errors import (
+    OSWorldActionTimeoutError,
+    OSWorldModelTimeoutError,
+)
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.client")
@@ -1692,7 +1698,8 @@ def run_osworld_task(
     cache_dir: str = "cache",
     setup_cache_dir: Optional[str] = None,
     mem_limit_mb: int = 0,
-    step_timeout: int = 60,  # advisory; per-action subprocess timeout (provider-dependent)
+    step_timeout: float = 60.0,  # per-action backend timeout where supported
+    model_timeout: float = 900.0,
     task_timeout: int = 1800,  # cooperative deadline checked between steps and by Pointer model calls
     docker_port_lock_timeout: float = 300.0,
     runner_name: str = "gym_pyautogui",
@@ -1723,6 +1730,10 @@ def run_osworld_task(
     """
     if reward_mode not in {"raw", "binary"}:
         raise ValueError(f"Unsupported reward_mode: {reward_mode!r}")
+    if step_timeout <= 0:
+        raise ValueError("step_timeout must be positive")
+    if model_timeout <= 0:
+        raise ValueError("model_timeout must be positive")
     effective_agent_contract = dict(agent_contract) if agent_contract is not None else None
 
     def proxy_precondition_failure(reason: str, message: str) -> RolloutResult:
@@ -1856,6 +1867,7 @@ def run_osworld_task(
     agent_terminal_action: Optional[str] = None
     agent_stop_reason: Optional[str] = None
     agent_model_call_completed: Optional[bool] = None
+    operation_failure_reason: Optional[str] = None
     evaluation_error: Optional[str] = None
     proxy_setup_error = False
     rollout_phase = "before_environment"
@@ -1893,6 +1905,8 @@ def run_osworld_task(
             "model_protocol_id": model_protocol_id,
             "sleep_after_execution": sleep_after_execution,
             "task_timeout": task_timeout,
+            "step_timeout": step_timeout,
+            "model_timeout": model_timeout,
             "model_name": policy_model_name,
             "max_tokens": policy_max_tokens,
             "temperature": policy_temperature,
@@ -1945,6 +1959,7 @@ def run_osworld_task(
                     "request_timeout": resources_request_timeout,
                     "connect_timeout": resources_connect_timeout,
                     "request_retries": resources_request_retries,
+                    "action_timeout": step_timeout,
                 }
             )
         elif use_gym_sandbox:
@@ -2340,6 +2355,8 @@ def run_osworld_task(
             except (Exception, _PointerRetryDeadline) as exc:  # noqa: BLE001 — record + abort, don't crash the VM.
                 if isinstance(exc, _PointerRetryDeadline) and exc.task_deadline:
                     timed_out = True
+                if isinstance(exc, OSWorldModelTimeoutError):
+                    operation_failure_reason = "model_timeout"
                 error = f"agent/model call failed at step {step_idx}: {exc}"
                 task_logger.exception("Agent/model call failed at step %d", step_idx)
                 steps.append(
@@ -2424,6 +2441,8 @@ def run_osworld_task(
                 try:
                     obs, reward, done, info = env.step(action, sleep_after_execution)
                 except Exception as exc:  # noqa: BLE001 - record bad model/controller actions.
+                    if isinstance(exc, (OSWorldActionTimeoutError, TimeoutError, requests.Timeout)):
+                        operation_failure_reason = "action_timeout"
                     error = f"env.step() failed at step {step_idx}: {exc}"
                     task_logger.exception("Environment step failed at step %d for action %r", step_idx, action)
                     break
@@ -2568,6 +2587,8 @@ def run_osworld_task(
 
     if timed_out:
         infrastructure_failure_reason = "timeout"
+    elif operation_failure_reason is not None:
+        infrastructure_failure_reason = operation_failure_reason
     elif evaluation_error:
         infrastructure_failure_reason = "evaluator_error"
     elif proxy_setup_error:

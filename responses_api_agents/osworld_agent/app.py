@@ -73,6 +73,7 @@ from responses_api_agents.osworld_agent.rollout_outcome import (
     classify_rollout_outcome,
 )
 from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NAME, load_attr, resolve_runner_spec
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldModelTimeoutError
 from responses_api_agents.osworld_agent.trajectory import (
     build_trajectory_envelope,
     resolve_trajectory_identity,
@@ -356,8 +357,9 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     max_tokens: int = 1500
     temperature: float = 1.0
     top_p: Optional[float] = 0.9  # set to null in yaml when running a reasoning model that rejects top_p
+    model_timeout: float = Field(default=900.0, gt=0)
     mem_limit_mb: int = 0  # the upstream Docker provider owns QEMU/container limits
-    step_timeout: int = 60  # per-action subprocess timeout (forwarded to provider; advisory in client.py)
+    step_timeout: float = Field(default=60.0, gt=0)  # per-action backend timeout where supported
     # End-to-end wall-clock deadline from Ray dispatch through VM creation,
     # desktop setup, agent steps, and evaluation.  The child also
     # receives this value as a cooperative deadline so model/step boundaries
@@ -398,6 +400,9 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # declared: an intentional difference is allowed and both identities are
     # emitted in runtime evidence.
     agent_contract_parity_mode: Literal["strict", "declared"] = "strict"
+    # Schema 2 is the complete validation envelope. Schema 3 is the bounded
+    # post-evaluation Gym-to-trainer projection and is the server default.
+    exact_trace_transport_version: Literal[2, 3] = 3
 
     @field_validator("ray_task_resources")
     @classmethod
@@ -523,6 +528,7 @@ class OSWorldAgentResponse(NeMoGymResponse):
     trajectory_transitions: Optional[List[Dict[str, Any]]] = None
     trajectory_model_calls: Optional[List[Dict[str, Any]]] = None
     model_call_summaries: Optional[List[Dict[str, Any]]] = None
+    model_call_metadata: Optional[List[Dict[str, Any]]] = None
     context_compaction_contract: Optional[Dict[str, Any]] = None
     execution_context: Optional[Dict[str, Any]] = None
     agent_contract: Optional[Dict[str, Any]] = None
@@ -612,6 +618,7 @@ def _build_model_fn(
     max_tokens: int,
     temperature: float,
     top_p: Optional[float],
+    model_timeout_s: float = 900.0,
     log_context: Optional[Mapping[str, Any]] = None,
 ) -> Callable[[str, str, List[Dict[str, Any]]], str]:
     """Return a sync ``model_fn`` that hits a Gym vLLM/OpenAI-compatible model.
@@ -673,6 +680,7 @@ def _build_model_fn(
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
+            "timeout": float(model_timeout_s),
         }
         # Some reasoning models (e.g. openai/openai/gpt-5.5 via inference-api)
         # reject top_p outright with HTTP 400. Skip the kwarg when None so
@@ -683,7 +691,14 @@ def _build_model_fn(
         context_headers = _log_context_headers(base_log_context)
         if context_headers:
             create_kwargs["extra_headers"] = context_headers
-        resp = client.chat.completions.create(**create_kwargs)
+        try:
+            resp = client.chat.completions.create(**create_kwargs)
+        except Exception as exc:  # noqa: BLE001 - translate only the SDK's typed timeout.
+            from openai import APITimeoutError  # noqa: PLC0415
+
+            if isinstance(exc, APITimeoutError):
+                raise OSWorldModelTimeoutError(f"policy model call exceeded {model_timeout_s:g}s") from exc
+            raise
         return resp.choices[0].message.content or ""
 
     return _call
@@ -694,6 +709,7 @@ def _build_messages_model_fn(
     base_url: str,
     model_name: str,
     api_key: str,
+    model_timeout_s: float = 900.0,
     log_context: Optional[Mapping[str, Any]] = None,
     rollout_purpose: Optional[Literal["training", "evaluation"]] = None,
 ):
@@ -716,6 +732,7 @@ def _build_messages_model_fn(
             "messages": messages,
             "max_tokens": payload.get("max_tokens"),
             "temperature": payload.get("temperature"),
+            "timeout": float(model_timeout_s),
         }
         if payload.get("top_p") is not None:
             create_kwargs["top_p"] = payload["top_p"]
@@ -786,6 +803,10 @@ def _build_messages_model_fn(
                         "error": repr(exc),
                     }
                 )
+            from openai import APITimeoutError  # noqa: PLC0415
+
+            if isinstance(exc, APITimeoutError):
+                raise OSWorldModelTimeoutError(f"policy model call exceeded {model_timeout_s:g}s") from exc
             raise
         choice = resp.choices[0]
         finish_reason_error = None
@@ -1114,6 +1135,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     max_tokens = runner_kwargs.pop("max_tokens")
     temperature = runner_kwargs.pop("temperature")
     top_p = runner_kwargs.pop("top_p")
+    model_timeout = float(runner_kwargs.get("model_timeout", 900.0))
     rollout_purpose = runner_kwargs.pop("rollout_purpose", None)
     execution_id = runner_kwargs.pop("execution_id", None)
     log_context = _normalize_log_context(runner_kwargs.pop("log_context", None))
@@ -1125,12 +1147,14 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         max_tokens=max_tokens,
         temperature=temperature,
         top_p=top_p,
+        model_timeout_s=model_timeout,
         log_context=log_context,
     )
     messages_model_fn = _build_messages_model_fn(
         base_url=base_url,
         model_name=model_name,
         api_key=api_key,
+        model_timeout_s=model_timeout,
         log_context=log_context,
         rollout_purpose=rollout_purpose,
     )
@@ -1525,6 +1549,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "setup_cache_dir": self.config.setup_cache_dir,
                 "mem_limit_mb": self.config.mem_limit_mb,
                 "step_timeout": self.config.step_timeout,
+                "model_timeout": self.config.model_timeout,
                 "task_timeout": self.config.task_timeout,
                 "docker_port_lock_timeout": self.config.docker_port_lock_timeout,
                 "evaluator_disable_gpu": self.config.evaluator_disable_gpu,
@@ -1635,6 +1660,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 top_p,
                 max_trajectory_length=self.config.max_trajectory_length,
                 max_output_tokens=max_tokens,
+                exact_trace_transport_version=self.config.exact_trace_transport_version,
             )
 
 
@@ -1701,6 +1727,7 @@ def _build_response(
     *,
     max_trajectory_length: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
+    exact_trace_transport_version: Literal[2, 3] = 2,
 ) -> OSWorldVerifyResponse:
     """Pack one run without changing its prompt policy for training consumers."""
 
@@ -1775,6 +1802,7 @@ def _build_response(
                 "max_output_tokens": max_output_tokens,
             },
             policy_config=policy_config,
+            transport_schema_version=exact_trace_transport_version,
         )
         if exact_fields.get("media_assets") != trajectory_fields.get("media_assets"):
             raise ValueError("Semantic trajectory and exact evidence disagree about media assets")
@@ -1782,6 +1810,11 @@ def _build_response(
         # Exact model calls, including parser retries, are the trainable units.
         # Semantic step messages remain available through trajectory_transitions.
         output = exact_fields.pop("model_call_output")
+        if exact_trace_transport_version == 3:
+            # The schema-3 sidecar and canonical output arrays retain all
+            # training evidence. The full projected prompts and their duplicate
+            # generation arrays are validation/debug data, not transport data.
+            trajectory_fields.pop("trajectory_model_calls", None)
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",

@@ -66,6 +66,8 @@ def test_evaluated_policy_and_environment_outcomes_remain_runtime_eligible(
     [
         "timeout",
         "task_timeout",
+        "model_timeout",
+        "action_timeout",
         "model_call_failed",
         "rollout_error",
         "evaluator_error",

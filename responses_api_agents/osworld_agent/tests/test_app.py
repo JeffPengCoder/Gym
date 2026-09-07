@@ -44,7 +44,8 @@ from responses_api_agents.osworld_agent.rollout_outcome import (
     LEGACY_RUNTIME_ADMISSION_POLICY_ID,
     RUNTIME_ADMISSION_POLICY_ID,
 )
-from responses_api_agents.osworld_agent.trajectory import resolve_trajectory_identity, stable_id
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldModelTimeoutError
+from responses_api_agents.osworld_agent.trajectory import canonical_digest, resolve_trajectory_identity, stable_id
 
 
 DEFAULT_OSWORLD_TASK: Dict[str, Any] = {
@@ -225,7 +226,40 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(
         "messages": messages,
         "max_tokens": 32,
         "temperature": 0.6,
+        "timeout": 900.0,
     }
+
+
+@patch("openai.DefaultHttpxClient")
+@patch("openai.OpenAI")
+def test_messages_model_fn_enforces_and_types_model_timeout(mock_openai, _mock_http_client) -> None:
+    import httpx
+    from openai import APITimeoutError
+
+    client = mock_openai.return_value
+    client.chat.completions.create.side_effect = APITimeoutError(
+        request=httpx.Request("POST", "http://policy/v1/chat/completions")
+    )
+    call = _build_messages_model_fn(
+        base_url="http://policy/v1",
+        model_name="policy",
+        api_key="test-key",  # pragma: allowlist secret
+        model_timeout_s=12,
+    )
+    messages = [{"role": "user", "content": "inspect"}]
+
+    with pytest.raises(OSWorldModelTimeoutError, match="exceeded 12s"):
+        call(
+            messages,
+            {
+                "model": "policy",
+                "messages": messages,
+                "max_tokens": 32,
+                "temperature": 0.6,
+            },
+        )
+
+    assert client.chat.completions.create.call_args.kwargs["timeout"] == 12.0
 
 
 @patch("openai.DefaultHttpxClient")
@@ -1102,6 +1136,35 @@ def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
         ["pyautogui.click(10, 20)"],
         ["DONE"],
     ]
+
+    transport_response = _build_response(
+        request,
+        result,
+        "test-policy",
+        1.0,
+        0.9,
+        max_trajectory_length=3,
+        max_output_tokens=512,
+        exact_trace_transport_version=3,
+    )
+    transport = transport_response.response
+    assert transport.context_compaction_contract is not None
+    assert transport.context_compaction_contract["schema_version"] == 3
+    assert transport.completion_evidence is None
+    assert transport.trajectory_model_calls is None
+    metadata = transport.model_call_metadata or []
+    assert len(metadata) == 2
+    assert "prompt_token_ids" not in metadata[0]
+    assert "sampled_token_ids" not in metadata[0]
+    assert "sampled_logprobs" not in metadata[0]
+    assert metadata[0]["generation_evidence_digest"] == canonical_digest(
+        {
+            "prompt_token_ids": [10, 11],
+            "sampled_token_ids": [20, 21],
+            "sampled_logprobs": [-0.1, -0.2],
+        }
+    )
+    assert len(transport_response.model_dump_json()) < len(response.model_dump_json())
 
 
 def test_build_exact_trace_response_derives_identity_for_benchmarking() -> None:

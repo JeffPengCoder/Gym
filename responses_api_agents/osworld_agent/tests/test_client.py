@@ -19,6 +19,10 @@ import pytest
 
 from responses_api_agents.osworld_agent import client as osworld_client
 from responses_api_agents.osworld_agent import remote_environment as osworld_remote
+from responses_api_agents.osworld_agent.runtime_errors import (
+    OSWorldActionTimeoutError,
+    OSWorldModelTimeoutError,
+)
 
 
 class FakeController:
@@ -534,6 +538,7 @@ def test_remote_resources_backend_receives_transport_configuration(monkeypatch) 
         resources_request_timeout=123,
         resources_connect_timeout=4,
         resources_request_retries=2,
+        step_timeout=7,
         sleep_after_execution=0,
         task_timeout=10,
     )
@@ -545,7 +550,99 @@ def test_remote_resources_backend_receives_transport_configuration(monkeypatch) 
     assert kwargs["request_timeout"] == 123
     assert kwargs["connect_timeout"] == 4
     assert kwargs["request_retries"] == 2
+    assert kwargs["action_timeout"] == 7
     assert "path_to_vm" not in kwargs
+
+
+def test_remote_observation_requires_a_valid_png_signature() -> None:
+    valid_png = b"\x89PNG\r\n\x1a\nfixture"
+
+    assert (
+        osworld_remote.RemoteDesktopEnv._decode_observation(  # noqa: SLF001
+            {"screenshot_b64": osworld_client._b64(valid_png)}
+        )["screenshot"]
+        == valid_png
+    )
+    with pytest.raises(osworld_remote.OSWorldResourcesServerError, match="PNG signature"):
+        osworld_remote.RemoteDesktopEnv._decode_observation(  # noqa: SLF001
+            {"screenshot_b64": osworld_client._b64(b"gateway error")}
+        )
+
+
+def test_remote_action_uses_its_own_timeout_and_raises_typed_failure() -> None:
+    env = osworld_remote.RemoteDesktopEnv(
+        resources_server_url="http://resources.example",
+        request_timeout=123,
+        action_timeout=7,
+        request_retries=1,
+    )
+    env._seeded = True  # noqa: SLF001
+    env._session.request = MagicMock(side_effect=osworld_remote.requests.Timeout("slow action"))  # noqa: SLF001
+
+    with pytest.raises(OSWorldActionTimeoutError, match="exceeded 7s"):
+        env.step("pyautogui.click(1, 2)", pause=0)
+
+    assert env._session.request.call_args.kwargs["timeout"] == (10.0, 7.0)  # noqa: SLF001
+
+
+def test_model_timeout_is_a_typed_runtime_failure(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    def model_timeout(*_args):
+        raise OSWorldModelTimeoutError("policy model call exceeded 9s")
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-model-timeout", "instruction": "Inspect the desktop."},
+        model_fn=model_timeout,
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+        task_timeout=10,
+        model_timeout=9,
+    )
+
+    assert result.evaluation_completed is True
+    assert result.runtime_eligible is False
+    assert result.mask_sample is True
+    assert result.termination_reason == "model_timeout"
+
+
+@pytest.mark.parametrize(
+    "timeout_error",
+    [
+        OSWorldActionTimeoutError("environment action exceeded 7s"),
+        osworld_client.requests.Timeout("provider action request timed out"),
+    ],
+)
+def test_action_timeout_is_a_typed_runtime_failure(monkeypatch, timeout_error: Exception) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    def action_timeout(_self, _action, _pause):
+        raise timeout_error
+
+    monkeypatch.setattr(FakeEnv, "step", action_timeout)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-action-timeout", "instruction": "Click the desktop."},
+        model_fn=lambda *_args: "```python\npyautogui.click(1, 2)\n```",
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+        step_timeout=7,
+        task_timeout=10,
+    )
+
+    assert result.evaluation_completed is True
+    assert result.runtime_eligible is False
+    assert result.mask_sample is True
+    assert result.termination_reason == "action_timeout"
+
+
+@pytest.mark.parametrize(("name", "value"), [("step_timeout", 0), ("model_timeout", -1)])
+def test_operation_timeouts_must_be_positive(name: str, value: float) -> None:
+    with pytest.raises(ValueError, match=rf"{name} must be positive"):
+        osworld_client.run_osworld_task(
+            {"id": "invalid-timeout", "instruction": "Inspect the desktop."},
+            model_fn=lambda *_args: "```DONE```",
+            **{name: value},
+        )
 
 
 def test_proxy_required_task_runs_directly_when_proxy_is_disabled(monkeypatch) -> None:

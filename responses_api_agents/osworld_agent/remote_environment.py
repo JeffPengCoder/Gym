@@ -14,11 +14,18 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldActionTimeoutError
+
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.remote_environment")
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 class OSWorldResourcesServerError(RuntimeError):
+    pass
+
+
+class OSWorldResourcesServerTimeout(OSWorldResourcesServerError):
     pass
 
 
@@ -57,6 +64,7 @@ class RemoteDesktopEnv:
         request_timeout: float = 900.0,
         connect_timeout: float = 10.0,
         request_retries: int = 3,
+        action_timeout: float = 60.0,
         provider_name: str = "remote_docker",
         action_space: str = "pyautogui",
         screen_size: tuple[int, int] = (1920, 1080),
@@ -79,6 +87,7 @@ class RemoteDesktopEnv:
         self.request_timeout = max(1.0, float(request_timeout))
         self.connect_timeout = max(0.1, float(connect_timeout))
         self.request_retries = max(1, int(request_retries))
+        self.action_timeout = max(1.0, float(action_timeout))
         self.provider_name = provider_name
         self.action_space = action_space
         self.screen_size = (int(screen_size[0]), int(screen_size[1]))
@@ -144,15 +153,19 @@ class RemoteDesktopEnv:
         self._require_seeded()
         operation_id = f"{self.session_id or 'session'}-{self._operation_index}-{uuid.uuid4().hex}"
         self._operation_index += 1
-        response = self._request(
-            "POST",
-            "/step",
-            json_body={
-                "operation_id": operation_id,
-                "action": action,
-                "pause": float(pause),
-            },
-        )
+        try:
+            response = self._request(
+                "POST",
+                "/step",
+                json_body={
+                    "operation_id": operation_id,
+                    "action": action,
+                    "pause": float(pause),
+                },
+                read_timeout=self.action_timeout,
+            )
+        except OSWorldResourcesServerTimeout as exc:
+            raise OSWorldActionTimeoutError(f"environment action exceeded {self.action_timeout:g}s") from exc
         self._last_observation = self._decode_observation(response.get("observation") or {})
         info = response.get("info")
         return (
@@ -190,6 +203,7 @@ class RemoteDesktopEnv:
         *,
         json_body: Optional[Dict[str, Any]] = None,
         allow_not_found: bool = False,
+        read_timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.auth_token}"} if self.auth_token else {}
         url = f"{self.resources_server_url}{path}"
@@ -202,7 +216,10 @@ class RemoteDesktopEnv:
                     url,
                     json=json_body,
                     headers=headers,
-                    timeout=(self.connect_timeout, self.request_timeout),
+                    timeout=(
+                        self.connect_timeout,
+                        self.request_timeout if read_timeout is None else max(1.0, float(read_timeout)),
+                    ),
                 )
                 elapsed = time.monotonic() - started
                 self._log_transport(
@@ -245,17 +262,24 @@ class RemoteDesktopEnv:
                     time.sleep(min(2 ** (attempt - 1), 5))
                     continue
                 break
-        raise OSWorldResourcesServerError(
+        error_type = (
+            OSWorldResourcesServerTimeout if isinstance(last_error, requests.Timeout) else OSWorldResourcesServerError
+        )
+        raise error_type(
             f"{method} {path} failed after {self.request_retries} attempt(s): {last_error}"
         ) from last_error
 
     @staticmethod
     def _decode_observation(payload: Dict[str, Any]) -> Dict[str, Any]:
         encoded = payload.get("screenshot_b64") or ""
+        if not isinstance(encoded, str) or not encoded:
+            raise OSWorldResourcesServerError("Resources Server returned no screenshot PNG")
         try:
-            screenshot = base64.b64decode(encoded, validate=True) if encoded else b""
+            screenshot = base64.b64decode(encoded, validate=True)
         except (ValueError, TypeError) as exc:
             raise OSWorldResourcesServerError("Resources Server returned invalid screenshot base64") from exc
+        if not screenshot.startswith(_PNG_SIGNATURE):
+            raise OSWorldResourcesServerError("Resources Server returned screenshot bytes without a PNG signature")
         return {
             "screenshot": screenshot,
             "accessibility_tree": payload.get("accessibility_tree"),
