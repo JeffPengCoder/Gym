@@ -55,8 +55,7 @@ def _configure_async_http() -> None:
         and not server_utils._has_injected_global_config_env()
     ):
         raise RuntimeError(
-            "Gym's global config is not established in this process; "
-            "leaving the e2b SDK on its own HTTP transport"
+            "Gym's global config is not established in this process; leaving the e2b SDK on its own HTTP transport"
         )
 
     class E2BAiohttpTransport(AiohttpTransport):

@@ -282,12 +282,6 @@ sandbox = [
     # License: Apache 2.0 https://github.com/jd/tenacity/blob/master/LICENSE
     "tenacity>=9.1.4",
 
-    # E2B SDK: used by the E2B sandbox provider, and by the OSWorld AgentENV
-    # deployment through it. Lower bound 2.46: first version exposing
-    # ConnectionConfig.sandbox_headers, which gateway port routing needs.
-    # License: Apache 2.0 https://github.com/e2b-dev/E2B/blob/main/LICENSE
-    "e2b>=2.46.0,<3.0.0",
-
     # OpenSandbox SDK: used by the OpenSandbox sandbox provider for create/exec/delete and SDK pool creation.
     # Lower bound 0.1.15: first version exposing separate `resource_requests` on Sandbox.create.
     # Updated: Thu Jul 30, 2026 with opensandbox>=0.1.15

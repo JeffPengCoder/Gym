@@ -28,8 +28,8 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.osworld.assets import DEFAULT_SETUP_CACHE, ensure_osworld_assets
-from responses_api_agents.osworld_agent.sandbox_provider import AGENTENV_TEMPLATE_VM_PATH
 from responses_api_agents.osworld_agent.runtime_dependencies import managed_agent_venv_path
+from responses_api_agents.osworld_agent.sandbox_provider import AGENTENV_TEMPLATE_VM_PATH
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent

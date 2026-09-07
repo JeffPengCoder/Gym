@@ -364,20 +364,11 @@ def test_agentenv_gets_a_sentinel_vm_path_not_an_empty_one() -> None:
     waste -- ~11 GB per task, 361 times over. The sentinel exists only to stop
     DesktopEnv reaching for the manager.
     """
-    assert (
-        osworld_sandbox._resolve_pool_vm_path({"e2b": {}}, "")
-        == osworld_sandbox.AGENTENV_TEMPLATE_VM_PATH
-    )
-    assert (
-        osworld_sandbox._resolve_pool_vm_path({"e2b": {}}, None)
-        == osworld_sandbox.AGENTENV_TEMPLATE_VM_PATH
-    )
+    assert osworld_sandbox._resolve_pool_vm_path({"e2b": {}}, "") == osworld_sandbox.AGENTENV_TEMPLATE_VM_PATH
+    assert osworld_sandbox._resolve_pool_vm_path({"e2b": {}}, None) == osworld_sandbox.AGENTENV_TEMPLATE_VM_PATH
     # An explicit path still wins, and the other backends are unchanged.
     assert osworld_sandbox._resolve_pool_vm_path({"e2b": {}}, "/tmp/x.qcow2") == "/tmp/x.qcow2"
-    assert (
-        osworld_sandbox._resolve_pool_vm_path({"opensandbox": {}}, "")
-        == osworld_sandbox.OPENSANDBOX_POOL_VM_PATH
-    )
+    assert osworld_sandbox._resolve_pool_vm_path({"opensandbox": {}}, "") == osworld_sandbox.OPENSANDBOX_POOL_VM_PATH
     assert osworld_sandbox._resolve_pool_vm_path({"docker": {}}, "") == ""
 
 
@@ -431,13 +422,12 @@ def test_vnc_guest_port_reaches_every_hop() -> None:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function
         ]
         assert found, f"{filename} has no {function}"
-        assert any(
-            "sandbox_vnc_guest_port" in [a.arg for a in n.args.args + n.args.kwonlyargs]
-            for n in found
-        ), f"{filename}:{function} does not accept sandbox_vnc_guest_port"
+        assert any("sandbox_vnc_guest_port" in [a.arg for a in n.args.args + n.args.kwonlyargs] for n in found), (
+            f"{filename}:{function} does not accept sandbox_vnc_guest_port"
+        )
 
     # And the value has to be forwarded, not merely accepted.
-    assert "\"sandbox_vnc_guest_port\": sandbox_vnc_guest_port" in (agent_dir / "client.py").read_text()
+    assert '"sandbox_vnc_guest_port": sandbox_vnc_guest_port' in (agent_dir / "client.py").read_text()
 
 
 def test_docker_keeps_its_own_vnc_port() -> None:
