@@ -4,7 +4,7 @@
 [project]
 name = "osworld-resources-server"
 version = "0.0.0"
-requires-python = ">=3.12"
+requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
     # This immutable revision supplies the generic per-instance
@@ -18,13 +18,15 @@ dependencies = [
     "cryptography",
     "cffi",
     "scipy",
-    "numpy<2",
+    # Python 3.13 has no NumPy 1.x wheel. Keep NumPy and OpenCV on the
+    # compatible pair already exercised by the OSWorld agent role.
+    "numpy>=2.1,<2.5",
     "pynput",
     "ag2",
-    "opencv-python-headless~=4.8.1.78",
-    "Pillow~=11.0.0",
+    "opencv-python-headless~=4.10.0.84",
+    "Pillow>=12,<13",
     "scikit-learn",
-    "matplotlib~=3.7.4",
+    "matplotlib>=3.10,<3.11",
     "flask~=3.0.0",
     "func-timeout",
 ]
@@ -41,10 +43,19 @@ include = ["resources_servers.osworld*"]
 nemo-gym = { path = "../..", editable = true }
 
 [tool.uv]
-# OSWorld's EasyOCR dependency asks for an unconstrained torchvision. On the
-# repository's Python 3.13 runtime, compatible torchvision releases require a
-# newer torch than OSWorld's torch~=2.5 pin. The resources-server tests and
-# stateful control path do not use OCR; production images that enable OCR must
-# install the opt-in OSWorld runtime bundle explicitly.
-override-dependencies = ["torchvision; sys_platform == 'never'"]
+# The pinned OSWorld metadata predates CPython 3.13 wheels for this family.
+# These are role-local compatibility ranges, not requirements for the agent,
+# model, or trainer environments. The experiment record captures the exact
+# versions selected by uv for a particular platform.
+override-dependencies = [
+    "numpy>=2.1,<2.5",
+    "opencv-python-headless~=4.10.0.84",
+    "Pillow>=12,<13",
+    "matplotlib>=3.10,<3.11",
+    "torch>=2.11,<2.12",
+    # OSWorld's EasyOCR dependency asks for an unconstrained torchvision. The
+    # resources-server control path does not use OCR; keep the codec-bearing
+    # optional wheel out of this default environment.
+    "torchvision; sys_platform == 'never'",
+]
 exclude-dependencies = ["opencv-python", "opencv-contrib-python", "agp-client"]

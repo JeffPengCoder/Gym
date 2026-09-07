@@ -17,6 +17,7 @@ import re
 import tomllib
 from pathlib import Path
 
+from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
@@ -27,6 +28,9 @@ OSWORLD_AGENT_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/uv-override
 OSWORLD_AGENT_UV_CONFIG = ROOT / "responses_api_agents/osworld_agent/uv.toml"
 OSWORLD_AGENT_PUBLIC_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/overrides.txt"
 OSWORLD_RESOURCES_PROJECT = ROOT / "resources_servers/osworld/pyproject.toml"
+OSWORLD_RESOURCES_PYTHON = ROOT / "resources_servers/osworld/uv-python-version.txt"
+OSWORLD_RESOURCES_MANAGED_PYTHON = ROOT / "resources_servers/osworld/uv-managed-python.txt"
+OSWORLD_RESOURCES_TORCH_BACKEND = ROOT / "resources_servers/osworld/uv-torch-backend.txt"
 OSWORLD_AGENT_README = ROOT / "responses_api_agents/osworld_agent/README.md"
 OSWORLD_BENCHMARK_README = ROOT / "benchmarks/osworld/README.md"
 VLLM_MODEL_PYTHON = ROOT / "responses_api_models/vllm_model/uv-python-version.txt"
@@ -83,9 +87,41 @@ def test_osworld_runtime_consumers_share_one_pinned_revision() -> None:
 
 def test_osworld_resources_server_avoids_unsatisfiable_torchvision_resolution() -> None:
     with OSWORLD_RESOURCES_PROJECT.open("rb") as f:
-        resource_uv = tomllib.load(f)["tool"]["uv"]
+        resources_project = tomllib.load(f)
+    resource_uv = resources_project["tool"]["uv"]
 
     assert "torchvision; sys_platform == 'never'" in resource_uv["override-dependencies"]
+
+
+def test_osworld_resources_server_owns_a_python_313_wheel_compatible_runtime() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as f:
+        parent_python = tomllib.load(f)["project"]["requires-python"]
+    with OSWORLD_RESOURCES_PROJECT.open("rb") as f:
+        resources_project = tomllib.load(f)
+
+    assert resources_project["project"]["requires-python"] == parent_python
+    assert OSWORLD_RESOURCES_PYTHON.read_text(encoding="utf-8").strip() == parent_python.removeprefix(">=")
+    assert OSWORLD_RESOURCES_MANAGED_PYTHON.read_text(encoding="utf-8").strip() == "true"
+    assert OSWORLD_RESOURCES_TORCH_BACKEND.read_text(encoding="utf-8").strip() == "cpu"
+
+    direct = {Requirement(value).name: Requirement(value) for value in resources_project["project"]["dependencies"]}
+    overrides = {
+        Requirement(value).name: Requirement(value)
+        for value in resources_project["tool"]["uv"]["override-dependencies"]
+    }
+    for package, rejected, admitted in (
+        ("numpy", "1.26.4", "2.4.6"),
+        ("opencv-python-headless", "4.8.1.78", "4.10.0.84"),
+        ("Pillow", "11.0.0", "12.3.0"),
+        ("matplotlib", "3.7.5", "3.10.6"),
+    ):
+        assert Version(rejected) not in direct[package].specifier
+        assert Version(admitted) in direct[package].specifier
+        assert Version(rejected) not in overrides[package].specifier
+        assert Version(admitted) in overrides[package].specifier
+
+    assert Version("2.5.1") not in overrides["torch"].specifier
+    assert Version("2.11.0") in overrides["torch"].specifier
 
 
 def test_osworld_agent_dependency_overrides() -> None:
