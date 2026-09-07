@@ -1433,13 +1433,6 @@ class RolloutCollectionHelper(BaseModel):
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
-            if not no_persist and failure_class is None and result.get("mask_sample"):
-                # mask_sample is the cross-agent contract that this rollout is
-                # unsafe for training/evaluation. Treat an unclassified masked
-                # response as a retryable failure instead of silently caching
-                # it as a completed zero-reward sample in the main JSONL.
-                failure_class = "masked_sample"
-                result[NG_FAILURE_CLASS_KEY] = failure_class
             # No rollout happened, so there is nothing to capture, tokenize or average.
             no_result = failure_class in _NO_RESULT_FAILURE_CLASSES
 

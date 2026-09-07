@@ -2621,7 +2621,7 @@ class TestRolloutCollection:
 
         assert expected_results == actual_returned_results
 
-    async def test_run_from_config_aggregate_metrics_excludes_non_persisted_rows(
+    async def test_run_from_config_routes_only_explicit_failures_out_of_scored_rows(
         self, tmp_path: Path, empty_global_config: MagicMock
     ) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
@@ -2680,19 +2680,20 @@ class TestRolloutCollection:
             "case-2",
             "case-3",
         ]
-        assert [result["case"] for result in captured["results"]] == ["case-0"]
-        assert [row["x"] for row in captured["rows"]] == [0]
+        assert [result["case"] for result in captured["results"]] == ["case-0", "case-3"]
+        assert [row["x"] for row in captured["rows"]] == [0, 3]
+        assert captured["results"][1]["mask_sample"] is True
+        assert NG_FAILURE_CLASS_KEY not in captured["results"][1]
 
         with output_jsonl_fpath.open() as f:
             actual_written_results = [json.loads(line) for line in f]
-        assert [result["case"] for result in actual_written_results] == ["case-0"]
+        assert [result["case"] for result in actual_written_results] == ["case-0", "case-3"]
 
         failures_fpath = _failures_path_for(output_jsonl_fpath)
         with failures_fpath.open() as f:
             actual_failure_results = [json.loads(line) for line in f]
-        assert [result["case"] for result in actual_failure_results] == ["case-1", "case-3"]
+        assert [result["case"] for result in actual_failure_results] == ["case-1"]
         assert actual_failure_results[0][NG_FAILURE_CLASS_KEY] == "verify_failed"
-        assert actual_failure_results[1][NG_FAILURE_CLASS_KEY] == "masked_sample"
 
     async def test_run_from_config_aggregate_metrics_includes_cached_persisted_rows(
         self, tmp_path: Path, empty_global_config: MagicMock
