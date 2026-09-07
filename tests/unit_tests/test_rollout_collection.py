@@ -826,9 +826,7 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
         # run_examples now validates agent names against the running config.
-        mock_server_client.global_config_dict = OmegaConf.create(
-            {"my_agent": {"responses_api_agents": {"impl": {}}}}
-        )
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "setup_server_client_utils",
@@ -872,9 +870,7 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
         # run_examples now validates agent names against the running config.
-        mock_server_client.global_config_dict = OmegaConf.create(
-            {"my_agent": {"responses_api_agents": {"impl": {}}}}
-        )
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "setup_server_client_utils",
