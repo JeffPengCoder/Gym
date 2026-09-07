@@ -67,6 +67,7 @@ from nemo_gym.rollout_collection import (
     _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
+    _retry_transport_errors_for_run,
     _rollout_for_export,
     _rollout_request_debug_summary,
     _trajectory_identity,
@@ -234,6 +235,15 @@ class TestGetMaxRolloutAttempts:
 
 
 class TestRolloutCollection:
+    def test_run_transport_retry_policy_rejects_non_boolean_values(self) -> None:
+        row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}}
+        global_config = OmegaConf.create(
+            {"my_agent": {"responses_api_agents": {"impl": {"retry_transport_errors_on_run": "false"}}}}
+        )
+
+        with pytest.raises(ConfigError, match="must be a boolean"):
+            _retry_transport_errors_for_run(row, global_config)
+
     def test_rollout_request_debug_summary_compact(self) -> None:
         row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
@@ -799,7 +809,7 @@ class TestRolloutCollection:
         assert EXECUTION_ID_KEY_NAME not in row
         posted_row = mock_server_client.post.await_args.kwargs["json"]
         assert posted_row[EXECUTION_ID_KEY_NAME].startswith("execution-")
-        assert mock_server_client.post.await_args.kwargs["retry_transport_errors"] is False
+        assert mock_server_client.post.await_args.kwargs["retry_transport_errors"] is True
 
         captured = capsys.readouterr()
         assert "[rollout_collection] /run failed status=500" in captured.out
@@ -811,9 +821,15 @@ class TestRolloutCollection:
         assert "responses_create_params" not in captured.out
         assert "do not log this" not in captured.out
 
-    async def test_run_examples_allocates_fresh_execution_without_mutating_source(
+    @pytest.mark.parametrize(
+        ("agent_config", "expected_retry_transport_errors"),
+        [({}, True), ({"retry_transport_errors_on_run": False}, False)],
+    )
+    async def test_run_examples_selects_retry_policy_without_mutating_source(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        agent_config: dict,
+        expected_retry_transport_errors: bool,
     ) -> None:
         source_row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
@@ -826,7 +842,9 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
         # run_examples now validates agent names against the running config.
-        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {"my_agent": {"responses_api_agents": {"impl": agent_config}}}
+        )
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "setup_server_client_utils",
@@ -853,7 +871,10 @@ class TestRolloutCollection:
         assert first_row[EXECUTION_ID_KEY_NAME] != second_row[EXECUTION_ID_KEY_NAME]
         assert first_result[EXECUTION_ID_KEY_NAME] == first_row[EXECUTION_ID_KEY_NAME]
         assert second_result[EXECUTION_ID_KEY_NAME] == second_row[EXECUTION_ID_KEY_NAME]
-        assert all(call.kwargs["retry_transport_errors"] is False for call in mock_server_client.post.await_args_list)
+        assert all(
+            call.kwargs["retry_transport_errors"] is expected_retry_transport_errors
+            for call in mock_server_client.post.await_args_list
+        )
         assert mock_server_client.post.await_count == 2
 
     async def test_run_examples_rejects_server_execution_id_conflict(

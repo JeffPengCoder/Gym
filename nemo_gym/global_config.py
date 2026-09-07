@@ -157,6 +157,9 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
+# Agent-server capability: whether an ambiguous transport failure may replay
+# the same POST /run request. Absent means true for backward compatibility.
+RETRY_TRANSPORT_ERRORS_ON_RUN_KEY_NAME = "retry_transport_errors_on_run"
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.

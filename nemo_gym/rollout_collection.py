@@ -60,6 +60,7 @@ from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     EXECUTION_ID_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
+    RETRY_TRANSPORT_ERRORS_ON_RUN_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
@@ -67,6 +68,7 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
     dataset_agent_pins,
+    get_first_server_config_dict,
     get_global_config_dict,
     pairing_override_enabled,
     resolve_dataset_agent,
@@ -853,6 +855,24 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "metadata_rollout_purpose": metadata_purpose,
     }
     return {k: v for k, v in summary.items() if v is not None}
+
+
+def _retry_transport_errors_for_run(row: Dict[str, Any], global_config_dict: DictConfig) -> bool:
+    """Return the selected agent's POST /run transport-retry capability."""
+
+    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    agent_name = agent_ref.get("name") if isinstance(agent_ref, Mapping) else None
+    if not isinstance(agent_name, str) or not agent_name:
+        raise ConfigError("A rollout row must resolve to an agent before its /run retry policy is selected.")
+
+    agent_config = get_first_server_config_dict(global_config_dict, agent_name)
+    retry_transport_errors = agent_config.get(RETRY_TRANSPORT_ERRORS_ON_RUN_KEY_NAME, True)
+    if not isinstance(retry_transport_errors, bool):
+        raise ConfigError(
+            f"Agent '{agent_name}' field '{RETRY_TRANSPORT_ERRORS_ON_RUN_KEY_NAME}' must be a boolean, "
+            f"got {retry_transport_errors!r}."
+        )
+    return retry_transport_errors
 
 
 # Request failures that are data, not bugs. Anything else still propagates.
@@ -1947,9 +1967,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
             async with semaphore:
+                retry_transport_errors = _retry_transport_errors_for_run(row, server_client.global_config_dict)
                 print(
                     "[rollout_collection] /run dispatch "
-                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
+                    f"retry_transport_errors={str(retry_transport_errors).lower()}",
                     flush=True,
                 )
                 started_at = time()
@@ -1959,9 +1981,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         server_name=row["agent_ref"]["name"],
                         url_path="/run",
                         json=row,
-                        # A disconnected /run may already have created a VM and
-                        # acted. The scheduler, not HTTP transport, owns retries.
-                        retry_transport_errors=False,
+                        retry_transport_errors=retry_transport_errors,
                     )
                     await raise_for_status(res)
                     result = await get_response_json(res)
