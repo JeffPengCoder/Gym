@@ -18,7 +18,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 
 if TYPE_CHECKING:
@@ -89,11 +89,18 @@ class BaseResourcesServer(BaseServer):
 
 
 class BaseRunRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     # Capture the scheduler-owned transport extension in a private slot. This
     # makes it available to every typed /run endpoint without adding a public
     # model field, changing JSON schema, or serializing a null/default key.
     _nemo_gym_execution_id: Optional[str] = PrivateAttr(default=None)
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    capture_rollout_id: Optional[str] = Field(
+        default=None,
+        alias="_ng_rollout_id",
+        exclude=True,
+    )
 
     @model_validator(mode="wrap")
     @classmethod

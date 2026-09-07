@@ -62,6 +62,8 @@ def _field(body: BaseModel | Mapping[str, Any], key: str) -> Any:
         execution_id = getattr(body, "_nemo_gym_execution_id", None)
         if execution_id is not None:
             return execution_id
+    if key == ROLLOUT_ID_KEY_NAME and hasattr(body, "capture_rollout_id"):
+        return body.capture_rollout_id
     return getattr(body, key, None)
 
 

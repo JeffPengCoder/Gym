@@ -275,7 +275,7 @@ def test_execution_id_is_explicit_bounded_and_wins_over_logical_capture_ids() ->
 def test_base_run_request_default_json_shape_is_unchanged() -> None:
     body = BaseRunRequest.model_validate({"responses_create_params": {"input": "solve"}})
 
-    assert set(BaseRunRequest.model_fields) == {"responses_create_params"}
+    assert set(BaseRunRequest.model_fields) == {"responses_create_params", "capture_rollout_id"}
     assert body.model_dump(exclude_unset=True) == {"responses_create_params": {"input": "solve"}}
     assert body.model_dump_json(exclude_unset=True) == ('{"responses_create_params":{"input":"solve"}}')
     execution_body = BaseRunRequest.model_validate(
@@ -287,3 +287,14 @@ def test_base_run_request_default_json_shape_is_unchanged() -> None:
     assert maybe_explicit_execution_id_from_run_body(execution_body) == ("execution-private-slot")
     assert "_ng_execution_id" not in execution_body.model_dump()
     assert execution_body.model_dump(exclude_unset=True) == body.model_dump(exclude_unset=True)
+
+
+def test_explicit_rollout_alias_stays_request_scoped() -> None:
+    body = BaseRunRequest.model_validate(
+        {
+            "_ng_rollout_id": "rollout-explicit",
+            "responses_create_params": {"input": "solve"},
+        }
+    )
+    assert maybe_rollout_id_from_run_body(body) == "rollout-explicit"
+    assert "_ng_rollout_id" not in body.model_dump(by_alias=True)
