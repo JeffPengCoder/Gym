@@ -134,7 +134,6 @@ def test_log_context_headers_do_not_change_model_payload() -> None:
         "adapter": "gym",
         "sampling_event_id": "sampling-training-001",
         "source_group_id": "dataset-group-001",
-        "execution_id": "execution-001",
         "rollout_id": "rollout-001",
         "group_id": "group-001",
         "rollout_index": 4,
@@ -151,7 +150,6 @@ def test_log_context_headers_do_not_change_model_payload() -> None:
         "x-nemo-gym-log-adapter": "gym",
         "x-nemo-gym-log-sampling-event-id": "sampling-training-001",
         "x-nemo-gym-log-source-group-id": "dataset-group-001",
-        "x-nemo-gym-log-execution-id": "execution-001",
         "x-nemo-gym-log-rollout-id": "rollout-001",
         "x-nemo-gym-log-group-id": "group-001",
         "x-nemo-gym-log-rollout-index": "4",
@@ -1311,8 +1309,8 @@ def test_build_response_accepts_generic_caller_trajectory_identity() -> None:
     assert contract["rollout_index"] == 2
 
 
-def test_execution_identity_is_correlated_but_excluded_from_semantic_digest() -> None:
-    def build(execution_id: str):
+def test_capture_rollout_id_is_excluded_from_semantic_digest() -> None:
+    def build(capture_rollout_id: str):
         request = OSWorldRunRequest.model_validate(
             {
                 "responses_create_params": {"input": []},
@@ -1330,13 +1328,13 @@ def test_execution_identity_is_correlated_but_excluded_from_semantic_digest() ->
                     "rollout_index": 2,
                     "attempt_index": 0,
                 },
-                "_ng_execution_id": execution_id,
+                "_ng_rollout_id": capture_rollout_id,
             }
         )
-        assert "_ng_execution_id" not in request.model_dump()
+        assert request.capture_rollout_id == capture_rollout_id
+        assert "_ng_rollout_id" not in request.model_dump()
         result = {
             **DEFAULT_RUN_RESULT,
-            "execution_id": execution_id,
             "steps": [
                 {
                     "step": 0,
@@ -1374,8 +1372,8 @@ def test_execution_identity_is_correlated_but_excluded_from_semantic_digest() ->
             0.9,
         )
 
-    first = build("execution-first")
-    second = build("execution-second")
+    first = build("capture-first")
+    second = build("capture-second")
 
     first_contract = first.response.trajectory_contract
     second_contract = second.response.trajectory_contract
@@ -1388,17 +1386,7 @@ def test_execution_identity_is_correlated_but_excluded_from_semantic_digest() ->
     second_exact = second.response.context_compaction_contract
     assert first_exact is not None
     assert first_exact == second_exact
-    assert "execution_id" not in json.dumps(first_exact, sort_keys=True)
-    assert first.response.execution_context == {
-        "schema_version": 1,
-        "execution_id": "execution-first",
-        "sampling_event_id": "sampling-training-001",
-        "source_group_id": "dataset-group-001",
-        "rollout_id": "rollout-generic-001",
-        "group_id": "group-event-001",
-        "task_id": "task-001",
-    }
-    assert first.verifier_metadata["osworld_execution_id"] == "execution-first"
+    assert "capture-first" not in json.dumps(first_exact, sort_keys=True)
 
 
 def test_build_response_rejects_partial_caller_identity() -> None:
@@ -1412,7 +1400,7 @@ def test_build_response_rejects_partial_caller_identity() -> None:
         _build_response(request, DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9)
 
 
-def test_empty_response_preserves_explicit_semantic_execution_join() -> None:
+def test_empty_response_reports_runtime_admission() -> None:
     request = OSWorldRunRequest.model_validate(
         {
             "responses_create_params": {"input": []},
@@ -1427,21 +1415,11 @@ def test_empty_response_preserves_explicit_semantic_execution_join() -> None:
                 "rollout_index": 0,
                 "attempt_index": 0,
             },
-            "_ng_execution_id": "execution-empty-001",
         }
     )
 
     response = _empty_response(request, error="fixture unavailable")
 
-    assert response.response.execution_context == {
-        "schema_version": 1,
-        "execution_id": "execution-empty-001",
-        "sampling_event_id": "sampling-evaluation-001",
-        "source_group_id": "dataset-group-001",
-        "rollout_id": "rollout-evaluation-001",
-        "group_id": "group-evaluation-001",
-        "task_id": "task-001",
-    }
     assert response.evaluation_completed is False
     assert response.runtime_eligible is False
     assert response.mask_sample is True
@@ -1627,10 +1605,7 @@ class TestApp:
         """Exercise the real FastAPI/Pydantic boundary used by NeMo-RL."""
         assert "rollout_purpose" in OSWorldRunRequest.__annotations__
         mock_remote.options.return_value.remote.return_value = MagicMock()
-        mock_to_thread.return_value = {
-            **DEFAULT_RUN_RESULT,
-            "execution_id": "execution-http-test",
-        }
+        mock_to_thread.return_value = {**DEFAULT_RUN_RESULT}
 
         server_client = MagicMock(spec=ServerClient)
         setup_server_client_mocks(
@@ -1648,7 +1623,7 @@ class TestApp:
         )
         payload = {
             **request.model_dump(mode="json"),
-            "_ng_execution_id": "execution-http-test",
+            "_ng_rollout_id": "capture-http-test",
             "_ng_task_index": 4,
             "_ng_rollout_index": 0,
             "trajectory_identity": {
@@ -1675,21 +1650,10 @@ class TestApp:
         assert payload["runtime_eligible"] is True
         assert payload["runtime_admission_policy_id"] == RUNTIME_ADMISSION_POLICY_ID
         assert payload["mask_sample"] is False
-        assert payload["response"]["execution_context"] == {
-            "schema_version": 1,
-            "execution_id": "execution-http-test",
-            "sampling_event_id": "sampling-evaluation-http",
-            "source_group_id": "dataset-group-http",
-            "rollout_id": "rollout-evaluation-http",
-            "group_id": "group-evaluation-http",
-            "task_id": "test-task-001",
-        }
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         assert positional_args[1]["rollout_purpose"] == "evaluation"
-        assert positional_args[1]["execution_id"] == "execution-http-test"
         assert positional_args[1]["log_context"]["sampling_event_id"] == ("sampling-evaluation-http")
         assert positional_args[1]["log_context"]["rollout_id"] == ("rollout-evaluation-http")
-        assert positional_args[1]["sandbox_spec"]["metadata"]["nemo-gym.execution-id"] == "execution-http-test"
 
     @patch("benchmarks.osworld.assets.ensure_osworld_assets")
     def test_setup_webserver_idempotently_prefetches_configured_assets(self, mock_ensure) -> None:

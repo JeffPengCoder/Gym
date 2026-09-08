@@ -6,7 +6,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from omegaconf import OmegaConf
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -23,13 +22,6 @@ OSWORLD_AGENT_APP = REPO_ROOT / "responses_api_agents/osworld_agent/app.py"
 OSWORLD_AGENT_OVERRIDES = REPO_ROOT / "responses_api_agents/osworld_agent/overrides.txt"
 OSWORLD_RUNTIME_DEPS_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/install_optional_runtime_deps.sh"
 OSWORLD_RUNTIME_DEPS_CHECKER = REPO_ROOT / "responses_api_agents/osworld_agent/runtime_dependencies.py"
-
-
-def test_osworld_disables_ambiguous_run_transport_retries() -> None:
-    config = OmegaConf.load(OSWORLD_AGENT_CONFIG)
-    agent_config = config["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]
-
-    assert agent_config["retry_transport_errors_on_run"] is False
 
 
 @pytest.mark.parametrize(

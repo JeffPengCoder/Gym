@@ -14,8 +14,8 @@
 # limitations under the License.
 import asyncio
 import json
-from pathlib import Path
 import logging
+from pathlib import Path
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
@@ -146,7 +146,6 @@ def test_transport_log_context_reads_generic_headers_without_body_fields() -> No
         "x-nemo-gym-log-adapter": "gym",
         "x-nemo-gym-log-sampling-event-id": "sampling-training-001",
         "x-nemo-gym-log-source-group-id": "dataset-group-001",
-        "x-nemo-gym-log-execution-id": "execution-001",
         "x-nemo-gym-log-rollout-id": "rollout-001",
         "x-nemo-gym-log-group-id": "group-001",
         "x-nemo-gym-log-rollout-index": "4",
@@ -163,7 +162,6 @@ def test_transport_log_context_reads_generic_headers_without_body_fields() -> No
         "adapter": "gym",
         "sampling_event_id": "sampling-training-001",
         "source_group_id": "dataset-group-001",
-        "execution_id": "execution-001",
         "rollout_id": "rollout-001",
         "group_id": "group-001",
         "rollout_index": 4,

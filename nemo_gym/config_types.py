@@ -645,23 +645,12 @@ class ResourcesServerTypeConfig(BaseServerTypeConfig):
     resources_servers: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
 
 
-class ResponsesAPIAgentRunServerTypeConfig(BaseRunServerTypeConfig):
-    retry_transport_errors_on_run: bool = Field(
-        default=True,
-        strict=True,
-        description=(
-            "Whether the rollout collector may retry POST /run after an ambiguous transport failure. "
-            "Set this to false when the agent may keep running or create side effects after the client disconnects."
-        ),
-    )
-
-
 class ResponsesAPIAgentServerTypeConfig(BaseServerTypeConfig):
     SERVER_TYPE: ClassVar[Literal["responses_api_agents"]] = "responses_api_agents"
 
     model_config = ConfigDict(extra="allow")
 
-    responses_api_agents: Dict[str, ResponsesAPIAgentRunServerTypeConfig] = Field(min_length=1, max_length=1)
+    responses_api_agents: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
 
 
 ServerTypeConfig = Union[

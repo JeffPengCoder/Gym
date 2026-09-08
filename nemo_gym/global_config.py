@@ -157,9 +157,6 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
-# Agent-server capability: whether an ambiguous transport failure may replay
-# the same POST /run request. Absent means true for backward compatibility.
-RETRY_TRANSPORT_ERRORS_ON_RUN_KEY_NAME = "retry_transport_errors_on_run"
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
@@ -189,14 +186,6 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 # Set it when dispatches reuse task and rollout indices.
 # Otherwise two dispatches would share one capture key.
 ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
-# One physical /run execution. Unlike trajectory_identity.rollout_id, this is
-# deliberately fresh when a logical rollout is re-executed after an ambiguous
-# transport failure.
-EXECUTION_ID_KEY_NAME = "_ng_execution_id"
-# Sandbox providers receive this metadata verbatim. Keep one namespaced key so
-# OpenSandbox/Kubernetes metadata and Docker labels describe the same physical
-# execution without provider-specific translation.
-EXECUTION_ID_SANDBOX_METADATA_KEY = "nemo-gym.execution-id"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"

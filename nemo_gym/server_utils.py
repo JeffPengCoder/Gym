@@ -264,7 +264,6 @@ async def request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
-    _retry_transport_errors: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -287,7 +286,6 @@ async def request(
             url,
             _internal=_internal,
             _max_connection_retries=_max_connection_retries,
-            _retry_transport_errors=_retry_transport_errors,
             **kwargs,
         )
     return await _request_with_retries(
@@ -295,7 +293,6 @@ async def request(
         url,
         _internal=_internal,
         _max_connection_retries=_max_connection_retries,
-        _retry_transport_errors=_retry_transport_errors,
         **kwargs,
     )
 
@@ -305,7 +302,6 @@ async def _traced_request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
-    _retry_transport_errors: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -345,7 +341,6 @@ async def _traced_request(
             url,
             _internal=_internal,
             _max_connection_retries=_max_connection_retries,
-            _retry_transport_errors=_retry_transport_errors,
             **kwargs,
         )
 
@@ -395,7 +390,6 @@ async def _request_with_retries(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
-    _retry_transport_errors: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
@@ -406,8 +400,6 @@ async def _request_with_retries(
         try:
             return await client.request(method=method, url=url, **kwargs)
         except ServerDisconnectedError:
-            if not _retry_transport_errors:
-                raise
             global _NUM_SERVER_DISCONNECTED_ERROR
             _NUM_SERVER_DISCONNECTED_ERROR += 1
             retries += 1
@@ -424,8 +416,6 @@ async def _request_with_retries(
 
             await asyncio.sleep(0.5)
         except ClientOSError:
-            if not _retry_transport_errors:
-                raise
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
             retries += 1
@@ -441,8 +431,6 @@ async def _request_with_retries(
 
             await asyncio.sleep(0.5)
         except Exception as e:
-            if not _retry_transport_errors:
-                raise
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
 
@@ -573,8 +561,6 @@ class ServerClient(BaseModel):
         server_name: str,
         url_path: str,
         method: str,
-        *,
-        retry_transport_errors: bool = True,
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
@@ -612,13 +598,7 @@ class ServerClient(BaseModel):
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
-        return await request(
-            method=method,
-            url=f"{base_url}{url_path}",
-            _internal=True,
-            _retry_transport_errors=retry_transport_errors,
-            **kwargs,
-        )
+        return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
 
     async def get(
         self,
@@ -645,8 +625,6 @@ class ServerClient(BaseModel):
         self,
         server_name: str,
         url_path: str,
-        *,
-        retry_transport_errors: bool = True,
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         """
@@ -661,7 +639,6 @@ class ServerClient(BaseModel):
             server_name=server_name,
             url_path=url_path,
             method="POST",
-            retry_transport_errors=retry_transport_errors,
             **kwargs,
         )
 

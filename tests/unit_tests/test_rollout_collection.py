@@ -38,7 +38,7 @@ from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
-    EXECUTION_ID_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
@@ -67,7 +67,6 @@ from nemo_gym.rollout_collection import (
     _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
-    _retry_transport_errors_for_run,
     _rollout_for_export,
     _rollout_request_debug_summary,
     _trajectory_identity,
@@ -167,9 +166,9 @@ class TestLoadsJsonlLine:
     def test_parses_valid_line(self) -> None:
         assert loads_jsonl_line('{"a": 1}', "f.jsonl", 1) == {"a": 1}
 
-    def test_execution_id_does_not_replace_semantic_trajectory_identity(self) -> None:
+    def test_capture_rollout_id_does_not_replace_semantic_trajectory_identity(self) -> None:
         row = {
-            EXECUTION_ID_KEY_NAME: "execution-physical-1",
+            ROLLOUT_ID_KEY_NAME: "capture-physical-1",
             TASK_INDEX_KEY_NAME: 7,
             ROLLOUT_INDEX_KEY_NAME: 0,
             "trajectory_identity": {
@@ -235,15 +234,6 @@ class TestGetMaxRolloutAttempts:
 
 
 class TestRolloutCollection:
-    def test_run_transport_retry_policy_rejects_non_boolean_values(self) -> None:
-        row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}}
-        global_config = OmegaConf.create(
-            {"my_agent": {"responses_api_agents": {"impl": {"retry_transport_errors_on_run": "false"}}}}
-        )
-
-        with pytest.raises(ConfigError, match="must be a boolean"):
-            _retry_transport_errors_for_run(row, global_config)
-
     def test_rollout_request_debug_summary_compact(self) -> None:
         row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
@@ -806,10 +796,10 @@ class TestRolloutCollection:
         with pytest.raises(RuntimeError, match="boom"):
             await next(RolloutCollectionHelper().run_examples([row]))
 
-        assert EXECUTION_ID_KEY_NAME not in row
+        assert ROLLOUT_ID_KEY_NAME not in row
         posted_row = mock_server_client.post.await_args.kwargs["json"]
-        assert posted_row[EXECUTION_ID_KEY_NAME].startswith("execution-")
-        assert mock_server_client.post.await_args.kwargs["retry_transport_errors"] is True
+        assert posted_row[ROLLOUT_ID_KEY_NAME].startswith("rollout-")
+        assert "retry_transport_errors" not in mock_server_client.post.await_args.kwargs
 
         captured = capsys.readouterr()
         assert "[rollout_collection] /run failed status=500" in captured.out
@@ -821,15 +811,9 @@ class TestRolloutCollection:
         assert "responses_create_params" not in captured.out
         assert "do not log this" not in captured.out
 
-    @pytest.mark.parametrize(
-        ("agent_config", "expected_retry_transport_errors"),
-        [({}, True), ({"retry_transport_errors_on_run": False}, False)],
-    )
-    async def test_run_examples_selects_retry_policy_without_mutating_source(
+    async def test_run_examples_allocates_fresh_rollout_ids_without_mutating_source(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        agent_config: dict,
-        expected_retry_transport_errors: bool,
     ) -> None:
         source_row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
@@ -842,9 +826,7 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
         # run_examples now validates agent names against the running config.
-        mock_server_client.global_config_dict = OmegaConf.create(
-            {"my_agent": {"responses_api_agents": {"impl": agent_config}}}
-        )
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "setup_server_client_utils",
@@ -864,20 +846,19 @@ class TestRolloutCollection:
         first_row, first_result = await next(helper.run_examples([source_row]))
         second_row, second_result = await next(helper.run_examples([source_row]))
 
-        assert EXECUTION_ID_KEY_NAME not in source_row
+        assert ROLLOUT_ID_KEY_NAME not in source_row
         assert source_row == source_snapshot
         assert first_row is not source_row
         assert second_row is not source_row
-        assert first_row[EXECUTION_ID_KEY_NAME] != second_row[EXECUTION_ID_KEY_NAME]
-        assert first_result[EXECUTION_ID_KEY_NAME] == first_row[EXECUTION_ID_KEY_NAME]
-        assert second_result[EXECUTION_ID_KEY_NAME] == second_row[EXECUTION_ID_KEY_NAME]
-        assert all(
-            call.kwargs["retry_transport_errors"] is expected_retry_transport_errors
-            for call in mock_server_client.post.await_args_list
-        )
+        assert first_row[ROLLOUT_ID_KEY_NAME].startswith("rollout-")
+        assert second_row[ROLLOUT_ID_KEY_NAME].startswith("rollout-")
+        assert first_row[ROLLOUT_ID_KEY_NAME] != second_row[ROLLOUT_ID_KEY_NAME]
+        assert first_result == {"reward": 1.0}
+        assert second_result == {"reward": 1.0}
+        assert all("retry_transport_errors" not in call.kwargs for call in mock_server_client.post.await_args_list)
         assert mock_server_client.post.await_count == 2
 
-    async def test_run_examples_rejects_server_execution_id_conflict(
+    async def test_run_examples_preserves_explicit_rollout_id(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -885,6 +866,7 @@ class TestRolloutCollection:
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
             TASK_INDEX_KEY_NAME: 7,
             ROLLOUT_INDEX_KEY_NAME: 0,
+            ROLLOUT_ID_KEY_NAME: "caller-owned-capture-id",
             "responses_create_params": {"input": "solve"},
         }
         response = MagicMock(status=200)
@@ -901,14 +883,18 @@ class TestRolloutCollection:
         async def successful_status(_response):
             return None
 
-        async def conflicting_json(_response):
-            return {EXECUTION_ID_KEY_NAME: "execution-from-wrong-dispatch"}
+        async def successful_json(_response):
+            return {"reward": 1.0}
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", successful_status)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", conflicting_json)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", successful_json)
 
-        with pytest.raises(ValueError, match="wrong physical execution"):
-            await next(RolloutCollectionHelper().run_examples([source_row]))
+        returned_row, result = await next(RolloutCollectionHelper().run_examples([source_row]))
+
+        assert returned_row is not source_row
+        assert returned_row[ROLLOUT_ID_KEY_NAME] == "caller-owned-capture-id"
+        assert source_row[ROLLOUT_ID_KEY_NAME] == "caller-owned-capture-id"
+        assert result == {"reward": 1.0}
 
     async def test_run_examples_records_agent_http_failure_as_a_failure_row(
         self, monkeypatch: pytest.MonkeyPatch
@@ -927,12 +913,12 @@ class TestRolloutCollection:
             RolloutCollectionHelper().run_examples([row], route_failures_to_sidecar=True)
         )
 
-        # run_examples dispatches a deep copy stamped with a fresh execution id,
+        # run_examples dispatches a deep copy stamped with a fresh capture id,
         # so the returned row is that copy rather than the caller's object.
         assert returned_row is not row
-        assert EXECUTION_ID_KEY_NAME not in row
+        assert ROLLOUT_ID_KEY_NAME not in row
         assert {key: returned_row[key] for key in row} == row
-        assert returned_row[EXECUTION_ID_KEY_NAME].startswith("execution-")
+        assert returned_row[ROLLOUT_ID_KEY_NAME].startswith("rollout-")
         assert result[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
         assert result["_ng_failure_type"] == "ClientResponseError"
         assert result["_ng_failure_http_status"] == 500
@@ -1329,7 +1315,7 @@ class TestRolloutCollection:
         assert [row["reward"] for row in merged] == [1.0]
 
     async def test_run_examples_never_leaks_rollout_latency_into_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Direct callers get execution identity without internal rollout-latency metadata."""
+        """Direct callers get the raw /run result without internal rollout-latency metadata."""
         row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
         response = MagicMock()
         response.status = 200
@@ -1346,11 +1332,9 @@ class TestRolloutCollection:
         returned_row, result = await next(RolloutCollectionHelper().run_examples([row]))
 
         assert returned_row is not row
-        assert EXECUTION_ID_KEY_NAME not in row
-        assert result == {
-            "response": {},
-            EXECUTION_ID_KEY_NAME: returned_row[EXECUTION_ID_KEY_NAME],
-        }
+        assert ROLLOUT_ID_KEY_NAME not in row
+        assert returned_row[ROLLOUT_ID_KEY_NAME].startswith("rollout-")
+        assert result == {"response": {}}
         assert "_ng_rollout_latency_ms" not in result
 
     async def test_run_examples_with_metadata_carries_rollout_latency_alongside_result(
@@ -1373,11 +1357,9 @@ class TestRolloutCollection:
         completed = await next(RolloutCollectionHelper()._run_examples_with_metadata([row]))
 
         assert completed.row is not row
-        assert EXECUTION_ID_KEY_NAME not in row
-        assert completed.result == {
-            "response": {},
-            EXECUTION_ID_KEY_NAME: completed.row[EXECUTION_ID_KEY_NAME],
-        }
+        assert ROLLOUT_ID_KEY_NAME not in row
+        assert completed.row[ROLLOUT_ID_KEY_NAME].startswith("rollout-")
+        assert completed.result == {"response": {}}
         assert isinstance(completed.rollout_latency_ms, float)
         assert completed.rollout_latency_ms >= 0
 

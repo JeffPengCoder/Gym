@@ -30,6 +30,7 @@ from itertools import repeat
 from pathlib import Path
 from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from uuid import uuid4
 
 import orjson
 from aiohttp import ClientError
@@ -58,9 +59,7 @@ from nemo_gym.global_config import (
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
-    EXECUTION_ID_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
-    RETRY_TRANSPORT_ERRORS_ON_RUN_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
@@ -68,18 +67,13 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
     dataset_agent_pins,
-    get_first_server_config_dict,
     get_global_config_dict,
     pairing_override_enabled,
     resolve_dataset_agent,
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.rollout_correlation import (
-    maybe_legacy_rollout_id_from_run_body,
-    maybe_rollout_id_from_run_body,
-    new_execution_id,
-)
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
@@ -198,9 +192,7 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
         (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
         str(row[TASK_INDEX_KEY_NAME]),
     )
-    rollout_id = maybe_legacy_rollout_id_from_run_body(row) or (
-        f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-    )
+    rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return task_id, rollout_id
 
 
@@ -846,7 +838,7 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
-        EXECUTION_ID_KEY_NAME: row.get(EXECUTION_ID_KEY_NAME),
+        ROLLOUT_ID_KEY_NAME: row.get(ROLLOUT_ID_KEY_NAME),
         "sampling_event_id": trajectory_identity.get("sampling_event_id"),
         "group_id": trajectory_identity.get("group_id"),
         "rollout_id": trajectory_identity.get("rollout_id"),
@@ -855,24 +847,6 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "metadata_rollout_purpose": metadata_purpose,
     }
     return {k: v for k, v in summary.items() if v is not None}
-
-
-def _retry_transport_errors_for_run(row: Dict[str, Any], global_config_dict: DictConfig) -> bool:
-    """Return the selected agent's POST /run transport-retry capability."""
-
-    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
-    agent_name = agent_ref.get("name") if isinstance(agent_ref, Mapping) else None
-    if not isinstance(agent_name, str) or not agent_name:
-        raise ConfigError("A rollout row must resolve to an agent before its /run retry policy is selected.")
-
-    agent_config = get_first_server_config_dict(global_config_dict, agent_name)
-    retry_transport_errors = agent_config.get(RETRY_TRANSPORT_ERRORS_ON_RUN_KEY_NAME, True)
-    if not isinstance(retry_transport_errors, bool):
-        raise ConfigError(
-            f"Agent '{agent_name}' field '{RETRY_TRANSPORT_ERRORS_ON_RUN_KEY_NAME}' must be a boolean, "
-            f"got {retry_transport_errors!r}."
-        )
-    return retry_transport_errors
 
 
 # Request failures that are data, not bugs. Anything else still propagates.
@@ -1448,9 +1422,6 @@ class RolloutCollectionHelper(BaseModel):
                 # Capture readback recomputes the id from the finished record.
                 # Preserve an explicit id on the result just like the indices.
                 result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
-            if EXECUTION_ID_KEY_NAME in row:
-                result[EXECUTION_ID_KEY_NAME] = row[EXECUTION_ID_KEY_NAME]
-
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
             # No rollout happened, so there is nothing to capture, tokenize or average.
@@ -1962,39 +1933,25 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_rows = []
         for source_row in examples:
             row = deepcopy(source_row)
-            row[EXECUTION_ID_KEY_NAME] = new_execution_id()
+            # Reuse Gym's existing capture-correlation field. A caller-supplied
+            # value remains authoritative; otherwise each physical dispatch gets
+            # a fresh value without mutating the caller's source row.
+            row.setdefault(ROLLOUT_ID_KEY_NAME, f"rollout-{uuid4().hex}")
             dispatch_rows.append(row)
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
             async with semaphore:
-                retry_transport_errors = _retry_transport_errors_for_run(row, server_client.global_config_dict)
                 print(
                     "[rollout_collection] /run dispatch "
-                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
-                    f"retry_transport_errors={str(retry_transport_errors).lower()}",
+                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
                     flush=True,
                 )
                 started_at = time()
                 res = None
                 try:
-                    res = await server_client.post(
-                        server_name=row["agent_ref"]["name"],
-                        url_path="/run",
-                        json=row,
-                        retry_transport_errors=retry_transport_errors,
-                    )
+                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                     await raise_for_status(res)
                     result = await get_response_json(res)
-                    if not isinstance(result, dict):
-                        raise TypeError("Gym /run response must be a mapping")
-                    execution_id = row[EXECUTION_ID_KEY_NAME]
-                    observed_execution_id = result.get(EXECUTION_ID_KEY_NAME)
-                    if observed_execution_id is not None and observed_execution_id != execution_id:
-                        raise ValueError(
-                            "Gym /run returned the wrong physical execution: "
-                            f"expected={execution_id!r}, observed={observed_execution_id!r}"
-                        )
-                    result[EXECUTION_ID_KEY_NAME] = execution_id
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time() - started_at) * 1000
@@ -2043,9 +2000,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         that ends every rollout still in flight. It defaults off because those rollouts then leave
         the score.
 
-        Every future resolves to the dispatched ``(row, result)`` pair. The scheduler-owned
-        ``_ng_execution_id`` is stamped on both objects so exact call captures can be joined;
-        internal-only fields such as rollout latency are not added to ``result``.
+        Every future resolves to the dispatched ``(row, result)`` pair. The copied dispatch row
+        receives a fresh ``_ng_rollout_id`` when the caller did not provide one, so captures can be
+        joined without mutating the source row. Internal-only fields such as rollout latency are
+        not added to ``result``.
         """
 
         async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
