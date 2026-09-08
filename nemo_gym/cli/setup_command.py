@@ -43,14 +43,11 @@ NEMO_GYM_ALLOWED_COMPONENT_ROOTS_ENV_VAR_NAME = "NEMO_GYM_ALLOWED_COMPONENT_ROOT
 PARENT_RUNTIME_OVERRIDES_FILENAME = ".nemo-gym-parent-runtime-overrides.txt"
 ENVIRONMENT_IDENTITY_FILENAME = ".nemo-gym-environment-identity"
 _ENVIRONMENT_INPUT_FILENAMES = (
+    ".python-version",
     "requirements.txt",
     "pyproject.toml",
     "overrides.txt",
-    "uv-overrides.txt",
     "uv.toml",
-    "uv-torch-backend.txt",
-    "uv-python-version.txt",
-    "uv-managed-python.txt",
 )
 
 
@@ -203,19 +200,15 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     python_request = str(global_config_dict[PYTHON_VERSION_KEY_NAME])
     python_request_arg = python_request
-    python_venv_flags = ""
-    python_version_path = dir_path / "uv-python-version.txt"
+    # A component may use uv's standard Python-version file to select a
+    # compatible interpreter independently from the parent process. Components
+    # without one retain the existing parent-Python behavior.
+    python_version_path = dir_path / ".python-version"
     if python_version_path.exists():
         python_request = python_version_path.read_text(encoding="utf-8").strip()
         if not python_request:
             raise RuntimeError(f"Empty Python version in {python_version_path}")
         python_request_arg = shlex.quote(python_request)
-    managed_python_path = dir_path / "uv-managed-python.txt"
-    if managed_python_path.exists():
-        managed_python = managed_python_path.read_text(encoding="utf-8").strip().lower()
-        if managed_python != "true":
-            raise RuntimeError(f"Expected 'true' in {managed_python_path}, got {managed_python!r}")
-        python_venv_flags = "--managed-python "
 
     is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
     nemo_gym_version_spec = _get_nemo_gym_version_spec(is_editable_install)
@@ -238,9 +231,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # example /opt/nemo-rl) from contributing unrelated resolver policy.
     uv_config_path = dir_path / "uv.toml"
     uv_config_flag = f"--config-file {shlex.quote(str(uv_config_path.resolve()))} " if uv_config_path.exists() else ""
-    uv_venv_cmd = (
-        f"uv venv {uv_config_flag}--seed --allow-existing {python_venv_flags}--python {python_request_arg} {venv_path}"
-    )
+    uv_venv_cmd = f"uv venv {uv_config_flag}--seed --allow-existing --python {python_request_arg} {venv_path}"
 
     venv_python_fpath = venv_path / "bin/python"
     venv_activate_fpath = venv_path / "bin/activate"
@@ -264,9 +255,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
-    # A server is a separate process with its own venv. Allow it to select its
-    # Python, dependency metadata, and Torch backend without leaking those
-    # choices into sibling server venvs through process-wide UV_* variables.
+    # A server is a separate process with its own venv. Allow standard uv
+    # configuration in pyproject.toml or uv.toml without leaking those choices
+    # into sibling server venvs through process-wide UV_* variables.
     # Parent-sensitive packages such as Ray are both direct requirements and
     # resolver overrides. A direct requirement alone cannot replace an exact
     # stale transitive pin in a server dependency, which can either make the
@@ -274,16 +265,6 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # Materialize the dynamic authority inside the writable venv rather than
     # baking the current parent version into every server's source tree.
     server_uv_flags = f"{uv_config_flag}--overrides {shlex.quote(str(parent_runtime_overrides_path))} "
-    overrides_path = dir_path / "uv-overrides.txt"
-    if overrides_path.exists():
-        server_uv_flags += f"--overrides {shlex.quote(str(overrides_path.resolve()))} "
-    torch_backend_path = dir_path / "uv-torch-backend.txt"
-    if torch_backend_path.exists():
-        torch_backend = torch_backend_path.read_text(encoding="utf-8").strip()
-        valid_torch_backends = {"auto", "cpu", "cu126", "cu128", "cu129", "cu130", "xpu"}
-        if torch_backend not in valid_torch_backends:
-            raise RuntimeError(f"Invalid Torch backend in {torch_backend_path}: {torch_backend!r}")
-        server_uv_flags += f"--torch-backend {torch_backend} "
 
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"

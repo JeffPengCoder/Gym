@@ -325,8 +325,9 @@ gym eval run --no-serve
 
 The installer targets only the managed OSWorld agent venv. It does not modify
 the system Python, Gym's root venv, the model server, or the OSWorld VM. The
-installer reads the same `uv-torch-backend.txt` marker as `gym env prefetch`,
-so `torch` and `torchvision` come from the same CPU/CUDA wheel family. A plain
+installer reads the same `[pip].torch-backend` setting from `uv.toml` as
+`gym env prefetch`, so `torch` and `torchvision` come from the same CPU/CUDA
+wheel family. A plain
 PyPI `torchvision` install is not equivalent: it can appear version-compatible
 with an existing CPU `torch` while failing to load native operators such as
 `torchvision::nms`. The managed environment excludes OSWorld's Azure, Aliyun,

@@ -24,19 +24,14 @@ from packaging.version import Version
 
 ROOT = Path(__file__).resolve().parents[2]
 OSWORLD_AGENT_REQUIREMENTS = ROOT / "responses_api_agents/osworld_agent/requirements.txt"
-OSWORLD_AGENT_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/uv-overrides.txt"
 OSWORLD_AGENT_UV_CONFIG = ROOT / "responses_api_agents/osworld_agent/uv.toml"
 OSWORLD_AGENT_PUBLIC_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/overrides.txt"
 OSWORLD_RESOURCES_PROJECT = ROOT / "resources_servers/osworld/pyproject.toml"
-OSWORLD_RESOURCES_PYTHON = ROOT / "resources_servers/osworld/uv-python-version.txt"
-OSWORLD_RESOURCES_MANAGED_PYTHON = ROOT / "resources_servers/osworld/uv-managed-python.txt"
-OSWORLD_RESOURCES_TORCH_BACKEND = ROOT / "resources_servers/osworld/uv-torch-backend.txt"
+OSWORLD_RESOURCES_PYTHON = ROOT / "resources_servers/osworld/.python-version"
 OSWORLD_AGENT_README = ROOT / "responses_api_agents/osworld_agent/README.md"
 OSWORLD_BENCHMARK_README = ROOT / "benchmarks/osworld/README.md"
-VLLM_MODEL_PYTHON = ROOT / "responses_api_models/vllm_model/uv-python-version.txt"
-VLLM_MODEL_MANAGED_PYTHON = ROOT / "responses_api_models/vllm_model/uv-managed-python.txt"
-OSWORLD_AGENT_PYTHON = ROOT / "responses_api_agents/osworld_agent/uv-python-version.txt"
-OSWORLD_AGENT_MANAGED_PYTHON = ROOT / "responses_api_agents/osworld_agent/uv-managed-python.txt"
+VLLM_MODEL_PYTHON = ROOT / "responses_api_models/vllm_model/.python-version"
+OSWORLD_AGENT_PYTHON = ROOT / "responses_api_agents/osworld_agent/.python-version"
 OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES = {
     "alibabacloud-ecs20140526",
     "alibabacloud-tea-openapi",
@@ -58,8 +53,15 @@ def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
         server_config = tomllib.load(f)
     project_config = _uv_config()
 
-    for key in ("constraint-dependencies", "override-dependencies"):
-        assert server_config[key] == project_config[key]
+    assert server_config["constraint-dependencies"] == project_config["constraint-dependencies"]
+    project_overrides = set(project_config["override-dependencies"])
+    server_overrides = set(server_config["override-dependencies"])
+    assert project_overrides <= server_overrides
+    assert server_overrides - project_overrides == {
+        "grpcio-status==1.71.2",
+        "protobuf==5.29.6",
+        "numpy>=2.1,<2.5",
+    }
     project_exclusions = set(project_config["exclude-dependencies"])
     server_exclusions = set(server_config["exclude-dependencies"])
     assert project_exclusions <= server_exclusions
@@ -68,6 +70,8 @@ def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
     assert Version("0.11.24") not in required_version
     assert Version("0.11.25") in required_version
     assert "managed" not in server_config
+    assert "python-preference" not in server_config
+    assert server_config["pip"]["torch-backend"] == "cpu"
 
 
 def test_osworld_runtime_consumers_share_one_pinned_revision() -> None:
@@ -100,9 +104,10 @@ def test_osworld_resources_server_owns_a_python_313_wheel_compatible_runtime() -
         resources_project = tomllib.load(f)
 
     assert resources_project["project"]["requires-python"] == parent_python
-    assert OSWORLD_RESOURCES_PYTHON.read_text(encoding="utf-8").strip() == parent_python.removeprefix(">=")
-    assert OSWORLD_RESOURCES_MANAGED_PYTHON.read_text(encoding="utf-8").strip() == "true"
-    assert OSWORLD_RESOURCES_TORCH_BACKEND.read_text(encoding="utf-8").strip() == "cpu"
+    resource_python = SpecifierSet(OSWORLD_RESOURCES_PYTHON.read_text(encoding="utf-8").strip())
+    assert Version(parent_python.removeprefix(">=")) in resource_python
+    assert Version("3.14") not in resource_python
+    assert resources_project["tool"]["uv"]["pip"]["torch-backend"] == "cpu"
 
     direct = {Requirement(value).name: Requirement(value) for value in resources_project["project"]["dependencies"]}
     overrides = {
@@ -126,7 +131,8 @@ def test_osworld_resources_server_owns_a_python_313_wheel_compatible_runtime() -
 
 def test_osworld_agent_dependency_overrides() -> None:
     requirements = OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8")
-    agent_overrides = OSWORLD_AGENT_OVERRIDES.read_text(encoding="utf-8")
+    with OSWORLD_AGENT_UV_CONFIG.open("rb") as config_file:
+        agent_overrides = tomllib.load(config_file)["override-dependencies"]
     public_overrides = OSWORLD_AGENT_PUBLIC_OVERRIDES.read_text(encoding="utf-8")
 
     assert "grpcio-status==1.71.2" in agent_overrides
@@ -142,22 +148,36 @@ def test_server_ray_version_is_owned_by_parent_process() -> None:
     # global_config.py injects the parent process's exact Ray version into
     # every server installation. Static overrides must not drag a current
     # source checkout back to whichever Ray happened to ship in a base image.
-    ray_override = re.compile(r"(?m)^\s*ray(?:\[default\])?\s*[<>=!~]")
-    managed_overrides = [
-        *ROOT.glob("responses_api_agents/*/uv-overrides.txt"),
-        *ROOT.glob("responses_api_models/*/uv-overrides.txt"),
-        *ROOT.glob("resources_servers/*/uv-overrides.txt"),
-    ]
-    for override_path in managed_overrides:
-        assert ray_override.search(override_path.read_text(encoding="utf-8")) is None
-    assert not (ROOT / "responses_api_models/vllm_model/uv-overrides.txt").exists()
+    ray_override = re.compile(r"^ray(?:\[default\])?\s*[<>=!~]", re.IGNORECASE)
+    with OSWORLD_AGENT_UV_CONFIG.open("rb") as config_file:
+        agent_overrides = tomllib.load(config_file)["override-dependencies"]
+    with OSWORLD_RESOURCES_PROJECT.open("rb") as config_file:
+        resource_overrides = tomllib.load(config_file)["tool"]["uv"]["override-dependencies"]
+    for requirement in (*agent_overrides, *resource_overrides):
+        assert ray_override.search(requirement) is None
 
 
-def test_nemo_rl_servers_use_the_project_python_floor() -> None:
+def test_role_runtime_policy_uses_standard_uv_files() -> None:
+    legacy_markers = {
+        "uv-managed-python.txt",
+        "uv-overrides.txt",
+        "uv-python-version.txt",
+        "uv-torch-backend.txt",
+    }
+    tracked_role_dirs = (
+        ROOT / "responses_api_agents/osworld_agent",
+        ROOT / "resources_servers/osworld",
+        ROOT / "responses_api_models/vllm_model",
+    )
+
+    assert not [path for role_dir in tracked_role_dirs for path in role_dir.iterdir() if path.name in legacy_markers]
+
+
+def test_nemo_rl_servers_use_a_compatible_python_range() -> None:
     with (ROOT / "pyproject.toml").open("rb") as f:
         python_floor = tomllib.load(f)["project"]["requires-python"].removeprefix(">=")
 
-    assert OSWORLD_AGENT_PYTHON.read_text(encoding="utf-8").strip() == python_floor
-    assert VLLM_MODEL_PYTHON.read_text(encoding="utf-8").strip() == python_floor
-    assert OSWORLD_AGENT_MANAGED_PYTHON.read_text(encoding="utf-8").strip() == "true"
-    assert VLLM_MODEL_MANAGED_PYTHON.read_text(encoding="utf-8").strip() == "true"
+    for python_policy in (OSWORLD_AGENT_PYTHON, VLLM_MODEL_PYTHON):
+        supported = SpecifierSet(python_policy.read_text(encoding="utf-8").strip())
+        assert Version(python_floor) in supported
+        assert Version("3.14") not in supported

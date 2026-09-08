@@ -16,7 +16,7 @@ venv_path=$1
 venv_python="${venv_path}/bin/python"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 runtime_checker="${script_dir}/runtime_dependencies.py"
-torch_backend_file="${script_dir}/uv-torch-backend.txt"
+uv_config="${script_dir}/uv.toml"
 if [[ ! -x "${venv_python}" ]]; then
     echo "OSWorld agent Python is not executable: ${venv_python}" >&2
     exit 2
@@ -25,14 +25,16 @@ if [[ ! -r "${runtime_checker}" ]]; then
     echo "OSWorld runtime dependency checker is not readable: ${runtime_checker}" >&2
     exit 2
 fi
-if [[ ! -r "${torch_backend_file}" ]]; then
-    echo "OSWorld agent Torch backend marker is not readable: ${torch_backend_file}" >&2
+if [[ ! -r "${uv_config}" ]]; then
+    echo "OSWorld agent uv config is not readable: ${uv_config}" >&2
     exit 2
 fi
 
-torch_backend="$(tr -d '[:space:]' < "${torch_backend_file}")"
+torch_backend="$("${venv_python}" -c \
+    'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["pip"]["torch-backend"])' \
+    "${uv_config}")"
 if [[ -z "${torch_backend}" ]]; then
-    echo "OSWorld agent Torch backend marker is empty: ${torch_backend_file}" >&2
+    echo "OSWorld agent Torch backend is empty in ${uv_config}" >&2
     exit 2
 fi
 
