@@ -731,7 +731,7 @@ COMMANDS = {
             _value_flag(
                 "status",
                 "status",
-                "Filter by validation status.",
+                "Filter by manifest status.",
                 choices=("experimental", "no-manifest"),
             ),
             _value_flag("lifecycle", "lifecycle", "Filter by lifecycle.", choices=("active", "deprecated")),
