@@ -29,6 +29,7 @@ from responses_api_agents.osworld_agent.history_policy import (
     HistoryPolicyState,
     plan_history,
 )
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldModelTimeoutError
 from responses_api_agents.osworld_agent.trajectory import stable_id
 
 
@@ -923,6 +924,11 @@ class NemotronV3NanoOmniAgent:
                         }
                     )
                 break
+            except OSWorldModelTimeoutError:
+                # Transport deadlines are runner/runtime facts, not malformed
+                # model output. Do not turn one timed-out call into N parser
+                # retries or a synthetic policy outcome.
+                raise
             except Exception as exc:  # noqa: BLE001 - malformed model output is retryable.
                 last_error = str(exc)
                 last_error_type = type(exc).__name__

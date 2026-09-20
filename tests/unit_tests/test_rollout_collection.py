@@ -17,7 +17,7 @@ import json
 import pickle
 import warnings
 from asyncio import Future
-from collections import Counter
+from collections import Counter, defaultdict
 from copy import deepcopy
 from pathlib import Path
 from threading import get_ident
@@ -38,7 +38,7 @@ from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
-    EXECUTION_ID_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
@@ -67,6 +67,7 @@ from nemo_gym.rollout_collection import (
     _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
+    _masking_step_metrics,
     _rollout_for_export,
     _rollout_request_debug_summary,
     _trajectory_identity,
@@ -166,9 +167,9 @@ class TestLoadsJsonlLine:
     def test_parses_valid_line(self) -> None:
         assert loads_jsonl_line('{"a": 1}', "f.jsonl", 1) == {"a": 1}
 
-    def test_execution_id_does_not_replace_semantic_trajectory_identity(self) -> None:
+    def test_capture_rollout_id_does_not_replace_semantic_trajectory_identity(self) -> None:
         row = {
-            EXECUTION_ID_KEY_NAME: "execution-physical-1",
+            ROLLOUT_ID_KEY_NAME: "capture-physical-1",
             TASK_INDEX_KEY_NAME: 7,
             ROLLOUT_INDEX_KEY_NAME: 0,
             "trajectory_identity": {
@@ -796,10 +797,10 @@ class TestRolloutCollection:
         with pytest.raises(RuntimeError, match="boom"):
             await next(RolloutCollectionHelper().run_examples([row]))
 
-        assert EXECUTION_ID_KEY_NAME not in row
+        assert ROLLOUT_ID_KEY_NAME not in row
         posted_row = mock_server_client.post.await_args.kwargs["json"]
-        assert posted_row[EXECUTION_ID_KEY_NAME].startswith("execution-")
-        assert mock_server_client.post.await_args.kwargs["retry_transport_errors"] is False
+        assert posted_row[ROLLOUT_ID_KEY_NAME].startswith("rollout-")
+        assert "retry_transport_errors" not in mock_server_client.post.await_args.kwargs
 
         captured = capsys.readouterr()
         assert "[rollout_collection] /run failed status=500" in captured.out
@@ -811,7 +812,7 @@ class TestRolloutCollection:
         assert "responses_create_params" not in captured.out
         assert "do not log this" not in captured.out
 
-    async def test_run_examples_allocates_fresh_execution_without_mutating_source(
+    async def test_run_examples_allocates_fresh_rollout_ids_without_mutating_source(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -846,17 +847,19 @@ class TestRolloutCollection:
         first_row, first_result = await next(helper.run_examples([source_row]))
         second_row, second_result = await next(helper.run_examples([source_row]))
 
-        assert EXECUTION_ID_KEY_NAME not in source_row
+        assert ROLLOUT_ID_KEY_NAME not in source_row
         assert source_row == source_snapshot
         assert first_row is not source_row
         assert second_row is not source_row
-        assert first_row[EXECUTION_ID_KEY_NAME] != second_row[EXECUTION_ID_KEY_NAME]
-        assert first_result[EXECUTION_ID_KEY_NAME] == first_row[EXECUTION_ID_KEY_NAME]
-        assert second_result[EXECUTION_ID_KEY_NAME] == second_row[EXECUTION_ID_KEY_NAME]
-        assert all(call.kwargs["retry_transport_errors"] is False for call in mock_server_client.post.await_args_list)
+        assert first_row[ROLLOUT_ID_KEY_NAME].startswith("rollout-")
+        assert second_row[ROLLOUT_ID_KEY_NAME].startswith("rollout-")
+        assert first_row[ROLLOUT_ID_KEY_NAME] != second_row[ROLLOUT_ID_KEY_NAME]
+        assert first_result == {"reward": 1.0}
+        assert second_result == {"reward": 1.0}
+        assert all("retry_transport_errors" not in call.kwargs for call in mock_server_client.post.await_args_list)
         assert mock_server_client.post.await_count == 2
 
-    async def test_run_examples_rejects_server_execution_id_conflict(
+    async def test_run_examples_preserves_explicit_rollout_id(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -864,6 +867,7 @@ class TestRolloutCollection:
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
             TASK_INDEX_KEY_NAME: 7,
             ROLLOUT_INDEX_KEY_NAME: 0,
+            ROLLOUT_ID_KEY_NAME: "caller-owned-capture-id",
             "responses_create_params": {"input": "solve"},
         }
         response = MagicMock(status=200)
@@ -880,14 +884,18 @@ class TestRolloutCollection:
         async def successful_status(_response):
             return None
 
-        async def conflicting_json(_response):
-            return {EXECUTION_ID_KEY_NAME: "execution-from-wrong-dispatch"}
+        async def successful_json(_response):
+            return {"reward": 1.0}
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", successful_status)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", conflicting_json)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", successful_json)
 
-        with pytest.raises(ValueError, match="wrong physical execution"):
-            await next(RolloutCollectionHelper().run_examples([source_row]))
+        returned_row, result = await next(RolloutCollectionHelper().run_examples([source_row]))
+
+        assert returned_row is not source_row
+        assert returned_row[ROLLOUT_ID_KEY_NAME] == "caller-owned-capture-id"
+        assert source_row[ROLLOUT_ID_KEY_NAME] == "caller-owned-capture-id"
+        assert result == {"reward": 1.0}
 
     async def test_run_examples_records_agent_http_failure_as_a_failure_row(
         self, monkeypatch: pytest.MonkeyPatch
@@ -906,12 +914,12 @@ class TestRolloutCollection:
             RolloutCollectionHelper().run_examples([row], route_failures_to_sidecar=True)
         )
 
-        # run_examples dispatches a deep copy stamped with a fresh execution id,
+        # run_examples dispatches a deep copy stamped with a fresh capture id,
         # so the returned row is that copy rather than the caller's object.
         assert returned_row is not row
-        assert EXECUTION_ID_KEY_NAME not in row
+        assert ROLLOUT_ID_KEY_NAME not in row
         assert {key: returned_row[key] for key in row} == row
-        assert returned_row[EXECUTION_ID_KEY_NAME].startswith("execution-")
+        assert returned_row[ROLLOUT_ID_KEY_NAME].startswith("rollout-")
         assert result[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
         assert result["_ng_failure_type"] == "ClientResponseError"
         assert result["_ng_failure_http_status"] == 500
@@ -1308,7 +1316,7 @@ class TestRolloutCollection:
         assert [row["reward"] for row in merged] == [1.0]
 
     async def test_run_examples_never_leaks_rollout_latency_into_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Direct callers get execution identity without internal rollout-latency metadata."""
+        """Direct callers get the raw /run result without internal rollout-latency metadata."""
         row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
         response = MagicMock()
         response.status = 200
@@ -1325,11 +1333,9 @@ class TestRolloutCollection:
         returned_row, result = await next(RolloutCollectionHelper().run_examples([row]))
 
         assert returned_row is not row
-        assert EXECUTION_ID_KEY_NAME not in row
-        assert result == {
-            "response": {},
-            EXECUTION_ID_KEY_NAME: returned_row[EXECUTION_ID_KEY_NAME],
-        }
+        assert ROLLOUT_ID_KEY_NAME not in row
+        assert returned_row[ROLLOUT_ID_KEY_NAME].startswith("rollout-")
+        assert result == {"response": {}}
         assert "_ng_rollout_latency_ms" not in result
 
     async def test_run_examples_with_metadata_carries_rollout_latency_alongside_result(
@@ -1352,11 +1358,9 @@ class TestRolloutCollection:
         completed = await next(RolloutCollectionHelper()._run_examples_with_metadata([row]))
 
         assert completed.row is not row
-        assert EXECUTION_ID_KEY_NAME not in row
-        assert completed.result == {
-            "response": {},
-            EXECUTION_ID_KEY_NAME: completed.row[EXECUTION_ID_KEY_NAME],
-        }
+        assert ROLLOUT_ID_KEY_NAME not in row
+        assert completed.row[ROLLOUT_ID_KEY_NAME].startswith("rollout-")
+        assert completed.result == {"response": {}}
         assert isinstance(completed.rollout_latency_ms, float)
         assert completed.rollout_latency_ms >= 0
 
@@ -2621,7 +2625,7 @@ class TestRolloutCollection:
 
         assert expected_results == actual_returned_results
 
-    async def test_run_from_config_aggregate_metrics_excludes_non_persisted_rows(
+    async def test_run_from_config_routes_only_explicit_failures_out_of_scored_rows(
         self, tmp_path: Path, empty_global_config: MagicMock
     ) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
@@ -2680,19 +2684,20 @@ class TestRolloutCollection:
             "case-2",
             "case-3",
         ]
-        assert [result["case"] for result in captured["results"]] == ["case-0"]
-        assert [row["x"] for row in captured["rows"]] == [0]
+        assert [result["case"] for result in captured["results"]] == ["case-0", "case-3"]
+        assert [row["x"] for row in captured["rows"]] == [0, 3]
+        assert captured["results"][1]["mask_sample"] is True
+        assert NG_FAILURE_CLASS_KEY not in captured["results"][1]
 
         with output_jsonl_fpath.open() as f:
             actual_written_results = [json.loads(line) for line in f]
-        assert [result["case"] for result in actual_written_results] == ["case-0"]
+        assert [result["case"] for result in actual_written_results] == ["case-0", "case-3"]
 
         failures_fpath = _failures_path_for(output_jsonl_fpath)
         with failures_fpath.open() as f:
             actual_failure_results = [json.loads(line) for line in f]
-        assert [result["case"] for result in actual_failure_results] == ["case-1", "case-3"]
+        assert [result["case"] for result in actual_failure_results] == ["case-1"]
         assert actual_failure_results[0][NG_FAILURE_CLASS_KEY] == "verify_failed"
-        assert actual_failure_results[1][NG_FAILURE_CLASS_KEY] == "masked_sample"
 
     async def test_run_from_config_aggregate_metrics_includes_cached_persisted_rows(
         self, tmp_path: Path, empty_global_config: MagicMock
@@ -4167,3 +4172,99 @@ class TestPreprocessExamples:
     def test_validates_knobs_like_the_cli(self) -> None:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
+
+
+class TestMaskingStepMetrics:
+    """Progress accounting covers persisted rollouts; dropped attempts are counted apart."""
+
+    def test_a_healthy_run_adds_no_keys(self) -> None:
+        assert _masking_step_metrics("my_agent", Counter({"reward": 2.0, "count": 4}), Counter()) == {}
+
+    def test_masked_rollouts_report_their_share_and_the_score_without_them(self) -> None:
+        # 10 persisted, 2 masked; the 8 unmasked ones scored 4.0 in total.
+        metrics = _masking_step_metrics("my_agent", Counter({"reward": 4.0, "count": 8, "masked": 2}), Counter())
+
+        assert metrics == {
+            "progress/my_agent/masked_pct": 20.0,
+            "progress/my_agent/reward_unmasked": 50.0,
+        }
+
+    def test_every_persisted_rollout_masked_publishes_no_score(self) -> None:
+        """No unmasked rollout means no honest average to publish."""
+        assert _masking_step_metrics("my_agent", Counter({"masked": 6}), Counter()) == {
+            "progress/my_agent/masked_pct": 100.0
+        }
+
+    def test_failed_and_omitted_attempts_do_not_enter_the_quality_average(self) -> None:
+        """A sidecar row and a kill-shaped one are counted, never averaged as a zero."""
+        metrics = _masking_step_metrics(
+            "my_agent",
+            Counter({"reward": 4.0, "count": 4}),
+            Counter({"failed": 3, "omitted": 2}),
+        )
+
+        assert metrics == {
+            "progress/my_agent/reward_unmasked": 100.0,
+            "progress/my_agent/failed": 3,
+            "progress/my_agent/omitted": 2,
+        }
+
+
+class TestAnAgentThatOnlyEverFails:
+    """The wiring case: a total failure must not fall out of the export.
+
+    `_masking_step_metrics` is correct on its own Counters; what this covers is the loop
+    that feeds it. An agent whose every request returns no result never lands in
+    `agent_name_to_counts`, so iterating that dict would drop exactly the agent whose
+    failure the series exists to surface.
+    """
+
+    def _exported_agents(self, scored: dict, dropped: dict) -> set:
+        """Reproduce the export loop's selection over the two counter dicts."""
+        agent_name_to_scored = defaultdict(Counter, {k: Counter(v) for k, v in scored.items()})
+        agent_name_to_dropped = defaultdict(Counter, {k: Counter(v) for k, v in dropped.items()})
+
+        step_metrics: dict = {}
+        for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
+            step_metrics.update(
+                _masking_step_metrics(
+                    agent_name,
+                    agent_name_to_scored.get(agent_name, Counter()),
+                    agent_name_to_dropped.get(agent_name, Counter()),
+                )
+            )
+        return {key.split("/")[1] for key in step_metrics}
+
+    def test_an_agent_with_no_successful_result_still_reports_its_failures(self) -> None:
+        exported = self._exported_agents(
+            scored={"healthy_agent": {"reward": 3.0, "count": 4}},
+            dropped={"broken_agent": {"failed": 4}},
+        )
+
+        assert "broken_agent" in exported
+
+    def test_the_healthy_agent_is_not_lost_in_the_process(self) -> None:
+        exported = self._exported_agents(
+            scored={"healthy_agent": {"reward": 3.0, "count": 4, "masked": 1}},
+            dropped={"broken_agent": {"failed": 4}},
+        )
+
+        assert exported == {"healthy_agent", "broken_agent"}
+
+    def test_a_run_with_nothing_wrong_still_exports_nothing(self) -> None:
+        """The series stays empty on a healthy run, as before."""
+        assert self._exported_agents(scored={"healthy_agent": {"reward": 3.0, "count": 4}}, dropped={}) == set()
+
+    def test_the_counters_are_not_grown_by_being_read(self) -> None:
+        agent_name_to_scored: dict = defaultdict(Counter, {"healthy_agent": Counter({"count": 1})})
+        agent_name_to_dropped: dict = defaultdict(Counter, {"broken_agent": Counter({"failed": 1})})
+
+        for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
+            _masking_step_metrics(
+                agent_name,
+                agent_name_to_scored.get(agent_name, Counter()),
+                agent_name_to_dropped.get(agent_name, Counter()),
+            )
+
+        assert set(agent_name_to_scored) == {"healthy_agent"}
+        assert set(agent_name_to_dropped) == {"broken_agent"}

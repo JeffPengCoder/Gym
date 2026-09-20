@@ -30,6 +30,7 @@ from itertools import repeat
 from pathlib import Path
 from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from uuid import uuid4
 
 import orjson
 from aiohttp import ClientError
@@ -58,7 +59,6 @@ from nemo_gym.global_config import (
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
-    EXECUTION_ID_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -73,11 +73,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.rollout_correlation import (
-    maybe_legacy_rollout_id_from_run_body,
-    maybe_rollout_id_from_run_body,
-    new_execution_id,
-)
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
@@ -121,6 +117,38 @@ from nemo_gym.token_id_capture.delivery import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) -> Dict[str, float]:
+    """In-progress view of what a run is losing to its environment rather than its policy.
+
+    ``scored`` covers persisted rollouts only, split into the unmasked ones (``count``,
+    ``reward``) and the masked ones; ``dropped`` counts what never reached the main output
+    at all. ``reward_unmasked`` averages over the unmasked rollouts alone, so the gap
+    against the existing ``reward`` series is the score lost to infrastructure. Failed and
+    omitted attempts are reported as counts, never folded into a quality average.
+
+    Empty until something is actually masked or dropped, so a healthy run exports exactly
+    what it exported before. The final numbers come from ``/aggregate_metrics``; this is
+    the progress view while the run is still going.
+    """
+    masked, unmasked = int(scored["masked"]), int(scored["count"])
+    failed, omitted = int(dropped["failed"]), int(dropped["omitted"])
+    if not (masked or failed or omitted):
+        return {}
+
+    metrics: Dict[str, float] = {}
+    persisted = masked + unmasked
+    if masked and persisted:
+        metrics[f"progress/{agent_name}/masked_pct"] = round(100 * masked / persisted, 2)
+    if unmasked:
+        metrics[f"progress/{agent_name}/reward_unmasked"] = round(100 * scored["reward"] / unmasked, 2)
+    if failed:
+        metrics[f"progress/{agent_name}/failed"] = failed
+    if omitted:
+        metrics[f"progress/{agent_name}/omitted"] = omitted
+    return metrics
+
 
 # ---------------------------------------------------------------------------
 # Failure-routing sentinels (set by agent servers, read by the dispatcher).
@@ -196,9 +224,7 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
         (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
         str(row[TASK_INDEX_KEY_NAME]),
     )
-    rollout_id = maybe_legacy_rollout_id_from_run_body(row) or (
-        f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-    )
+    rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return task_id, rollout_id
 
 
@@ -430,8 +456,9 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     observed: per-turn evidence is needed rather than just raw model-call capture,
     so a rollout collected with observability disabled produces no ``ng_perf`` at all.
 
-    Token fields are summed only over model calls owned by a reasoning-turn ``AgentInvocation``,
-    excluding compaction calls -- mixing in compaction overhead would skew the token efficiency signal.
+    Token fields are summed over every model call referenced by a reasoning-turn
+    ``AgentInvocation``. This includes compaction calls whenever the harness also lists
+    them in ``AgentInvocation.model_calls``.
 
     ``num_turns`` counts reasoning turns summed across all invocations (an ``AgentInvocation``
     is one root-agent or subagent conversation that may span many turns). Each invocation
@@ -844,7 +871,7 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
-        EXECUTION_ID_KEY_NAME: row.get(EXECUTION_ID_KEY_NAME),
+        ROLLOUT_ID_KEY_NAME: row.get(ROLLOUT_ID_KEY_NAME),
         "sampling_event_id": trajectory_identity.get("sampling_event_id"),
         "group_id": trajectory_identity.get("group_id"),
         "rollout_id": trajectory_identity.get("rollout_id"),
@@ -1393,6 +1420,13 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = list(range(1, 100)) + [99.5, 100]
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
+        # Quality accounting restricted to persisted rollouts: `count`/`reward` over the
+        # unmasked ones, `masked` over the rest. Token capture already reports its own
+        # masking; this is the same accounting for what an environment declares on its
+        # verify response.
+        agent_name_to_scored = defaultdict(Counter)
+        # Rollouts that never reach the main output at all, kept apart from quality.
+        agent_name_to_dropped = defaultdict(Counter)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         dispatched_per_agent = Counter(counts_left)
         start_time = time()
@@ -1428,18 +1462,8 @@ class RolloutCollectionHelper(BaseModel):
                 # Capture readback recomputes the id from the finished record.
                 # Preserve an explicit id on the result just like the indices.
                 result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
-            if EXECUTION_ID_KEY_NAME in row:
-                result[EXECUTION_ID_KEY_NAME] = row[EXECUTION_ID_KEY_NAME]
-
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
-            if not no_persist and failure_class is None and result.get("mask_sample"):
-                # mask_sample is the cross-agent contract that this rollout is
-                # unsafe for training/evaluation. Treat an unclassified masked
-                # response as a retryable failure instead of silently caching
-                # it as a completed zero-reward sample in the main JSONL.
-                failure_class = "masked_sample"
-                result[NG_FAILURE_CLASS_KEY] = failure_class
             # No rollout happened, so there is nothing to capture, tokenize or average.
             no_result = failure_class in _NO_RESULT_FAILURE_CLASSES
 
@@ -1552,6 +1576,17 @@ class RolloutCollectionHelper(BaseModel):
                 )
                 agent_name_to_counts[agent_name] += 1
 
+            # Quality accounting covers only what reaches the main rollout output, which is
+            # what /aggregate_metrics later scores. Broader than `no_result`: any failure
+            # class goes to the sidecar and a kill-shaped rollout is not stored at all, so
+            # both are counted as such rather than as a reward that happened to be zero.
+            if no_persist or failure_class is not None:
+                agent_name_to_dropped[agent_name].update({"omitted" if no_persist else "failed": 1})
+            elif result.get(MASK_SAMPLE_KEY):
+                agent_name_to_scored[agent_name].update({"masked": 1})
+            else:
+                agent_name_to_scored[agent_name].update({"reward": float(result.get("reward") or 0.0), "count": 1})
+
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
@@ -1586,6 +1621,18 @@ class RolloutCollectionHelper(BaseModel):
                         )
                         step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
                             100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]), 2
+                        )
+                    # The union, not just the scored agents: an agent whose every request
+                    # fails never lands in `agent_name_to_counts`, and reporting only the
+                    # agents that produced a result would hide exactly the total failure
+                    # this series exists to surface.
+                    for agent_name in sorted(agent_name_to_scored.keys() | agent_name_to_dropped.keys()):
+                        step_metrics.update(
+                            _masking_step_metrics(
+                                agent_name,
+                                agent_name_to_scored.get(agent_name, Counter()),
+                                agent_name_to_dropped.get(agent_name, Counter()),
+                            )
                         )
 
                     export_metrics(step_metrics, step=int(current_pct))
@@ -1949,7 +1996,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_rows = []
         for source_row in examples:
             row = deepcopy(source_row)
-            row[EXECUTION_ID_KEY_NAME] = new_execution_id()
+            # Reuse Gym's existing capture-correlation field. A caller-supplied
+            # value remains authoritative; otherwise each physical dispatch gets
+            # a fresh value without mutating the caller's source row.
+            row.setdefault(ROLLOUT_ID_KEY_NAME, f"rollout-{uuid4().hex}")
             dispatch_rows.append(row)
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
@@ -1962,26 +2012,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started_at = time()
                 res = None
                 try:
-                    res = await server_client.post(
-                        server_name=row["agent_ref"]["name"],
-                        url_path="/run",
-                        json=row,
-                        # A disconnected /run may already have created a VM and
-                        # acted. The scheduler, not HTTP transport, owns retries.
-                        retry_transport_errors=False,
-                    )
+                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                     await raise_for_status(res)
                     result = await get_response_json(res)
-                    if not isinstance(result, dict):
-                        raise TypeError("Gym /run response must be a mapping")
-                    execution_id = row[EXECUTION_ID_KEY_NAME]
-                    observed_execution_id = result.get(EXECUTION_ID_KEY_NAME)
-                    if observed_execution_id is not None and observed_execution_id != execution_id:
-                        raise ValueError(
-                            "Gym /run returned the wrong physical execution: "
-                            f"expected={execution_id!r}, observed={observed_execution_id!r}"
-                        )
-                    result[EXECUTION_ID_KEY_NAME] = execution_id
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time() - started_at) * 1000
@@ -2030,9 +2063,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         that ends every rollout still in flight. It defaults off because those rollouts then leave
         the score.
 
-        Every future resolves to the dispatched ``(row, result)`` pair. The scheduler-owned
-        ``_ng_execution_id`` is stamped on both objects so exact call captures can be joined;
-        internal-only fields such as rollout latency are not added to ``result``.
+        Every future resolves to the dispatched ``(row, result)`` pair. The copied dispatch row
+        receives a fresh ``_ng_rollout_id`` when the caller did not provide one, so captures can be
+        joined without mutating the source row. Internal-only fields such as rollout latency are
+        not added to ``result``.
         """
 
         async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:

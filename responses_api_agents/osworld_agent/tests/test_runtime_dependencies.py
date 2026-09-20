@@ -4,6 +4,8 @@
 import importlib.metadata
 import os
 import subprocess
+import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -122,7 +124,8 @@ def test_runtime_dependency_startup_error_has_copyable_scoped_installer(monkeypa
 def test_optional_runtime_installer_matches_agent_torch_backend(tmp_path: Path) -> None:
     agent_dir = Path(runtime_dependencies.__file__).resolve().parent
     installer = agent_dir / "install_optional_runtime_deps.sh"
-    backend = (agent_dir / "uv-torch-backend.txt").read_text(encoding="utf-8").strip()
+    with (agent_dir / "uv.toml").open("rb") as config_file:
+        backend = tomllib.load(config_file)["pip"]["torch-backend"]
     venv = tmp_path / "managed venv"
     fake_bin = tmp_path / "fake-bin"
     ready = tmp_path / "runtime-ready"
@@ -131,7 +134,9 @@ def test_optional_runtime_installer_matches_agent_torch_backend(tmp_path: Path) 
     fake_bin.mkdir()
     _write_executable(
         venv / "bin/python",
-        '#!/usr/bin/env bash\n[[ -f "${FAKE_RUNTIME_READY}" ]]\n',
+        "#!/usr/bin/env bash\n"
+        'if [[ "${1:-}" == "-c" ]]; then exec "${FAKE_REAL_PYTHON}" "$@"; fi\n'
+        '[[ -f "${FAKE_RUNTIME_READY}" ]]\n',
     )
     _write_executable(
         fake_bin / "uv",
@@ -140,6 +145,7 @@ def test_optional_runtime_installer_matches_agent_torch_backend(tmp_path: Path) 
     env = os.environ | {
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         "FAKE_RUNTIME_READY": str(ready),
+        "FAKE_REAL_PYTHON": sys.executable,
         "FAKE_UV_ARGV": str(uv_argv),
     }
 

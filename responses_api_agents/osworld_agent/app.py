@@ -46,12 +46,10 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import EXECUTION_ID_SANDBOX_METADATA_KEY
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.rollout_correlation import maybe_explicit_execution_id_from_run_body
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
     get_first_server_config_dict,
@@ -73,6 +71,7 @@ from responses_api_agents.osworld_agent.rollout_outcome import (
     classify_rollout_outcome,
 )
 from responses_api_agents.osworld_agent.runner_registry import DEFAULT_RUNNER_NAME, load_attr, resolve_runner_spec
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldModelTimeoutError
 from responses_api_agents.osworld_agent.trajectory import (
     build_trajectory_envelope,
     resolve_trajectory_identity,
@@ -90,7 +89,6 @@ _OSWORLD_LOG_CONTEXT_FIELDS = (
     "rollout_purpose",
     "sampling_event_id",
     "source_group_id",
-    "execution_id",
     "rollout_id",
     "group_id",
     "rollout_index",
@@ -359,8 +357,9 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     max_tokens: int = 1500
     temperature: float = 1.0
     top_p: Optional[float] = 0.9  # set to null in yaml when running a reasoning model that rejects top_p
+    model_timeout: float = Field(default=900.0, gt=0)
     mem_limit_mb: int = 0  # the upstream Docker provider owns QEMU/container limits
-    step_timeout: int = 60  # per-action subprocess timeout (forwarded to provider; advisory in client.py)
+    step_timeout: float = Field(default=60.0, gt=0)  # per-action backend timeout where supported
     # End-to-end wall-clock deadline from Ray dispatch through VM creation,
     # desktop setup, agent steps, and evaluation.  The child also
     # receives this value as a cooperative deadline so model/step boundaries
@@ -401,6 +400,9 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # declared: an intentional difference is allowed and both identities are
     # emitted in runtime evidence.
     agent_contract_parity_mode: Literal["strict", "declared"] = "strict"
+    # Schema 2 is the complete validation envelope. Schema 3 is the bounded
+    # post-evaluation Gym-to-trainer projection and is the server default.
+    exact_trace_transport_version: Literal[2, 3] = 3
 
     @field_validator("ray_task_resources")
     @classmethod
@@ -476,14 +478,6 @@ class OSWorldRunRequest(BaseRunRequest):
 
 
 _ROLLOUT_PURPOSE_METADATA_KEY = "nemo_rl_rollout_purpose"
-_LEGACY_TRAJECTORY_IDENTITY_KEYS = (
-    "context_compaction_contract_version",
-    "context_compaction_rollout_id",
-    "context_compaction_group_id",
-    "context_compaction_task_id",
-    "context_compaction_rollout_index",
-    "context_compaction_attempt_index",
-)
 
 
 def _resolve_run_rollout_purpose(
@@ -526,8 +520,8 @@ class OSWorldAgentResponse(NeMoGymResponse):
     trajectory_transitions: Optional[List[Dict[str, Any]]] = None
     trajectory_model_calls: Optional[List[Dict[str, Any]]] = None
     model_call_summaries: Optional[List[Dict[str, Any]]] = None
+    model_call_metadata: Optional[List[Dict[str, Any]]] = None
     context_compaction_contract: Optional[Dict[str, Any]] = None
-    execution_context: Optional[Dict[str, Any]] = None
     agent_contract: Optional[Dict[str, Any]] = None
 
 
@@ -554,38 +548,6 @@ class OSWorldVerifyResponse(BaseVerifyResponse):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} must be a non-empty string")
         return self
-
-
-def _explicit_trajectory_identity(
-    body: OSWorldRunRequest,
-) -> Optional[Dict[str, Any]]:
-    """Resolve caller-owned semantic identity without inventing one on errors."""
-
-    extra = body.model_extra or {}
-    if "trajectory_identity" not in extra and not any(key in extra for key in _LEGACY_TRAJECTORY_IDENTITY_KEYS):
-        return None
-    return resolve_trajectory_identity(
-        request_extra=extra,
-        verifier_metadata=body.verifier_metadata or {},
-        model_name="",
-    )
-
-
-def _build_execution_context(
-    execution_id: str,
-    trajectory_identity: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """Bind one physical execution to its logical sampling identity."""
-
-    return {
-        "schema_version": 1,
-        "execution_id": execution_id,
-        "sampling_event_id": trajectory_identity.get("sampling_event_id"),
-        "source_group_id": trajectory_identity.get("source_group_id"),
-        "rollout_id": trajectory_identity["rollout_id"],
-        "group_id": trajectory_identity["group_id"],
-        "task_id": trajectory_identity["task_id"],
-    }
 
 
 def _build_policy_openai_client(*, base_url: str, api_key: str):
@@ -615,6 +577,7 @@ def _build_model_fn(
     max_tokens: int,
     temperature: float,
     top_p: Optional[float],
+    model_timeout_s: float = 900.0,
     log_context: Optional[Mapping[str, Any]] = None,
 ) -> Callable[[str, str, List[Dict[str, Any]]], str]:
     """Return a sync ``model_fn`` that hits a Gym vLLM/OpenAI-compatible model.
@@ -676,6 +639,7 @@ def _build_model_fn(
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
+            "timeout": float(model_timeout_s),
         }
         # Some reasoning models (e.g. openai/openai/gpt-5.5 via inference-api)
         # reject top_p outright with HTTP 400. Skip the kwarg when None so
@@ -686,7 +650,14 @@ def _build_model_fn(
         context_headers = _log_context_headers(base_log_context)
         if context_headers:
             create_kwargs["extra_headers"] = context_headers
-        resp = client.chat.completions.create(**create_kwargs)
+        try:
+            resp = client.chat.completions.create(**create_kwargs)
+        except Exception as exc:  # noqa: BLE001 - translate only the SDK's typed timeout.
+            from openai import APITimeoutError  # noqa: PLC0415
+
+            if isinstance(exc, APITimeoutError):
+                raise OSWorldModelTimeoutError(f"policy model call exceeded {model_timeout_s:g}s") from exc
+            raise
         return resp.choices[0].message.content or ""
 
     return _call
@@ -697,6 +668,7 @@ def _build_messages_model_fn(
     base_url: str,
     model_name: str,
     api_key: str,
+    model_timeout_s: float = 900.0,
     log_context: Optional[Mapping[str, Any]] = None,
     rollout_purpose: Optional[Literal["training", "evaluation"]] = None,
 ):
@@ -719,6 +691,7 @@ def _build_messages_model_fn(
             "messages": messages,
             "max_tokens": payload.get("max_tokens"),
             "temperature": payload.get("temperature"),
+            "timeout": float(model_timeout_s),
         }
         if payload.get("top_p") is not None:
             create_kwargs["top_p"] = payload["top_p"]
@@ -789,6 +762,10 @@ def _build_messages_model_fn(
                         "error": repr(exc),
                     }
                 )
+            from openai import APITimeoutError  # noqa: PLC0415
+
+            if isinstance(exc, APITimeoutError):
+                raise OSWorldModelTimeoutError(f"policy model call exceeded {model_timeout_s:g}s") from exc
             raise
         choice = resp.choices[0]
         finish_reason_error = None
@@ -1117,8 +1094,8 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     max_tokens = runner_kwargs.pop("max_tokens")
     temperature = runner_kwargs.pop("temperature")
     top_p = runner_kwargs.pop("top_p")
+    model_timeout = float(runner_kwargs.get("model_timeout", 900.0))
     rollout_purpose = runner_kwargs.pop("rollout_purpose", None)
-    execution_id = runner_kwargs.pop("execution_id", None)
     log_context = _normalize_log_context(runner_kwargs.pop("log_context", None))
     print(f"OSWORLD_CHILD_PURPOSE|purpose={rollout_purpose}|temperature={temperature}|top_p={top_p}", flush=True)
     model_fn = _build_model_fn(
@@ -1128,12 +1105,14 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         max_tokens=max_tokens,
         temperature=temperature,
         top_p=top_p,
+        model_timeout_s=model_timeout,
         log_context=log_context,
     )
     messages_model_fn = _build_messages_model_fn(
         base_url=base_url,
         model_name=model_name,
         api_key=api_key,
+        model_timeout_s=model_timeout,
         log_context=log_context,
         rollout_purpose=rollout_purpose,
     )
@@ -1151,7 +1130,6 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         **runner_kwargs,
     )
     return {
-        "execution_id": execution_id,
         "reward": result.reward,
         "score": result.score,
         "finished": result.finished,
@@ -1256,11 +1234,14 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
         return super().setup_webserver()
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Report binary completion and raw OSWorld evaluator reward together."""
+        """Report binary and raw scores for the shared aggregator's measured subset.
+
+        Masked samples are counted by Gym's shared ``coverage/*`` metrics before
+        this hook runs, not by an OSWorld-specific counter over filtered input.
+        """
 
         rollouts = [rollout for task in tasks for rollout in task]
         raw_scores: List[float] = []
-        masked_count = 0
         for rollout in rollouts:
             metadata = rollout.get("verifier_metadata")
             if not isinstance(metadata, Mapping):
@@ -1270,14 +1251,12 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 raw_scores.append(float(score or 0.0))
             except (TypeError, ValueError):
                 raw_scores.append(0.0)
-            masked_count += int(bool(rollout.get("mask_sample", False)))
 
         count = len(raw_scores)
         binary_successes = sum(score >= 1.0 for score in raw_scores)
         raw_reward = sum(raw_scores)
         return {
             "osworld/scored_rollout_count": count,
-            "osworld/masked_rollout_count": masked_count,
             "osworld/binary_success_count": binary_successes,
             "osworld/binary_success_rate": 100.0 * binary_successes / count if count else 0.0,
             "osworld/raw_reward_sum": raw_reward,
@@ -1298,7 +1277,6 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
 
     async def run(self, body: OSWorldRunRequest = Body()) -> OSWorldVerifyResponse:
         async with self.sem:
-            execution_id = maybe_explicit_execution_id_from_run_body(body)
             top_level_rollout_purpose = body.rollout_purpose
             resolved_rollout_purpose = _resolve_run_rollout_purpose(body)
             # Normalize once so every downstream consumer and the response use
@@ -1314,10 +1292,6 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 f"top_level={top_level_rollout_purpose or 'none'}|"
                 f"metadata={(body.responses_create_params.metadata or {}).get(_ROLLOUT_PURPOSE_METADATA_KEY, 'none')}|"
                 f"resolved={resolved_rollout_purpose or 'none'}",
-                flush=True,
-            )
-            print(
-                f"OSWORLD_RUN_EXECUTION|execution_id={execution_id or 'none'}",
                 flush=True,
             )
             # The OSWorld task spec lives in verifier_metadata. Allow falling
@@ -1440,11 +1414,6 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 verifier_metadata=metadata,
                 model_name=policy_model_name,
             )
-            if execution_id is not None:
-                sandbox_spec["metadata"] = {
-                    **dict(sandbox_spec.get("metadata") or {}),
-                    EXECUTION_ID_SANDBOX_METADATA_KEY: execution_id,
-                }
             print(
                 "OSWORLD_RUN_IDENTITY|"
                 f"rollout_id={trajectory_identity['rollout_id']}|"
@@ -1454,7 +1423,6 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 f"attempt_index={trajectory_identity['attempt_index']}|"
                 f"sampling_event_id={trajectory_identity.get('sampling_event_id', 'none')}|"
                 f"source_group_id={trajectory_identity.get('source_group_id', 'none')}|"
-                f"execution_id={execution_id or 'none'}|"
                 f"source={trajectory_identity['identity_source']}",
                 flush=True,
             )
@@ -1469,7 +1437,6 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     "rollout_purpose": body.rollout_purpose,
                     "sampling_event_id": trajectory_identity.get("sampling_event_id"),
                     "source_group_id": trajectory_identity.get("source_group_id"),
-                    "execution_id": execution_id,
                     "rollout_id": trajectory_identity["rollout_id"],
                     "group_id": trajectory_identity["group_id"],
                     "rollout_index": trajectory_identity["rollout_index"],
@@ -1529,6 +1496,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "setup_cache_dir": self.config.setup_cache_dir,
                 "mem_limit_mb": self.config.mem_limit_mb,
                 "step_timeout": self.config.step_timeout,
+                "model_timeout": self.config.model_timeout,
                 "task_timeout": self.config.task_timeout,
                 "docker_port_lock_timeout": self.config.docker_port_lock_timeout,
                 "evaluator_disable_gpu": self.config.evaluator_disable_gpu,
@@ -1541,7 +1509,6 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "temperature": temperature,
                 "top_p": top_p,
                 "rollout_purpose": body.rollout_purpose,
-                "execution_id": execution_id,
                 "runner_name": self.config.runner_name,
                 "action_space": self.config.action_space,
                 "observation_type": self.config.observation_type,
@@ -1581,12 +1548,6 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                     future,
                     timeout=float(self.config.task_timeout),
                 )
-                if result_dict.get("execution_id") != execution_id:
-                    raise ValueError(
-                        "OSWorld child returned the wrong execution identity: "
-                        f"expected={execution_id!r}, "
-                        f"observed={result_dict.get('execution_id')!r}"
-                    )
             except ray.exceptions.GetTimeoutError:
                 if future is not None:
                     try:
@@ -1639,6 +1600,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 top_p,
                 max_trajectory_length=self.config.max_trajectory_length,
                 max_output_tokens=max_tokens,
+                exact_trace_transport_version=self.config.exact_trace_transport_version,
             )
 
 
@@ -1705,16 +1667,10 @@ def _build_response(
     *,
     max_trajectory_length: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
+    exact_trace_transport_version: Literal[2, 3] = 2,
 ) -> OSWorldVerifyResponse:
     """Pack one run without changing its prompt policy for training consumers."""
 
-    execution_id = maybe_explicit_execution_id_from_run_body(body)
-    if result.get("execution_id") != execution_id:
-        raise ValueError(
-            "OSWorld result execution identity disagrees with its request: "
-            f"expected={execution_id!r}, "
-            f"observed={result.get('execution_id')!r}"
-        )
     steps = result.get("steps", [])
     if not isinstance(steps, list):
         raise TypeError("OSWorld rollout steps must be a list")
@@ -1779,6 +1735,7 @@ def _build_response(
                 "max_output_tokens": max_output_tokens,
             },
             policy_config=policy_config,
+            transport_schema_version=exact_trace_transport_version,
         )
         if exact_fields.get("media_assets") != trajectory_fields.get("media_assets"):
             raise ValueError("Semantic trajectory and exact evidence disagree about media assets")
@@ -1786,6 +1743,11 @@ def _build_response(
         # Exact model calls, including parser retries, are the trainable units.
         # Semantic step messages remain available through trajectory_transitions.
         output = exact_fields.pop("model_call_output")
+        if exact_trace_transport_version == 3:
+            # The schema-3 sidecar and canonical output arrays retain all
+            # training evidence. The full projected prompts and their duplicate
+            # generation arrays are validation/debug data, not transport data.
+            trajectory_fields.pop("trajectory_model_calls", None)
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
@@ -1803,13 +1765,6 @@ def _build_response(
     }
     if agent_contract is not None:
         response_dict["agent_contract"] = dict(agent_contract)
-    if execution_id is not None:
-        # Physical execution correlation is intentionally outside both semantic
-        # trajectory contracts, so VM retries cannot alter their digests.
-        response_dict["execution_context"] = _build_execution_context(
-            execution_id,
-            trajectory_fields["trajectory_contract"],
-        )
     metadata = dict(body.verifier_metadata or {})
     metadata_steps: List[Dict[str, Any]] = []
     for step in steps:
@@ -1844,9 +1799,6 @@ def _build_response(
     metadata["osworld_proxy_required"] = bool(result.get("proxy_required", False))
     metadata["osworld_proxy_enabled"] = bool(result.get("proxy_enabled", False))
     metadata["osworld_proxy_configured"] = bool(result.get("proxy_configured", False))
-    if execution_id is not None:
-        metadata["osworld_execution_id"] = execution_id
-
     response_fields: Dict[str, Any] = {
         "responses_create_params": body.responses_create_params,
         "rollout_purpose": body.rollout_purpose,
@@ -1874,7 +1826,6 @@ def _empty_response(
             infrastructure_failure_reason=termination_reason or "rollout_error",
         )
     )
-    execution_id = maybe_explicit_execution_id_from_run_body(body)
     metadata = dict(body.verifier_metadata or {})
     metadata["osworld_error"] = error
     metadata["osworld_termination_reason"] = outcome.termination_reason
@@ -1888,8 +1839,6 @@ def _empty_response(
     metadata["osworld_proxy_configured"] = (
         bool(os.environ.get("PROXY_CONFIG_FILE")) if proxy_configured is None else proxy_configured
     )
-    if execution_id is not None:
-        metadata["osworld_execution_id"] = execution_id
     response_dict: Dict[str, Any] = {
         "id": "osworld-error",
         "created_at": 0.0,
@@ -1900,19 +1849,6 @@ def _empty_response(
         "tool_choice": "auto",
         "tools": [],
     }
-    if execution_id is not None:
-        trajectory_identity = _explicit_trajectory_identity(body)
-        if trajectory_identity is not None:
-            response_dict["execution_context"] = _build_execution_context(
-                execution_id,
-                trajectory_identity,
-            )
-        else:
-            # Legacy benchmark callers may have no semantic rollout identity.
-            response_dict["execution_context"] = {
-                "schema_version": 1,
-                "execution_id": execution_id,
-            }
     response_fields: Dict[str, Any] = {
         "responses_create_params": body.responses_create_params,
         "rollout_purpose": body.rollout_purpose,

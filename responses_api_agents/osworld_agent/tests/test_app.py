@@ -19,7 +19,8 @@ import pytest
 import ray
 from fastapi.testclient import TestClient
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import AggregateMetricsRequest, ModelServerRef
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.osworld_agent.app import (
@@ -44,7 +45,8 @@ from responses_api_agents.osworld_agent.rollout_outcome import (
     LEGACY_RUNTIME_ADMISSION_POLICY_ID,
     RUNTIME_ADMISSION_POLICY_ID,
 )
-from responses_api_agents.osworld_agent.trajectory import resolve_trajectory_identity, stable_id
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldModelTimeoutError
+from responses_api_agents.osworld_agent.trajectory import canonical_digest, resolve_trajectory_identity, stable_id
 
 
 DEFAULT_OSWORLD_TASK: Dict[str, Any] = {
@@ -133,7 +135,6 @@ def test_log_context_headers_do_not_change_model_payload() -> None:
         "adapter": "gym",
         "sampling_event_id": "sampling-training-001",
         "source_group_id": "dataset-group-001",
-        "execution_id": "execution-001",
         "rollout_id": "rollout-001",
         "group_id": "group-001",
         "rollout_index": 4,
@@ -150,7 +151,6 @@ def test_log_context_headers_do_not_change_model_payload() -> None:
         "x-nemo-gym-log-adapter": "gym",
         "x-nemo-gym-log-sampling-event-id": "sampling-training-001",
         "x-nemo-gym-log-source-group-id": "dataset-group-001",
-        "x-nemo-gym-log-execution-id": "execution-001",
         "x-nemo-gym-log-rollout-id": "rollout-001",
         "x-nemo-gym-log-group-id": "group-001",
         "x-nemo-gym-log-rollout-index": "4",
@@ -225,7 +225,40 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(
         "messages": messages,
         "max_tokens": 32,
         "temperature": 0.6,
+        "timeout": 900.0,
     }
+
+
+@patch("openai.DefaultHttpxClient")
+@patch("openai.OpenAI")
+def test_messages_model_fn_enforces_and_types_model_timeout(mock_openai, _mock_http_client) -> None:
+    import httpx
+    from openai import APITimeoutError
+
+    client = mock_openai.return_value
+    client.chat.completions.create.side_effect = APITimeoutError(
+        request=httpx.Request("POST", "http://policy/v1/chat/completions")
+    )
+    call = _build_messages_model_fn(
+        base_url="http://policy/v1",
+        model_name="policy",
+        api_key="test-key",  # pragma: allowlist secret
+        model_timeout_s=12,
+    )
+    messages = [{"role": "user", "content": "inspect"}]
+
+    with pytest.raises(OSWorldModelTimeoutError, match="exceeded 12s"):
+        call(
+            messages,
+            {
+                "model": "policy",
+                "messages": messages,
+                "max_tokens": 32,
+                "temperature": 0.6,
+            },
+        )
+
+    assert client.chat.completions.create.call_args.kwargs["timeout"] == 12.0
 
 
 @patch("openai.DefaultHttpxClient")
@@ -1103,6 +1136,35 @@ def test_build_exact_trace_response_preserves_noncontiguous_turns() -> None:
         ["DONE"],
     ]
 
+    transport_response = _build_response(
+        request,
+        result,
+        "test-policy",
+        1.0,
+        0.9,
+        max_trajectory_length=3,
+        max_output_tokens=512,
+        exact_trace_transport_version=3,
+    )
+    transport = transport_response.response
+    assert transport.context_compaction_contract is not None
+    assert transport.context_compaction_contract["schema_version"] == 3
+    assert transport.completion_evidence is None
+    assert transport.trajectory_model_calls is None
+    metadata = transport.model_call_metadata or []
+    assert len(metadata) == 2
+    assert "prompt_token_ids" not in metadata[0]
+    assert "sampled_token_ids" not in metadata[0]
+    assert "sampled_logprobs" not in metadata[0]
+    assert metadata[0]["generation_evidence_digest"] == canonical_digest(
+        {
+            "prompt_token_ids": [10, 11],
+            "sampled_token_ids": [20, 21],
+            "sampled_logprobs": [-0.1, -0.2],
+        }
+    )
+    assert len(transport_response.model_dump_json()) < len(response.model_dump_json())
+
 
 def test_build_exact_trace_response_derives_identity_for_benchmarking() -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
@@ -1248,8 +1310,8 @@ def test_build_response_accepts_generic_caller_trajectory_identity() -> None:
     assert contract["rollout_index"] == 2
 
 
-def test_execution_identity_is_correlated_but_excluded_from_semantic_digest() -> None:
-    def build(execution_id: str):
+def test_capture_rollout_id_is_excluded_from_semantic_digest() -> None:
+    def build(capture_rollout_id: str):
         request = OSWorldRunRequest.model_validate(
             {
                 "responses_create_params": {"input": []},
@@ -1267,13 +1329,13 @@ def test_execution_identity_is_correlated_but_excluded_from_semantic_digest() ->
                     "rollout_index": 2,
                     "attempt_index": 0,
                 },
-                "_ng_execution_id": execution_id,
+                "_ng_rollout_id": capture_rollout_id,
             }
         )
-        assert "_ng_execution_id" not in request.model_dump()
+        assert request.capture_rollout_id == capture_rollout_id
+        assert "_ng_rollout_id" not in request.model_dump()
         result = {
             **DEFAULT_RUN_RESULT,
-            "execution_id": execution_id,
             "steps": [
                 {
                     "step": 0,
@@ -1311,8 +1373,8 @@ def test_execution_identity_is_correlated_but_excluded_from_semantic_digest() ->
             0.9,
         )
 
-    first = build("execution-first")
-    second = build("execution-second")
+    first = build("capture-first")
+    second = build("capture-second")
 
     first_contract = first.response.trajectory_contract
     second_contract = second.response.trajectory_contract
@@ -1325,17 +1387,7 @@ def test_execution_identity_is_correlated_but_excluded_from_semantic_digest() ->
     second_exact = second.response.context_compaction_contract
     assert first_exact is not None
     assert first_exact == second_exact
-    assert "execution_id" not in json.dumps(first_exact, sort_keys=True)
-    assert first.response.execution_context == {
-        "schema_version": 1,
-        "execution_id": "execution-first",
-        "sampling_event_id": "sampling-training-001",
-        "source_group_id": "dataset-group-001",
-        "rollout_id": "rollout-generic-001",
-        "group_id": "group-event-001",
-        "task_id": "task-001",
-    }
-    assert first.verifier_metadata["osworld_execution_id"] == "execution-first"
+    assert "capture-first" not in json.dumps(first_exact, sort_keys=True)
 
 
 def test_build_response_rejects_partial_caller_identity() -> None:
@@ -1349,7 +1401,7 @@ def test_build_response_rejects_partial_caller_identity() -> None:
         _build_response(request, DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9)
 
 
-def test_empty_response_preserves_explicit_semantic_execution_join() -> None:
+def test_empty_response_reports_runtime_admission() -> None:
     request = OSWorldRunRequest.model_validate(
         {
             "responses_create_params": {"input": []},
@@ -1364,21 +1416,11 @@ def test_empty_response_preserves_explicit_semantic_execution_join() -> None:
                 "rollout_index": 0,
                 "attempt_index": 0,
             },
-            "_ng_execution_id": "execution-empty-001",
         }
     )
 
     response = _empty_response(request, error="fixture unavailable")
 
-    assert response.response.execution_context == {
-        "schema_version": 1,
-        "execution_id": "execution-empty-001",
-        "sampling_event_id": "sampling-evaluation-001",
-        "source_group_id": "dataset-group-001",
-        "rollout_id": "rollout-evaluation-001",
-        "group_id": "group-evaluation-001",
-        "task_id": "task-001",
-    }
     assert response.evaluation_completed is False
     assert response.runtime_eligible is False
     assert response.mask_sample is True
@@ -1512,7 +1554,7 @@ class TestApp:
             [
                 {
                     "reward": 0.0,
-                    "mask_sample": True,
+                    "mask_sample": False,
                     "verifier_metadata": {"osworld_score": 0.25},
                 }
             ],
@@ -1521,7 +1563,7 @@ class TestApp:
         metrics = agent.compute_metrics(tasks)
 
         assert metrics["osworld/scored_rollout_count"] == 3
-        assert metrics["osworld/masked_rollout_count"] == 1
+        assert "osworld/masked_rollout_count" not in metrics
         assert metrics["osworld/binary_success_count"] == 1
         assert metrics["osworld/binary_success_rate"] == pytest.approx(100.0 / 3.0)
         assert metrics["osworld/raw_reward_sum"] == pytest.approx(1.75)
@@ -1533,6 +1575,48 @@ class TestApp:
             "osworld/binary_success_rate": pytest.approx(100.0 / 3.0),
             "osworld/raw_reward_rate": pytest.approx(175.0 / 3.0),
         }
+
+    async def test_aggregate_metrics_uses_shared_masking_and_coverage(self) -> None:
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        rows = [
+            {
+                TASK_INDEX_KEY_NAME: index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": reward,
+                "mask_sample": masked,
+                "verifier_metadata": {"osworld_score": reward},
+            }
+            for index, (reward, masked) in enumerate([(1.0, False), (0.0, False), (1.0, True)])
+        ]
+        body = AggregateMetricsRequest(verify_responses=rows)
+
+        result = await agent.aggregate_metrics(body)
+
+        assert result.agent_metrics["osworld/scored_rollout_count"] == 2
+        assert result.agent_metrics["osworld/binary_success_count"] == 1
+        assert result.agent_metrics["osworld/binary_success_rate"] == 50.0
+        assert result.agent_metrics["osworld/raw_reward_rate"] == 50.0
+        assert result.agent_metrics["coverage/measured_rollouts"] == 2
+        assert result.agent_metrics["coverage/masked_rollouts"] == 1
+        assert result.agent_metrics["coverage/fully_masked_tasks"] == 1
+        assert "osworld/masked_rollout_count" not in result.agent_metrics
+        assert len(body.verify_responses) == 3
+        assert body.verify_responses[2]["mask_sample"] is True
+
+    async def test_all_masked_aggregate_reports_coverage_without_a_score(self) -> None:
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        result = await agent.aggregate_metrics(
+            AggregateMetricsRequest(
+                verify_responses=[
+                    {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "mask_sample": True}
+                ]
+            )
+        )
+
+        assert result.key_metrics["coverage/masked_rollouts"] == 1
+        assert result.key_metrics["coverage/measured_rollouts"] == 0
+        assert "osworld/binary_success_rate" not in result.key_metrics
+        assert "mean/reward" not in result.key_metrics
 
     async def test_responses_not_implemented(self) -> None:
         agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
@@ -1564,10 +1648,7 @@ class TestApp:
         """Exercise the real FastAPI/Pydantic boundary used by NeMo-RL."""
         assert "rollout_purpose" in OSWorldRunRequest.__annotations__
         mock_remote.options.return_value.remote.return_value = MagicMock()
-        mock_to_thread.return_value = {
-            **DEFAULT_RUN_RESULT,
-            "execution_id": "execution-http-test",
-        }
+        mock_to_thread.return_value = {**DEFAULT_RUN_RESULT}
 
         server_client = MagicMock(spec=ServerClient)
         setup_server_client_mocks(
@@ -1585,7 +1666,7 @@ class TestApp:
         )
         payload = {
             **request.model_dump(mode="json"),
-            "_ng_execution_id": "execution-http-test",
+            "_ng_rollout_id": "capture-http-test",
             "_ng_task_index": 4,
             "_ng_rollout_index": 0,
             "trajectory_identity": {
@@ -1612,21 +1693,10 @@ class TestApp:
         assert payload["runtime_eligible"] is True
         assert payload["runtime_admission_policy_id"] == RUNTIME_ADMISSION_POLICY_ID
         assert payload["mask_sample"] is False
-        assert payload["response"]["execution_context"] == {
-            "schema_version": 1,
-            "execution_id": "execution-http-test",
-            "sampling_event_id": "sampling-evaluation-http",
-            "source_group_id": "dataset-group-http",
-            "rollout_id": "rollout-evaluation-http",
-            "group_id": "group-evaluation-http",
-            "task_id": "test-task-001",
-        }
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         assert positional_args[1]["rollout_purpose"] == "evaluation"
-        assert positional_args[1]["execution_id"] == "execution-http-test"
         assert positional_args[1]["log_context"]["sampling_event_id"] == ("sampling-evaluation-http")
         assert positional_args[1]["log_context"]["rollout_id"] == ("rollout-evaluation-http")
-        assert positional_args[1]["sandbox_spec"]["metadata"]["nemo-gym.execution-id"] == "execution-http-test"
 
     @patch("benchmarks.osworld.assets.ensure_osworld_assets")
     def test_setup_webserver_idempotently_prefetches_configured_assets(self, mock_ensure) -> None:

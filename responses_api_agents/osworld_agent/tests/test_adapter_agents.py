@@ -16,6 +16,7 @@ from responses_api_agents.osworld_agent.adapter_agents import (
     parse_nemotron_response,
     project_pyautogui_coordinates,
 )
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldModelTimeoutError
 
 
 @pytest.mark.parametrize(
@@ -631,6 +632,23 @@ def test_nemotron_agent_reports_model_transport_failure_as_a_fact() -> None:
         "last_error": "policy endpoint unreachable",
     }
     assert "mask_sample" not in info
+
+
+def test_nemotron_agent_does_not_retry_a_model_timeout_as_a_parse_error() -> None:
+    agent = NemotronV3NanoOmniAgent(model="policy", max_steps=2, parse_retries=5)
+    calls = 0
+
+    def timed_out(_payload, _model):
+        nonlocal calls
+        calls += 1
+        raise OSWorldModelTimeoutError("policy model call exceeded 9s")
+
+    agent.call_llm = timed_out  # type: ignore[method-assign]
+
+    with pytest.raises(OSWorldModelTimeoutError, match="exceeded 9s"):
+        agent.predict("Try the task.", {"screenshot": b"fake-png"})
+
+    assert calls == 1
 
 
 def test_nemotron_agent_retries_invalid_python_action() -> None:

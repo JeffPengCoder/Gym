@@ -13,14 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib.metadata
+import os
+import select
 import shlex
+import signal
+import subprocess
+import sys
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 from pytest import MonkeyPatch, raises
 
+import nemo_gym.cli._venv_setup
 import nemo_gym.cli.setup_command
+from nemo_gym.cli._venv_setup import SETUP_COMPLETE_MARKER, setup_environment
 from nemo_gym.cli.setup_command import (
     ENVIRONMENT_IDENTITY_FILENAME,
     _get_nemo_gym_install_flags,
@@ -86,6 +94,14 @@ class TestCLISetupCommandSetupEnvCommand:
         )
         (venv_path / ENVIRONMENT_IDENTITY_FILENAME).write_text(f"{identity}\n")
 
+    def _installation_command(self, command: str) -> str:
+        # Keep the dependency-command assertions independent of the shell quoting
+        # used to pass that command as one argument to the setup runner.
+        args = shlex.split(command)
+        if "--command" not in args:
+            return command
+        return f"cd {args[1]} && {args[args.index('--command') + 1]}"
+
     def _setup_server_dir(self, tmp_path: Path) -> Path:
         server_dir = tmp_path / "first_level" / "second_level"
         server_dir.mkdir(parents=True)
@@ -105,61 +121,44 @@ class TestCLISetupCommandSetupEnvCommand:
             global_config_dict=self._debug_global_config_dict(tmp_path),
             prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        actual_command = self._installation_command(actual_command)
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         expected_command = self._with_parent_runtime_overrides(expected_command, server_dir)
         assert expected_command == actual_command
 
     def test_server_local_uv_settings(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
-        overrides_path = server_dir / "uv-overrides.txt"
-        overrides_path.write_text("torch==2.11.0\n")
         uv_config_path = server_dir / "uv.toml"
-        uv_config_path.write_text('required-version = ">=0.11.25"\n')
-        (server_dir / "uv-torch-backend.txt").write_text("cpu\n")
-        (server_dir / "uv-python-version.txt").write_text("3.12\n")
-        (server_dir / "uv-managed-python.txt").write_text("true\n")
+        uv_config_path.write_text(
+            'required-version = ">=0.11.25"\n'
+            'python-preference = "only-managed"\n'
+            'override-dependencies = ["torch==2.11.0"]\n'
+            "[pip]\n"
+            'torch-backend = "cpu"\n'
+        )
+        (server_dir / ".python-version").write_text(">=3.12,<3.13\n")
 
         actual_command = setup_env_command(
             dir_path=server_dir,
             global_config_dict=self._debug_global_config_dict(tmp_path),
             prefix="osworld agent",
         )
+        actual_command = self._installation_command(actual_command)
 
-        assert f"--overrides {overrides_path}" in actual_command
-        assert "--torch-backend cpu" in actual_command
-        assert "--managed-python --python 3.12" in actual_command
+        assert "--python '>=3.12,<3.13'" in actual_command
         assert actual_command.count(f"--config-file {uv_config_path}") == 2
         pip_install_index = actual_command.index("uv pip install")
         assert actual_command.index("--config-file", pip_install_index) < actual_command.index("--overrides")
         assert actual_command.index("--overrides") < actual_command.index("-r requirements.txt")
+        assert "uv-overrides.txt" not in actual_command
+        assert "--torch-backend" not in actual_command
+        assert "--managed-python" not in actual_command
 
     def test_rejects_empty_server_python_version(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
-        (server_dir / "uv-python-version.txt").write_text("\n")
+        (server_dir / ".python-version").write_text("\n")
 
         with raises(RuntimeError, match="Empty Python version"):
-            setup_env_command(
-                dir_path=server_dir,
-                global_config_dict=self._debug_global_config_dict(tmp_path),
-                prefix="osworld agent",
-            )
-
-    def test_rejects_invalid_managed_python_setting(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-        (server_dir / "uv-managed-python.txt").write_text("yes\n")
-
-        with raises(RuntimeError, match="Expected 'true'"):
-            setup_env_command(
-                dir_path=server_dir,
-                global_config_dict=self._debug_global_config_dict(tmp_path),
-                prefix="osworld agent",
-            )
-
-    def test_rejects_invalid_server_torch_backend(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-        (server_dir / "uv-torch-backend.txt").write_text("cuda-whatever\n")
-
-        with raises(RuntimeError, match="Invalid Torch backend"):
             setup_env_command(
                 dir_path=server_dir,
                 global_config_dict=self._debug_global_config_dict(tmp_path),
@@ -175,6 +174,7 @@ class TestCLISetupCommandSetupEnvCommand:
             global_config_dict=self._debug_global_config_dict(tmp_path),
             prefix="my server name",
         )
+        actual_command = self._installation_command(actual_command)
 
         parent_overrides = server_dir / ".venv/.nemo-gym-parent-runtime-overrides.txt"
         assert (
@@ -182,24 +182,26 @@ class TestCLISetupCommandSetupEnvCommand:
             in actual_command
         )
 
-    def test_skips_install_when_venv_present(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("has_marker", [False, True])
+    def test_existing_venv_skips_setup(self, tmp_path: Path, has_marker: bool) -> None:
         server_dir = self._setup_server_dir(tmp_path)
+        config = self._debug_global_config_dict(tmp_path) | {"skip_venv_if_present": True}
+        before = setup_env_command(server_dir, config, "policy")
 
         (server_dir / ".venv/bin").mkdir(parents=True)
-        (server_dir / ".venv/bin/python").write_text("")
-        (server_dir / ".venv/bin/activate").write_text("")
-        self._write_current_environment_identity(server_dir, server_dir / ".venv")
+        (server_dir / ".venv/bin/python").touch()
+        (server_dir / ".venv/bin/activate").touch()
+        if has_marker:
+            (server_dir / ".venv" / SETUP_COMPLETE_MARKER).touch()
 
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path) | {"skip_venv_if_present": True},
-            prefix="my server name",
+        assert setup_env_command(server_dir, config, "policy") == (
+            f"cd {server_dir} && source {server_dir}/.venv/bin/activate"
         )
 
-        expected_command = f"cd {server_dir} && source {server_dir}/.venv/bin/activate"
-        assert expected_command == actual_command
+        assert "--skip-if-ready" in shlex.split(before)
+        assert "uv pip install" in self._installation_command(before)
 
-    def test_skip_reinstalls_when_parent_runtime_authority_changes(self, tmp_path: Path) -> None:
+    def test_explicit_setup_updates_parent_runtime_authority(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
         (server_dir / ".venv/bin").mkdir(parents=True)
         (server_dir / ".venv/bin/python").write_text("")
@@ -208,15 +210,16 @@ class TestCLISetupCommandSetupEnvCommand:
 
         actual_command = setup_env_command(
             dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path) | {"skip_venv_if_present": True},
+            global_config_dict=self._debug_global_config_dict(tmp_path) | {"skip_venv_if_present": False},
             prefix="my server name",
         )
+        actual_command = self._installation_command(actual_command)
 
         assert "uv venv" in actual_command
         assert "printf '%s\\n' 'ray[default]==test ray version' 'openai==test openai version'" in actual_command
         assert f"--overrides {server_dir}/.venv/.nemo-gym-parent-runtime-overrides.txt" in actual_command
 
-    def test_skip_reinstalls_when_component_dependency_inputs_change(self, tmp_path: Path) -> None:
+    def test_explicit_setup_updates_component_dependency_inputs(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
         (server_dir / ".venv/bin").mkdir(parents=True)
         (server_dir / ".venv/bin/python").write_text("")
@@ -226,9 +229,10 @@ class TestCLISetupCommandSetupEnvCommand:
 
         actual_command = setup_env_command(
             dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path) | {"skip_venv_if_present": True},
+            global_config_dict=self._debug_global_config_dict(tmp_path) | {"skip_venv_if_present": False},
             prefix="my server name",
         )
+        actual_command = self._installation_command(actual_command)
 
         assert "uv venv" in actual_command
         assert "-r requirements.txt" in actual_command
@@ -241,6 +245,7 @@ class TestCLISetupCommandSetupEnvCommand:
             global_config_dict=self._debug_global_config_dict(tmp_path),
             prefix="my server name",
         )
+        actual_command = self._installation_command(actual_command)
 
         identity_path = str(server_dir / f".venv/{ENVIRONMENT_IDENTITY_FILENAME}")
         assert actual_command.index(f"rm -f {identity_path}") < actual_command.index("uv venv")
@@ -259,8 +264,9 @@ class TestCLISetupCommandSetupEnvCommand:
             global_config_dict=self._debug_global_config_dict(tmp_path) | {"skip_venv_if_present": True},
             prefix="my server name",
         )
+        actual_command = self._installation_command(actual_command)
 
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         expected_command = self._with_parent_runtime_overrides(expected_command, server_dir)
         assert expected_command == actual_command
 
@@ -272,7 +278,8 @@ class TestCLISetupCommandSetupEnvCommand:
             global_config_dict=self._debug_global_config_dict(tmp_path) | {"head_server_deps": ["dep 1", "dep 2"]},
             prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt dep 1 dep 2 > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        actual_command = self._installation_command(actual_command)
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt dep 1 dep 2 > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         expected_command = self._with_parent_runtime_overrides(
             expected_command,
             server_dir,
@@ -288,7 +295,8 @@ class TestCLISetupCommandSetupEnvCommand:
             global_config_dict=self._debug_global_config_dict(tmp_path) | {"python_version": "my python version"},
             prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python my python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        actual_command = self._installation_command(actual_command)
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'my python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         expected_command = self._with_parent_runtime_overrides(
             expected_command,
             server_dir,
@@ -304,7 +312,8 @@ class TestCLISetupCommandSetupEnvCommand:
             global_config_dict=self._debug_global_config_dict(tmp_path) | {"uv_pip_set_python": True},
             prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install --python {server_dir}/.venv/bin/python -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        actual_command = self._installation_command(actual_command)
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install --python {server_dir}/.venv/bin/python -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         expected_command = self._with_parent_runtime_overrides(expected_command, server_dir)
         assert expected_command == actual_command
 
@@ -316,7 +325,8 @@ class TestCLISetupCommandSetupEnvCommand:
             global_config_dict=self._debug_global_config_dict(tmp_path) | {"pip_install_verbose": True},
             prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -v -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        actual_command = self._installation_command(actual_command)
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -v -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         expected_command = self._with_parent_runtime_overrides(expected_command, server_dir)
         assert expected_command == actual_command
 
@@ -352,7 +362,8 @@ class TestCLISetupCommandSetupEnvCommand:
             global_config_dict=self._debug_global_config_dict(tmp_path),
             prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install '-e .' ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        actual_command = self._installation_command(actual_command)
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install '-e .' ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         expected_command = self._with_parent_runtime_overrides(expected_command, server_dir)
         assert expected_command == actual_command
 
@@ -366,7 +377,8 @@ class TestCLISetupCommandSetupEnvCommand:
             global_config_dict=self._debug_global_config_dict(tmp_path) | {"uv_venv_dir": str(uv_venv_dir)},
             prefix="my server name",
         )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {uv_venv_dir}/first_level/second_level/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {uv_venv_dir}/first_level/second_level/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        actual_command = self._installation_command(actual_command)
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {uv_venv_dir}/first_level/second_level/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {uv_venv_dir}/first_level/second_level/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         expected_command = self._with_parent_runtime_overrides(
             expected_command,
             server_dir,
@@ -403,12 +415,13 @@ class TestCLISetupCommandSetupEnvCommand:
                 global_config_dict=self._debug_global_config_dict(tmp_path),
                 prefix="my server name",
             )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && grep -v -F '../..' requirements.txt) | uv pip install -r /dev/stdin ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && grep -v -F '../..' requirements.txt) | uv pip install -r /dev/stdin ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         expected_command = self._with_parent_runtime_overrides(
             expected_command,
             server_dir,
             nemo_gym_version_spec=f"=={version}",
         )
+        actual_command = self._installation_command(actual_command)
         assert expected_command == actual_command
 
     @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
@@ -429,36 +442,156 @@ class TestCLISetupCommandSetupEnvCommand:
                 global_config_dict=self._debug_global_config_dict(tmp_path),
                 prefix="my server name",
             )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install nemo-gym=={version} && uv pip install --no-sources '-e .' ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install nemo-gym=={version} && uv pip install --no-sources '-e .' ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         expected_command = self._with_parent_runtime_overrides(
             expected_command,
             server_dir,
             nemo_gym_version_spec=f"=={version}",
         )
+        actual_command = self._installation_command(actual_command)
         assert expected_command == actual_command
 
-    def test_uv_venv_dir_and_skip_install_when_venv_present(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
 
-        uv_venv_dir = tmp_path / "uv_venv_dir"
+@pytest.fixture
+def setup_component(tmp_path: Path) -> tuple[Path, dict, Path]:
+    server_dir = tmp_path / "source with spaces" / "models" / "example"
+    server_dir.mkdir(parents=True)
+    (server_dir.parent.parent / "pyproject.toml").touch()
+    (server_dir / "requirements.txt").touch()
+    config = _TestGlobalConfig._default_global_config_dict_values.fget(None) | {
+        "uv_venv_dir": str(tmp_path / "venvs with spaces"),
+        "skip_venv_if_present": True,
+    }
+    venv = get_venv_path(server_dir, config)
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin/python").touch()
+    (venv / "bin/activate").write_text("export SETUP_TEST_ACTIVATED=1\n")
+    return server_dir, config, venv
 
-        (uv_venv_dir / "first_level/second_level/.venv/bin").mkdir(parents=True)
-        (uv_venv_dir / "first_level/second_level/.venv/bin/python").write_text("")
-        (uv_venv_dir / "first_level/second_level/.venv/bin/activate").write_text("")
-        self._write_current_environment_identity(
-            server_dir,
-            uv_venv_dir / "first_level/second_level/.venv",
-        )
 
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path)
-            | {"skip_venv_if_present": True, "uv_venv_dir": str(uv_venv_dir)},
-            prefix="my server name",
-        )
+def _install_command(venv: Path) -> str:
+    return f"cd {shlex.quote(str(venv))} && touch bin/python bin/activate && echo install >> attempts"
 
-        expected_command = f"cd {server_dir} && source {uv_venv_dir}/first_level/second_level/.venv/bin/activate"
-        assert expected_command == actual_command
+
+def _runner_command(venv: Path, command: str) -> list[str]:
+    return [
+        sys.executable,
+        nemo_gym.cli._venv_setup.__file__,
+        "--venv",
+        str(venv),
+        "--command",
+        command,
+        "--skip-if-ready",
+    ]
+
+
+@contextmanager
+def _setup_process(command: str | list[str]):
+    process = subprocess.Popen(
+        ["/bin/bash", "-c", command] if isinstance(command, str) else command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    )
+    try:
+        yield process
+    finally:
+        # Include surviving installers when a test kills their wrapper.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate(timeout=10)
+
+
+def _expect_output(process: subprocess.Popen, text: str) -> None:
+    assert select.select([process.stdout], [], [], 10)[0], f"process did not report {text!r}"
+    assert text in process.stdout.readline()
+
+
+def _expect_success(process: subprocess.Popen) -> None:
+    output, _ = process.communicate(timeout=10)
+    assert process.returncode == 0, output
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_shared_venv_waits_for_installer_even_if_wrapper_dies(setup_component, interrupt: bool) -> None:
+    _, _, venv = setup_component
+    marker = venv / SETUP_COMPLETE_MARKER
+    command = _install_command(venv)
+    # bin/python and bin/activate already exist, as they do during uv pip install.
+    with _setup_process(_runner_command(venv, f"echo INSTALLING; read -r release; {command}")) as first:
+        _expect_output(first, "INSTALLING")
+        assert not marker.exists()
+        if interrupt:
+            first.kill()
+            assert first.wait(timeout=10) == -signal.SIGKILL
+        with _setup_process(_runner_command(venv, command)) as second:
+            _expect_output(second, "Waiting for virtual environment setup:")
+            assert second.poll() is None
+            assert not marker.exists()
+            first.stdin.write("continue\n")
+            first.stdin.flush()
+            _expect_success(second)
+        if not interrupt:
+            _expect_success(first)
+    assert (venv / "attempts").read_text() == "install\n" * (2 if interrupt else 1)
+    assert marker.is_file()
+
+
+@pytest.mark.parametrize("command,code", [("exit 7", 7), ("kill -TERM $$", 128 + signal.SIGTERM)])
+def test_failed_forced_setup_invalidates_marker_and_can_retry(setup_component, command: str, code: int) -> None:
+    _, _, venv = setup_component
+    marker = venv / SETUP_COMPLETE_MARKER
+    marker.touch()
+    assert setup_environment(venv, command, skip_if_ready=False) == code
+    assert not marker.exists()
+    assert setup_environment(venv, _install_command(venv), skip_if_ready=True) == 0
+    assert marker.is_file()
+
+
+@pytest.mark.parametrize("has_marker", [False, True])
+@pytest.mark.parametrize("manifest", ["missing", "conflicting"])
+def test_existing_venv_activates_without_setup_or_manifest_validation(setup_component, has_marker, manifest) -> None:
+    server_dir, config, venv = setup_component
+    if manifest == "missing":
+        (server_dir / "requirements.txt").unlink()
+    else:
+        (server_dir / "pyproject.toml").touch()
+    marker = venv / SETUP_COMPLETE_MARKER
+    if has_marker:
+        marker.touch()
+    command = setup_env_command(server_dir, config, "server") + ' && test "$SETUP_TEST_ACTIVATED" = 1 && echo STARTED'
+    with _setup_process(command) as process:
+        output, _ = process.communicate(timeout=10)
+        assert process.returncode == 0, output
+        assert "STARTED" in output
+    assert marker.exists() == has_marker
+    assert not venv.with_name(f"{venv.name}.setup.lock").exists()
+
+
+@pytest.mark.parametrize("missing_file", [None, "python", "activate"])
+def test_generated_setup_installs_and_activates_before_starting_server(setup_component, missing_file) -> None:
+    server_dir, config, venv = setup_component
+    if missing_file:
+        (venv / "bin" / missing_file).unlink()
+    else:
+        config["skip_venv_if_present"] = False
+    # Substitute only the dependency installer; execute the generated setup and activation.
+    activate = shlex.quote(str(venv / "bin/activate"))
+    uv = (
+        f'uv() {{ if [ "$1" = venv ]; then echo "export SETUP_TEST_ACTIVATED=1" > {activate}; '
+        f"else {_install_command(venv)}; fi; }}; export -f uv; "
+    )
+    command = uv + setup_env_command(server_dir, config, "server")
+    command += f' && test "$SETUP_TEST_ACTIVATED" = 1 && test -f {shlex.quote(str(venv / "attempts"))} && echo STARTED'
+    with _setup_process(command) as process:
+        _expect_success(process)
+    assert (venv / "attempts").read_text() == "install\n"
+    assert (venv / SETUP_COMPLETE_MARKER).is_file()
 
 
 class TestCLISetupCommandRunCommand:

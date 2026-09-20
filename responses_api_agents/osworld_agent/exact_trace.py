@@ -8,9 +8,11 @@ successive prompts are append-only.  NeMo-RL may then split one logical
 rollout into prefix-contiguous physical traces while retaining one logical
 reward and advantage.
 
-The wire contract intentionally matches schema v2 from
-``aroshanghias/context-compaction-v2-clean``. The semantic trajectory remains
-model-independent; this module is invoked only when exact evidence is present.
+Schema v2 is the complete validation envelope. Schema v3 is its bounded,
+post-verification transport projection: token arrays remain canonical in
+``output`` while model-call metadata carries a digest that binds back to those
+arrays. The semantic trajectory remains model-independent; this module is
+invoked only when exact evidence is present.
 """
 
 from __future__ import annotations
@@ -175,6 +177,23 @@ def _policy_lineage(
     return decision, evidence, unit_record
 
 
+def _transport_model_call_metadata(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Project validation evidence without duplicating canonical token arrays."""
+
+    arrays = {
+        "prompt_token_ids": evidence.get("prompt_token_ids"),
+        "sampled_token_ids": evidence.get("sampled_token_ids"),
+        "sampled_logprobs": evidence.get("sampled_logprobs"),
+    }
+    result = {
+        key: value
+        for key, value in evidence.items()
+        if key not in {"prompt_token_ids", "sampled_token_ids", "sampled_logprobs"}
+    }
+    result["generation_evidence_digest"] = canonical_digest(arrays)
+    return result
+
+
 def build_exact_trace_envelope(
     *,
     model_calls: Sequence[Mapping[str, Any]],
@@ -182,9 +201,12 @@ def build_exact_trace_envelope(
     model_name: str,
     sampling_config: Mapping[str, Any],
     policy_config: Mapping[str, Any],
+    transport_schema_version: int = 2,
 ) -> dict[str, Any]:
     """Augment a semantic trajectory with exact, per-model-call evidence."""
 
+    if transport_schema_version not in {2, 3}:
+        raise ValueError(f"Unsupported OSWorld exact-trace transport schema: {transport_schema_version}")
     if not model_calls:
         raise ValueError("OSWorld exact trace requires at least one model call")
     capabilities = trajectory_contract.get("capabilities")
@@ -454,20 +476,24 @@ def build_exact_trace_envelope(
         previous_transformation_id = transformation_id
 
     assert final_policy_decision is not None
-    return {
+    result = {
         "model_call_output": model_call_output,
         "media_assets": media_assets,
-        "completion_evidence": completion_evidence,
         "final_policy_decision": final_policy_decision,
         "lineage_deltas": lineage_deltas,
         "chunk_records": [],
         "boundary_events": boundary_events,
         "guard_records": [],
         "context_compaction_contract": {
-            "schema_version": 2,
+            "schema_version": transport_schema_version,
             "mode": "exact_trace_authority",
             **identity,
             "trajectory_contract_id": trajectory_contract.get("trajectory_contract_id"),
             "generation_contract": generation_contract,
         },
     }
+    if transport_schema_version == 2:
+        result["completion_evidence"] = completion_evidence
+    else:
+        result["model_call_metadata"] = [_transport_model_call_metadata(evidence) for evidence in completion_evidence]
+    return result

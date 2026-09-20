@@ -13,12 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from collections.abc import Mapping
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 if TYPE_CHECKING:
@@ -27,7 +26,7 @@ if TYPE_CHECKING:
     from nemo_gym.mcp_auto_exposure import MCPTool
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.global_config import EXECUTION_ID_KEY_NAME
+from nemo_gym.failure_kinds import validate_failure_kind
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -91,33 +90,12 @@ class BaseResourcesServer(BaseServer):
 class BaseRunRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    # Capture the scheduler-owned transport extension in a private slot. This
-    # makes it available to every typed /run endpoint without adding a public
-    # model field, changing JSON schema, or serializing a null/default key.
-    _nemo_gym_execution_id: Optional[str] = PrivateAttr(default=None)
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     capture_rollout_id: Optional[str] = Field(
         default=None,
         alias="_ng_rollout_id",
         exclude=True,
     )
-
-    @model_validator(mode="wrap")
-    @classmethod
-    def _capture_execution_id(cls, value: Any, handler: Any) -> "BaseRunRequest":
-        if isinstance(value, Mapping):
-            execution_id = value.get(EXECUTION_ID_KEY_NAME)
-            if EXECUTION_ID_KEY_NAME in value:
-                # Subclasses such as OSWorldRunRequest allow domain-specific
-                # extras. Remove this transport-only extension before normal
-                # validation so it cannot leak back through model_dump().
-                value = dict(value)
-                value.pop(EXECUTION_ID_KEY_NAME)
-        else:
-            execution_id = getattr(value, "_nemo_gym_execution_id", None)
-        model = handler(value)
-        model._nemo_gym_execution_id = execution_id
-        return model
 
 
 class BaseVerifyRequest(BaseRunRequest):
@@ -127,9 +105,45 @@ class BaseVerifyRequest(BaseRunRequest):
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
-    # Human-readable diagnosis of why `reward` may not reflect policy quality.
-    # Machine-readable handling belongs to `mask_sample`/`failure_kind`.
+    mask_sample: bool = Field(
+        default=False,
+        description=(
+            "Whether this completed sample should be excluded from evaluation scores and "
+            "other downstream quality calculations because its reward is not a valid "
+            "measurement of the evaluated system. Set it when the environment or its "
+            "infrastructure failed rather than the evaluated system: a lost session, an "
+            "unavailable judge, an OOM-killed container, a reset that timed out. The "
+            "default means the reward is a valid measurement. It is independent of the "
+            "diagnostic fields: a sample that degraded but was still measured validly "
+            "keeps mask_sample=False while naming a failure_kind/failure_reason."
+        ),
+    )
+
+    failure_kind: Optional[str] = Field(
+        default=None,
+        description=(
+            "Which kind of failure this was, from the shared vocabulary in "
+            "nemo_gym.failure_kinds. Stable and low cardinality, so it is safe to group by "
+            "in logs, metrics and traces — unlike failure_reason. An environment that needs "
+            "something the shared set should not grow can use '<server>:<kind>'. Orthogonal "
+            "to mask_sample: naming the kind does not decide whether the sample is usable."
+        ),
+    )
+
+    # Human-readable diagnosis of why `reward` may not reflect policy quality. Occurrence
+    # detail, so never a metric label; `failure_kind` is the groupable half.
     failure_reason: Optional[str] = None
+
+    @field_validator("failure_kind")
+    @classmethod
+    def _warn_on_unregistered_failure_kind(cls, value: Optional[str]) -> Optional[str]:
+        """Producers learn about a name outside the vocabulary without losing the failure.
+
+        Validation warns rather than rejects: an unregistered kind is a migration signal,
+        and dropping the response over it would replace a visible wrong label with an
+        invisible lost failure.
+        """
+        return validate_failure_kind(value)
 
 
 class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
