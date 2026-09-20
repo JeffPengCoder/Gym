@@ -60,6 +60,9 @@ PYTHONPATH="$PWD" python -m pytest -q resources_servers/osworld/tests
 `data/example.jsonl` and `data/example_rollouts.jsonl` mirror the five
 committed OSWorld benchmark smoke fixtures. They exist for Gym's server data
 contract; running the resources-server unit tests does not replay those tasks.
+`task_data.py` describes that dataset metadata for Gym's shared validation.
+It does not change canonical task specifications or the session-based verifier:
+the agent still supplies `task_config` separately when seeding/resetting a VM.
 
 ## Licensing
 
