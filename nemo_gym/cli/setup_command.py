@@ -17,6 +17,7 @@ import importlib.metadata
 import json
 import os
 import shlex
+import sys
 from os import environ
 from pathlib import Path
 from subprocess import Popen
@@ -192,6 +193,16 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     head_server_dep_args = shlex.join(head_server_deps)
 
     venv_path = get_venv_path(dir_path, global_config_dict)
+    venv_python_fpath = venv_path / "bin/python"
+    venv_activate_fpath = venv_path / "bin/activate"
+    skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
+    should_skip_venv_setup = bool(skip_venv_if_present) and venv_python_fpath.exists() and venv_activate_fpath.exists()
+    activate_cmd = f"source {shlex.quote(str(venv_activate_fpath))}"
+    if should_skip_venv_setup:
+        # Reuse existing environments, including prebuilt venvs without Gym's
+        # completion marker or writable setup-lock directories.
+        return f"cd {shlex.quote(str(dir_path))} && {activate_cmd}"
+
     parent_runtime_overrides_path = venv_path / PARENT_RUNTIME_OVERRIDES_FILENAME
     environment_identity_path = venv_path / ENVIRONMENT_IDENTITY_FILENAME
     parent_runtime_overrides_cmd = (
@@ -199,7 +210,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     )
 
     python_request = str(global_config_dict[PYTHON_VERSION_KEY_NAME])
-    python_request_arg = python_request
+    python_request_arg = shlex.quote(python_request)
     # A component may use uv's standard Python-version file to select a
     # compatible interpreter independently from the parent process. Components
     # without one retain the existing parent-Python behavior.
@@ -231,27 +242,15 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # example /opt/nemo-rl) from contributing unrelated resolver policy.
     uv_config_path = dir_path / "uv.toml"
     uv_config_flag = f"--config-file {shlex.quote(str(uv_config_path.resolve()))} " if uv_config_path.exists() else ""
-    uv_venv_cmd = f"uv venv {uv_config_flag}--seed --allow-existing --python {python_request_arg} {venv_path}"
-
-    venv_python_fpath = venv_path / "bin/python"
-    venv_activate_fpath = venv_path / "bin/activate"
-    skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
-    try:
-        recorded_environment_identity = environment_identity_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        recorded_environment_identity = ""
-    should_skip_venv_setup = (
-        bool(skip_venv_if_present)
-        and venv_python_fpath.exists()
-        and venv_activate_fpath.exists()
-        and recorded_environment_identity == environment_identity
+    uv_venv_cmd = (
+        f"uv venv {uv_config_flag}--seed --allow-existing --python {python_request_arg} {shlex.quote(str(venv_path))}"
     )
 
     # explicitly set python path if specified. In Google colab, gym env start fails due to uv pip install falls back to system python (/usr) without this and errors.
     # not needed for most clusters. should be safe in all scenarios, but only minimally tested outside of colab.
     # see discussion and examples here: https://github.com/NVIDIA-NeMo/Gym/pull/526#issuecomment-3676230383
     uv_pip_set_python = global_config_dict.get(UV_PIP_SET_PYTHON_KEY_NAME, False)
-    uv_pip_python_flag = f"--python {venv_python_fpath} " if uv_pip_set_python else ""
+    uv_pip_python_flag = f"--python {shlex.quote(str(venv_python_fpath))} " if uv_pip_set_python else ""
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
@@ -266,9 +265,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # baking the current parent version into every server's source tree.
     server_uv_flags = f"{uv_config_flag}--overrides {shlex.quote(str(parent_runtime_overrides_path))} "
 
-    if should_skip_venv_setup:
-        env_setup_cmd = f"source {venv_activate_fpath}"
-    else:
+    try:
         has_pyproject_toml = (dir_path / "pyproject.toml").exists()
         has_requirements_txt = (dir_path / "requirements.txt").exists()
         if has_pyproject_toml and has_requirements_txt:
@@ -307,13 +304,33 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
-        env_setup_cmd = (
+        install_command = (
             f"{clear_environment_identity_cmd} && {uv_venv_cmd}{prefix_cmd} && "
-            f"{parent_runtime_overrides_cmd} && source {venv_activate_fpath} && "
+            f"{parent_runtime_overrides_cmd} && {activate_cmd} && "
             f"{install_cmd}{prefix_cmd} && {commit_environment_identity_cmd}"
         )
 
-    return f"cd {dir_path} && {env_setup_cmd}"
+    except RuntimeError as error:
+        if not skip_venv_if_present:
+            raise
+        # A ready environment needs no manifest. Fail only if the locked
+        # readiness check determines that installation is required.
+        install_command = f"printf '%s\\n' {shlex.quote(str(error))} >&2; exit 1"
+
+    # When setup is needed, serialize installers and recheck readiness under
+    # the lock in case another server completes installation before this one.
+    setup_command = [
+        sys.executable,
+        str(Path(__file__).with_name("_venv_setup.py")),
+        "--venv",
+        str(venv_path),
+        "--command",
+        install_command,
+    ]
+    if skip_venv_if_present:
+        setup_command.append("--skip-if-ready")
+
+    return f"cd {shlex.quote(str(dir_path))} && {shlex.join(setup_command)} && {activate_cmd}"
 
 
 def run_command(

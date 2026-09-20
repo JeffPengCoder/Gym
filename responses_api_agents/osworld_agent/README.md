@@ -252,6 +252,13 @@ The base configuration is
 [`configs/osworld_agent.yaml`](configs/osworld_agent.yaml). Important fields
 are grouped below.
 
+Gym's `skip_venv_if_present: true` explicitly reuses an existing role venv;
+it does not refresh dependencies when source manifests change. After a required
+dependency change, update that role environment explicitly or run setup with
+`skip_venv_if_present: false`. Setup retains the role's `.python-version` and
+uv resolver policy, serializes installers, and records its dependency identity
+only after installation succeeds. Ordinary source edits do not require setup.
+
 Environment and execution:
 
 - `provider_name`, `container_image`, `headless`, `screen_width`, and
@@ -287,7 +294,12 @@ Runner and model behavior:
 Evaluation and operations:
 
 - `reward_mode` is `binary` or `raw`; aggregate metrics always report both
-  binary success and raw OSWorld reward rates.
+  binary success and raw OSWorld reward rates over the measured, unmasked
+  subset, following Gym's shared aggregation policy. Normal evaluated failures
+  with reward zero stay in that subset. Report `coverage/measured_rollouts`,
+  `coverage/masked_rollouts`, and task coverage alongside scores when samples
+  are masked; the old `osworld/masked_rollout_count` is replaced by these shared
+  counters. An entirely masked run reports coverage without inventing a score.
 - `evaluator_disable_gpu` prevents evaluator helpers from reserving rollout
   GPU memory.
 - `enable_proxy` and `proxy_config_file` apply only to tasks explicitly marked

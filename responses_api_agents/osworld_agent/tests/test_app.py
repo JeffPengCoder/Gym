@@ -19,7 +19,8 @@ import pytest
 import ray
 from fastapi.testclient import TestClient
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import AggregateMetricsRequest, ModelServerRef
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.osworld_agent.app import (
@@ -1553,7 +1554,7 @@ class TestApp:
             [
                 {
                     "reward": 0.0,
-                    "mask_sample": True,
+                    "mask_sample": False,
                     "verifier_metadata": {"osworld_score": 0.25},
                 }
             ],
@@ -1562,7 +1563,7 @@ class TestApp:
         metrics = agent.compute_metrics(tasks)
 
         assert metrics["osworld/scored_rollout_count"] == 3
-        assert metrics["osworld/masked_rollout_count"] == 1
+        assert "osworld/masked_rollout_count" not in metrics
         assert metrics["osworld/binary_success_count"] == 1
         assert metrics["osworld/binary_success_rate"] == pytest.approx(100.0 / 3.0)
         assert metrics["osworld/raw_reward_sum"] == pytest.approx(1.75)
@@ -1574,6 +1575,48 @@ class TestApp:
             "osworld/binary_success_rate": pytest.approx(100.0 / 3.0),
             "osworld/raw_reward_rate": pytest.approx(175.0 / 3.0),
         }
+
+    async def test_aggregate_metrics_uses_shared_masking_and_coverage(self) -> None:
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        rows = [
+            {
+                TASK_INDEX_KEY_NAME: index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": reward,
+                "mask_sample": masked,
+                "verifier_metadata": {"osworld_score": reward},
+            }
+            for index, (reward, masked) in enumerate([(1.0, False), (0.0, False), (1.0, True)])
+        ]
+        body = AggregateMetricsRequest(verify_responses=rows)
+
+        result = await agent.aggregate_metrics(body)
+
+        assert result.agent_metrics["osworld/scored_rollout_count"] == 2
+        assert result.agent_metrics["osworld/binary_success_count"] == 1
+        assert result.agent_metrics["osworld/binary_success_rate"] == 50.0
+        assert result.agent_metrics["osworld/raw_reward_rate"] == 50.0
+        assert result.agent_metrics["coverage/measured_rollouts"] == 2
+        assert result.agent_metrics["coverage/masked_rollouts"] == 1
+        assert result.agent_metrics["coverage/fully_masked_tasks"] == 1
+        assert "osworld/masked_rollout_count" not in result.agent_metrics
+        assert len(body.verify_responses) == 3
+        assert body.verify_responses[2]["mask_sample"] is True
+
+    async def test_all_masked_aggregate_reports_coverage_without_a_score(self) -> None:
+        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        result = await agent.aggregate_metrics(
+            AggregateMetricsRequest(
+                verify_responses=[
+                    {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "mask_sample": True}
+                ]
+            )
+        )
+
+        assert result.key_metrics["coverage/masked_rollouts"] == 1
+        assert result.key_metrics["coverage/measured_rollouts"] == 0
+        assert "osworld/binary_success_rate" not in result.key_metrics
+        assert "mean/reward" not in result.key_metrics
 
     async def test_responses_not_implemented(self) -> None:
         agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))

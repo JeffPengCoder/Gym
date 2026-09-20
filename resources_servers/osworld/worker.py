@@ -57,9 +57,7 @@ class WorkerRuntime:
         self.token = os.environ.get("NEMO_GYM_REGISTRATION_TOKEN", "").strip()
         self.data_host = os.environ.get("OSWORLD_WORKER_DATA_HOST", "").strip()
         self.image = os.environ.get("OSWORLD_WORKER_IMAGE", "happysixd/osworld-docker:latest").strip()
-        self.vm_path = os.path.expanduser(
-            os.environ.get("OSWORLD_WORKER_VM_PATH", "~/osworld-assets/Ubuntu.qcow2")
-        )
+        self.vm_path = os.path.expanduser(os.environ.get("OSWORLD_WORKER_VM_PATH", "~/osworld-assets/Ubuntu.qcow2"))
         self.capacity = max(1, int(os.environ.get("OSWORLD_WORKER_CAPACITY", "8")))
         self.publish_host = os.environ.get("OSWORLD_WORKER_PUBLISH_HOST", "0.0.0.0").strip()
         self.deployment_id = os.environ.get("OSWORLD_DEPLOYMENT_ID", "osworld-decoupled").strip()
@@ -120,10 +118,7 @@ class WorkerRuntime:
         if body.deployment_id != self.deployment_id:
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"worker belongs to deployment {self.deployment_id!r}, "
-                    f"not {body.deployment_id!r}"
-                ),
+                detail=(f"worker belongs to deployment {self.deployment_id!r}, not {body.deployment_id!r}"),
             )
         reservation_held = False
         with self._lock:
@@ -266,9 +261,7 @@ class WorkerRuntime:
         }
 
     def _inspect_ports(self, container_name: str) -> Dict[int, int]:
-        result = self._run(
-            ["docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}", container_name]
-        )
+        result = self._run(["docker", "inspect", "--format", "{{json .NetworkSettings.Ports}}", container_name])
         mappings = json.loads(result.stdout.strip())
         ports: Dict[int, int] = {}
         for port in CONTAINER_PORTS:
@@ -323,9 +316,7 @@ class WorkerRuntime:
                 pass
         with self._lock:
             session_ids = list(self._containers)
-        await asyncio.gather(
-            *(asyncio.to_thread(self.delete_container, session_id) for session_id in session_ids)
-        )
+        await asyncio.gather(*(asyncio.to_thread(self.delete_container, session_id) for session_id in session_ids))
         try:
             await asyncio.to_thread(
                 requests.delete,

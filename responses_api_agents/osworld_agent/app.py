@@ -1231,11 +1231,14 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
         return super().setup_webserver()
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Report binary completion and raw OSWorld evaluator reward together."""
+        """Report binary and raw scores for the shared aggregator's measured subset.
+
+        Masked samples are counted by Gym's shared ``coverage/*`` metrics before
+        this hook runs, not by an OSWorld-specific counter over filtered input.
+        """
 
         rollouts = [rollout for task in tasks for rollout in task]
         raw_scores: List[float] = []
-        masked_count = 0
         for rollout in rollouts:
             metadata = rollout.get("verifier_metadata")
             if not isinstance(metadata, Mapping):
@@ -1245,14 +1248,12 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 raw_scores.append(float(score or 0.0))
             except (TypeError, ValueError):
                 raw_scores.append(0.0)
-            masked_count += int(bool(rollout.get("mask_sample", False)))
 
         count = len(raw_scores)
         binary_successes = sum(score >= 1.0 for score in raw_scores)
         raw_reward = sum(raw_scores)
         return {
             "osworld/scored_rollout_count": count,
-            "osworld/masked_rollout_count": masked_count,
             "osworld/binary_success_count": binary_successes,
             "osworld/binary_success_rate": 100.0 * binary_successes / count if count else 0.0,
             "osworld/raw_reward_sum": raw_reward,
