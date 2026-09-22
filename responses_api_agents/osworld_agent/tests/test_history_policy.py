@@ -146,7 +146,7 @@ def test_fixed_three_prompt_rendering_remains_byte_for_byte_compatible() -> None
     messages = [payload["messages"] for payload in payloads]
     serialized = json.dumps(messages, sort_keys=True, separators=(",", ":")).encode()
     assert hashlib.sha256(serialized).hexdigest() == (
-        "849f1759a4759d79bc93929de672c44ece06f3ece0654b01c25f221e7c9a6a07"
+        "849f1759a4759d79bc93929de672c44ece06f3ece0654b01c25f221e7c9a6a07"  # pragma: allowlist secret
     )
     assert [payload["_osworld_log_context"]["history_policy_name"] for payload in payloads] == ["fixed"] * 5
 
