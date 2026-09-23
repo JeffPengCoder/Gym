@@ -50,36 +50,37 @@ PUBLISHED_POLICY_IDS = {
 }
 
 # sha256 over every prompt the adapter renders for a deterministic trajectory.
+# These deterministic golden digests are not credentials.
 PUBLISHED_PROMPT_DIGESTS = {
     "fixed-3": (
         {"max_image_history_length": 3},
         25,
-        "10be484ce3a314fd655235412f2fb455401e7b3ba88cf1826959ac4b9ab6611b",
+        "10be484ce3a314fd655235412f2fb455401e7b3ba88cf1826959ac4b9ab6611b",  # pragma: allowlist secret
     ),
     "fixed-1": (
         {"max_image_history_length": 1},
         15,
-        "1ded2c44eb5e75008fc58fd3910ca72e7c4ca77b665e47f0c9cab5087bcef38d",
+        "1ded2c44eb5e75008fc58fd3910ca72e7c4ca77b665e47f0c9cab5087bcef38d",  # pragma: allowlist secret
     ),
     "fixed-10": (
         {"max_image_history_length": 10},
         30,
-        "12d7e595e029032e80ef9806a8d5447728d8903d59a2a5909ef2c1a680794bb2",
+        "12d7e595e029032e80ef9806a8d5447728d8903d59a2a5909ef2c1a680794bb2",  # pragma: allowlist secret
     ),
     "hysteresis-3-10": (
         {"max_image_history_length": 3, "max_live_images": 10},
         35,
-        "14f1207a6e35c2b9ca15fa541c1118ecc3ba9885b7df2fbff6cf56691b9dbc4f",
+        "14f1207a6e35c2b9ca15fa541c1118ecc3ba9885b7df2fbff6cf56691b9dbc4f",  # pragma: allowlist secret
     ),
     "hysteresis-1-5": (
         {"max_image_history_length": 1, "max_live_images": 5},
         20,
-        "af37a0c96763486cc4903d381018a882de4d5f7428446bd36ab4b37483b00b48",
+        "af37a0c96763486cc4903d381018a882de4d5f7428446bd36ab4b37483b00b48",  # pragma: allowlist secret
     ),
     "hysteresis-5-20": (
         {"max_image_history_length": 5, "max_live_images": 20},
         45,
-        "456a84ac58f9e545c1d7b68bbf2599c2a02eacf3b03dacd984fef2f0b2cd546c",
+        "456a84ac58f9e545c1d7b68bbf2599c2a02eacf3b03dacd984fef2f0b2cd546c",  # pragma: allowlist secret
     ),
 }
 
