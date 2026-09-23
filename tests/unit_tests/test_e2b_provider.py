@@ -18,11 +18,13 @@
 import inspect
 import re
 import sys
+import tomllib
 import types
 from importlib.metadata import version
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 from nemo_gym.package_info import __version__ as nemo_gym_version
@@ -248,6 +250,17 @@ def test_provider_is_registered_as_builtin() -> None:
     assert e2b_pkg.E2BProvider is E2BProvider
 
 
+def test_sdk_install_contract_matches_package_metadata_and_guidance() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    with (repo_root / "pyproject.toml").open("rb") as source:
+        dependencies = tomllib.load(source)["project"]["optional-dependencies"]["sandbox"]
+
+    assert e2b_sdk.E2B_SDK_CONSTRAINT in dependencies
+    provider_dir = repo_root / "nemo_gym/sandbox/providers/e2b"
+    for relative_path in ("README.md", "configs/e2b.yaml"):
+        assert e2b_sdk.E2B_SDK_CONSTRAINT in (provider_dir / relative_path).read_text(encoding="utf-8")
+
+
 async def test_runtime_loader_sets_integration_once_per_sdk_module(monkeypatch: pytest.MonkeyPatch) -> None:
     sdk_module = _fake_sdk_module()
     configured_transports = []
@@ -332,7 +345,7 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(
 def test_loader_reports_missing_optional_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "e2b", None)
 
-    with pytest.raises(ImportError, match=r"pip install 'e2b>=2\.36\.0,<3\.0\.0'"):
+    with pytest.raises(ImportError, match=r"pip install 'e2b>=2\.46\.0,<3\.0\.0'"):
         e2b_sdk.require_e2b_sdk("Testing the e2b provider")
 
 
@@ -346,10 +359,7 @@ async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
     monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
 
-    installed_match = re.match(r"^(\d+)\.(\d+)", version("e2b"))
-    assert installed_match is not None
-    assert (int(installed_match[1]), int(installed_match[2])) >= (2, 36)
-    assert int(installed_match[1]) < 3
+    assert version("e2b") in Requirement(e2b_sdk.E2B_SDK_CONSTRAINT).specifier
     assert set(_API_PARAM_KEYS) <= set(e2b.ApiParams.__annotations__)
 
     e2b_sdk.require_e2b_sdk("Testing the e2b provider")

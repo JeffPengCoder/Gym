@@ -525,7 +525,7 @@ class E2BProvider:
         except AttributeError as exc:
             raise RuntimeError(
                 "Gateway port routing needs ConnectionConfig.sandbox_headers, which this "
-                f"e2b SDK does not expose. Install '{E2B_SDK_CONSTRAINT}' at 2.46 or newer, "
+                f"e2b SDK does not expose. Install '{E2B_SDK_CONSTRAINT}', "
                 "or set connection.port_routing to 'hostname'."
             ) from exc
         headers["E2b-Sandbox-Port"] = str(port)
