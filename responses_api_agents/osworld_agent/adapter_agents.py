@@ -1044,7 +1044,8 @@ class NemotronV3NanoOmniAgent:
                     # feedback would only make it longer. Shrink the live-image
                     # set and rebuild instead, replanning from the entry state.
                     previous_images = int(self.snapshot_window.get("prompt_snapshot_count") or 1)
-                    next_budget = max(1, min(previous_images, image_budget or previous_images) - 1)
+                    minimum_images = self.history_policy.sink + 1
+                    next_budget = max(minimum_images, previous_images - 1)
                     if next_budget < previous_images:
                         image_budget = next_budget
                         self.history_policy_state = entry_policy_state
@@ -1065,6 +1066,10 @@ class NemotronV3NanoOmniAgent:
                             previous_images,
                             self.snapshot_window.get("prompt_snapshot_count"),
                         )
+                    else:
+                        # The sink and current observation cannot be removed.
+                        # An unchanged rejected request cannot recover by retrying.
+                        will_retry = False
                     feedback_next = False
                 else:
                     feedback_next = self.parse_error_feedback and will_retry
@@ -1095,7 +1100,10 @@ class NemotronV3NanoOmniAgent:
                 )
                 if feedback_next:
                     request_messages = self._parse_retry_messages(messages, response, last_error)
-        else:
+                if not will_retry:
+                    break
+
+        if not model_calls[-1].get("accepted"):
             # Report facts only.  The runner owns rollout termination and the
             # runtime-admission policy decides whether the result is masked.
             # In particular, do not turn malformed sampled output into a
@@ -1105,7 +1113,9 @@ class NemotronV3NanoOmniAgent:
                     "agent_outcome": MODEL_FAILURE_OUTCOMES[last_failure_kind],
                     "agent_outcome_family": "model_response_invalid",
                     "stop_rollout": True,
-                    "model_call_completed": completed_model_calls > 0,
+                    # Admission needs the terminal attempt's fact. An earlier
+                    # malformed sample must not hide a later transport failure.
+                    "model_call_completed": model_call_completed,
                     "parse_failure": {
                         "attempt_count": len(model_calls),
                         "completed_model_call_count": completed_model_calls,

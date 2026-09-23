@@ -17,6 +17,7 @@ from responses_api_agents.osworld_agent.adapter_agents import (
     classify_model_failure,
 )
 
+
 # (observed error text, model_call_completed, expected kind)
 OBSERVED_FAILURES = [
     # -- server rejected the request outright (vLLM 400) -------------------
@@ -40,8 +41,7 @@ OBSERVED_FAILURES = [
     # -- transport gave out before a response existed (LB 502) -------------
     ("ClientOSError: [Errno 104] Connection reset by peer", False, "transport_error"),
     (
-        "ClientOSError: [Errno None] Can not write request body for "
-        "http://lyris0152:8000/v1/chat/completions",
+        "ClientOSError: [Errno None] Can not write request body for http://lyris0152:8000/v1/chat/completions",
         False,
         "transport_error",
     ),
@@ -64,14 +64,12 @@ OBSERVED_FAILURES = [
         "unparseable",
     ),
     (
-        "Invalid Python action: unterminated triple-quoted string literal "
-        "(detected at line 1) (line 1, offset 53)",
+        "Invalid Python action: unterminated triple-quoted string literal (detected at line 1) (line 1, offset 53)",
         True,
         "unparseable",
     ),
     (
-        "Invalid Python action: unexpected character after line continuation character "
-        "(line 1, offset 22)",
+        "Invalid Python action: unexpected character after line continuation character (line 1, offset 22)",
         True,
         "unparseable",
     ),
@@ -109,9 +107,7 @@ def test_a_rejected_request_is_context_overflow_even_if_the_call_completed() -> 
     """Some transports surface a 4xx body instead of raising before the response."""
 
     assert (
-        classify_model_failure(
-            ValueError("maximum context length is 64000 tokens"), model_call_completed=True
-        )
+        classify_model_failure(ValueError("maximum context length is 64000 tokens"), model_call_completed=True)
         == "context_overflow"
     )
 
@@ -119,10 +115,7 @@ def test_a_rejected_request_is_context_overflow_even_if_the_call_completed() -> 
 def test_an_unknown_error_falls_back_to_unparseable_not_to_overflow() -> None:
     """Fail into the retryable bucket, never into the one that shrinks the prompt."""
 
-    assert (
-        classify_model_failure(ValueError("something nobody has seen"), model_call_completed=True)
-        == "unparseable"
-    )
+    assert classify_model_failure(ValueError("something nobody has seen"), model_call_completed=True) == "unparseable"
     assert (
         classify_model_failure(ValueError("something nobody has seen"), model_call_completed=False)
         == "transport_error"
@@ -134,6 +127,4 @@ def test_classification_reads_the_exception_type_as_well_as_its_message() -> Non
         classify_model_failure(ConnectionError("policy endpoint unreachable"), model_call_completed=False)
         == "transport_error"
     )
-    assert (
-        classify_model_failure(TimeoutError(""), model_call_completed=False) == "transport_error"
-    )
+    assert classify_model_failure(TimeoutError(""), model_call_completed=False) == "transport_error"

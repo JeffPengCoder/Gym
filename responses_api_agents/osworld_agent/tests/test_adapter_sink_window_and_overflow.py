@@ -11,6 +11,7 @@ import pytest
 
 from responses_api_agents.osworld_agent.adapter_agents import NemotronV3NanoOmniAgent
 
+
 GOOD = "## Action:\nClick.\n## Code:\n```python\npyautogui.click(0.5, 0.5)\n```"
 
 
@@ -181,17 +182,14 @@ def test_context_overflow_shrinks_the_prompt_instead_of_resending_it() -> None:
         images = len(_image_turns(payload))
         if images > reject_until["images"]:
             raise ValueError(
-                f"Error code: 400 - Input length ({images * 6000}) exceeds "
-                "model's maximum context length (64000)."
+                f"Error code: 400 - Input length ({images * 6000}) exceeds model's maximum context length (64000)."
             )
         return _reply(len(payloads) - 1)
 
     agent.call_llm = call_llm  # type: ignore[method-assign]
 
     for index in range(9):
-        _, actions, info = agent.predict(
-            "Complete the task.", {"screenshot": f"png-{index + 1}".encode()}
-        )
+        _, actions, info = agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
         assert actions == ["pyautogui.click(960, 540)"], f"step {index + 1} must still act"
 
     # Steps 1..3 fit; from step 4 the window would exceed the limit and the
@@ -225,7 +223,7 @@ def test_context_overflow_records_the_shrink_and_the_specific_outcome() -> None:
     assert info["agent_outcome_family"] == "model_response_invalid"
     failure = info["parse_failure"]
     assert failure["last_failure_kind"] == "context_overflow"
-    assert failure["failure_kind_counts"] == {"context_overflow": 3}
+    assert failure["failure_kind_counts"] == {"context_overflow": 1}
     assert failure["completed_model_call_count"] == 0
 
 
@@ -239,6 +237,7 @@ def test_overflow_retries_do_not_advance_the_history_policy_state() -> None:
         max_live_images=10,
         parse_retries=4,
     )
+    _drive(agent, 3)
     calls = {"n": 0}
 
     def reject_twice(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
@@ -249,9 +248,11 @@ def test_overflow_retries_do_not_advance_the_history_policy_state() -> None:
 
     agent.call_llm = reject_twice  # type: ignore[method-assign]
     before = agent.history_policy_state
-    _, actions, _ = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-4"})
 
     assert actions == ["pyautogui.click(960, 540)"]
+    assert calls["n"] == 3
+    assert [event["to_images"] for event in info["prompt_shrink_events"]] == [3, 2]
     # One step advanced the epoch at most once, not once per rejected attempt.
     assert agent.history_policy_state.compaction_epoch - before.compaction_epoch <= 1
 
@@ -301,10 +302,61 @@ def test_overflow_shrinking_terminates_when_even_one_image_is_rejected() -> None
     _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-1"})
 
     assert actions == []
-    assert len(payloads) == 6, "exactly parse_retries attempts, no more and no spinning"
+    assert len(payloads) == 1, "do not resend an unchanged, deterministically rejected prompt"
     assert all(len(_image_turns(payload)) >= 1 for payload in payloads), "never sends zero images"
     assert info["agent_outcome"] == "model_context_overflow"
-    assert info["parse_failure"]["failure_kind_counts"] == {"context_overflow": 6}
+    assert info["parse_failure"]["failure_kind_counts"] == {"context_overflow": 1}
+
+
+def test_overflow_stops_at_sink_plus_current_image_without_false_shrink_events() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=30,
+        history_policy={
+            "name": "sink_window",
+            "params": {"sink": 2, "low_water": 5, "high_water": 8},
+        },
+        parse_retries=6,
+    )
+    _drive(agent, 3)
+    payloads: List[Dict[str, Any]] = []
+
+    def reject(payload, _model):
+        payloads.append(payload)
+        raise ValueError("maximum context length exceeded")
+
+    agent.call_llm = reject
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-4"})
+
+    assert actions == []
+    assert [_image_turns(payload) for payload in payloads] == [[1, 2, 3, 4], [1, 2, 4]]
+    assert info["parse_failure"]["prompt_shrink_events"] == [
+        {"parse_attempt": 1, "from_images": 4, "to_images": 3, "reason": "context_overflow"}
+    ]
+
+
+@pytest.mark.parametrize("transport_last", [True, False])
+def test_terminal_call_fact_does_not_hide_transport_failure_after_invalid_sample(transport_last) -> None:
+    agent = NemotronV3NanoOmniAgent(model="policy", max_steps=2, parse_retries=2)
+    invalid = {"content": "no action section", "finish_reason": "stop"}
+    unavailable = ConnectionError("policy endpoint unreachable")
+    results = iter([invalid, unavailable] if transport_last else [unavailable, invalid])
+
+    def call_llm(_payload, _model):
+        result = next(results)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    agent.call_llm = call_llm
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+
+    assert actions == []
+    assert info["model_call_completed"] is (not transport_last)
+    assert info["parse_failure"]["completed_model_call_count"] == 1
+    assert info["agent_outcome"] == ("model_call_failed" if transport_last else "model_response_unparseable")
+    assert len(info["model_calls"]) == 2
+    assert "mask_sample" not in info
 
 
 def test_overflow_shrink_under_a_sink_policy_keeps_the_sink() -> None:
@@ -331,9 +383,7 @@ def test_overflow_shrink_under_a_sink_policy_keeps_the_sink() -> None:
 
     agent.call_llm = call_llm  # type: ignore[method-assign]
     for index in range(10):
-        _, actions, _ = agent.predict(
-            "Complete the task.", {"screenshot": f"png-{index + 1}".encode()}
-        )
+        _, actions, _ = agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
         assert actions == ["pyautogui.click(960, 540)"], f"step {index + 1} must still act"
 
     accepted = [payload for payload in payloads if len(_image_turns(payload)) <= limit["images"]]
@@ -363,17 +413,13 @@ def test_shrink_events_are_recorded_on_the_step_that_recovered() -> None:
     def reject_once(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
         calls["n"] += 1
         if calls["n"] == reject_at_call:
-            raise ValueError(
-                "Error code: 400 - Input length (70000) exceeds model's maximum context length (64000)."
-            )
+            raise ValueError("Error code: 400 - Input length (70000) exceeds model's maximum context length (64000).")
         return _reply(calls["n"])
 
     agent.call_llm = reject_once  # type: ignore[method-assign]
     infos = []
     for index in range(5):
-        _, actions, info = agent.predict(
-            "Complete the task.", {"screenshot": f"png-{index + 1}".encode()}
-        )
+        _, actions, info = agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
         assert actions == ["pyautogui.click(960, 540)"], f"step {index + 1} recovered"
         infos.append(info)
 

@@ -29,6 +29,7 @@ from responses_api_agents.osworld_agent.history_policy import (
     plan_history,
 )
 
+
 # policy_id feeds run records and the exact-trace contract; it must not move.
 PUBLISHED_POLICY_IDS = {
     "fixed(1)": (HistoryPolicySpec.fixed(1), "osworld-history-policy-b7220985bd046580251603b7"),
@@ -86,9 +87,7 @@ GOOD_REPLY = "## Action:\nClick.\n## Code:\n```python\npyautogui.click(0.5, 0.5)
 
 
 def _render_digest(agent_kwargs: Dict[str, Any], steps: int) -> str:
-    agent = NemotronV3NanoOmniAgent(
-        model="policy-under-test", max_steps=40, parse_retries=1, **agent_kwargs
-    )
+    agent = NemotronV3NanoOmniAgent(model="policy-under-test", max_steps=40, parse_retries=1, **agent_kwargs)
     prompts: List[Any] = []
 
     def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:

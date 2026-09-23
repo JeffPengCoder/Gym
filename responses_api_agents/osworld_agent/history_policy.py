@@ -303,13 +303,14 @@ def plan_history(
     current observation at ``completed_turns``.  Every current strategy folds
     older turns into text; no turn is dropped.
 
-    ``max_images`` is an optional hard clamp on how many live images the plan
+    ``max_images`` is an optional budget on how many live images the plan
     may emit.  It exists so a caller that can measure the rendered prompt can
     re-plan against a token budget without this module having to know anything
     about tokenizers.  The function stays pure and replayable: the same inputs
     always produce the same plan.  Clamping only ever shrinks the trailing
     window; the sink is preserved because dropping it would change what the
-    policy means rather than just how much of it fits.
+    policy means rather than just how much of it fits. The sink plus the
+    current observation is the minimum, even when the requested budget is lower.
     """
 
     if isinstance(completed_turns, bool) or not isinstance(completed_turns, int) or completed_turns < 0:
@@ -358,9 +359,7 @@ def plan_history(
     decisions = tuple(
         HistoryTurnDecision(
             turn_index=index,
-            disposition=(
-                "live_image" if any(low <= index < high for low, high in intervals) else "text"
-            ),
+            disposition=("live_image" if any(low <= index < high for low, high in intervals) else "text"),
         )
         for index in range(total_turns)
     )

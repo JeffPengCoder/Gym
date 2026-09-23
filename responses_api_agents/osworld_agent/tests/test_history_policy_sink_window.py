@@ -130,9 +130,7 @@ def test_append_stability_follows_the_window_not_the_policy_name() -> None:
     # Unchanged for the two policies that shipped before sink_window.
     assert HistoryPolicySpec.fixed(3).to_contract()["supports_append_stable_intervals"] is False
     assert (
-        HistoryPolicySpec.hysteresis(low_water=3, high_water=10).to_contract()[
-            "supports_append_stable_intervals"
-        ]
+        HistoryPolicySpec.hysteresis(low_water=3, high_water=10).to_contract()["supports_append_stable_intervals"]
         is True
     )
 
@@ -214,9 +212,7 @@ def test_randomised_policies_never_violate_the_selection_invariants() -> None:
         else:
             sink = rng.randint(1, 4)
             low = sink + rng.randint(1, 6)
-            spec = HistoryPolicySpec.sink_window(
-                sink=sink, low_water=low, high_water=low + rng.choice([0, 1, 5, 12])
-            )
+            spec = HistoryPolicySpec.sink_window(sink=sink, low_water=low, high_water=low + rng.choice([0, 1, 5, 12]))
         budget = rng.choice([None, None, 1, 2, 3, 7])
         turns = rng.randint(1, 120)
 
