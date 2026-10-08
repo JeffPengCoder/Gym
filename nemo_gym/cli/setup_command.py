@@ -22,7 +22,7 @@ from os import environ
 from pathlib import Path
 from subprocess import Popen
 from sys import stderr, stdout
-from typing import IO, Any
+from typing import IO, Any, Mapping
 
 from omegaconf import DictConfig
 
@@ -34,6 +34,7 @@ from nemo_gym.global_config import (
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
+    UV_LOCK_TIMEOUT_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     get_global_config_dict,
@@ -147,7 +148,13 @@ def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
 
 
 def get_venv_path(dir_path: Path, global_config_dict: DictConfig) -> Path:
-    """Return the server venv path for the configured venv root."""
+    """Resolve the venv a server runs from: ``uv_venv_dir/<type>/<name>/.venv``, else ``<server dir>/.venv``.
+
+    Callers need this to launch a server with the venv's own interpreter rather than trusting whatever
+    ``bin/activate`` puts on PATH. A venv copied or moved after creation keeps the *original* prefix
+    hard-coded in ``bin/activate``, so sourcing it silently hands the server a different interpreter than
+    the one ``uv_venv_dir`` asked for.
+    """
     root_venv_path = Path(global_config_dict[UV_VENV_DIR_KEY_NAME])
     if root_venv_path.resolve() != PARENT_DIR.resolve():
         return Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
@@ -342,12 +349,15 @@ def run_command(
     global_config_dict: DictConfig | None = None,
     stdout_target: IO[Any] | None = None,
     stderr_target: IO[Any] | None = None,
+    extra_env: Mapping[str, str] | None = None,
 ) -> Popen:
     if global_config_dict is None:
         global_config_dict = get_global_config_dict()
 
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
+    if extra_env is not None:
+        custom_env.update(extra_env)
     _validate_component_working_dir(
         working_dir_path,
         server_name=server_name,
@@ -377,6 +387,11 @@ def run_command(
     custom_env["PYTHONPATH"] = ":".join(py_path_entries)
 
     custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+    # Servers start concurrently and contend for the lock on that shared cache, so the wait has to
+    # cover a cold install of the slowest one rather than uv's 300s default.
+    uv_lock_timeout = global_config_dict.get(UV_LOCK_TIMEOUT_KEY_NAME)
+    if uv_lock_timeout is not None:
+        custom_env["UV_LOCK_TIMEOUT"] = str(uv_lock_timeout)
 
     log_dir = global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME)
     if log_dir:
