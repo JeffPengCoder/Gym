@@ -114,6 +114,7 @@ from nemo_gym.server_utils import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
+from nemo_gym.task_materialization import TASK_ID_FIELDS
 from nemo_gym.token_id_capture import (
     TokenCaptureStore,
     TokenIdCaptureConfig,
@@ -446,7 +447,7 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
         if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
             return task_id, rollout_id
     task_id = next(
-        (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
+        (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
         str(row[TASK_INDEX_KEY_NAME]),
     )
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
