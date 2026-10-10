@@ -779,18 +779,21 @@ class TestServerUtils:
         assert cfg.global_aiohttp_tcp_keepalive_interval_seconds == 10
         assert cfg.global_aiohttp_tcp_keepalive_probes == 3
 
-    def test_global_aiohttp_client_can_trust_proxy_environment(self, monkeypatch: MonkeyPatch) -> None:
-        client = MagicMock()
-        client_session_ctor = MagicMock(return_value=client)
-        monkeypatch.setattr(nemo_gym.server_utils, "ClientSession", client_session_ctor)
-        monkeypatch.setattr(nemo_gym.server_utils, "TCPConnector", MagicMock())
-        monkeypatch.setattr(nemo_gym.server_utils, "DummyCookieJar", MagicMock())
+    @mark.parametrize("trust_env", [False, True])
+    async def test_global_aiohttp_client_trusts_proxy_environment_only_when_enabled(
+        self, monkeypatch: MonkeyPatch, trust_env: bool
+    ) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 1)
+        monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: False)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
 
-        result = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig(global_aiohttp_client_trust_env=True))
-
-        assert result is client
-        assert client_session_ctor.call_args.kwargs["trust_env"] is True
+        client = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig(global_aiohttp_client_trust_env=trust_env))
+        try:
+            assert client.trust_env is trust_env
+        finally:
+            await client.close()
+            monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
 
     @mark.parametrize(
         ("workers", "expected_total", "expected_per_host"),
