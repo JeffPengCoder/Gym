@@ -302,10 +302,6 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     )
 
     global_aiohttp_client_request_debug: bool = False
-    global_aiohttp_client_trust_env: bool = Field(
-        default=False,
-        description="Allow aiohttp to use HTTP(S)_PROXY and NO_PROXY from the server process environment.",
-    )
 
     # Bounds match the Linux kernel limits; values outside them make setsockopt fail with EINVAL.
     global_aiohttp_tcp_keepalive_idle_seconds: int = Field(
@@ -428,7 +424,6 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         connector=connector,
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
-        trust_env=cfg.global_aiohttp_client_trust_env,
     )
 
     global _GLOBAL_AIOHTTP_CLIENT

@@ -64,7 +64,6 @@ from nemo_gym.server_utils import (
     _validation_exception_handler,
     initialize_ray,
     raise_for_status,
-    set_global_aiohttp_client,
 )
 from nemo_gym.telemetry import connection_pool
 from nemo_gym.telemetry.connection_pool import connection_pool_capacity, report_connection_pool_capacity
@@ -774,26 +773,9 @@ class TestServerUtils:
 
     def test_GlobalAIOHTTPAsyncClientConfig_keepalive_defaults(self) -> None:
         cfg = GlobalAIOHTTPAsyncClientConfig()
-        assert cfg.global_aiohttp_client_trust_env is False
         assert cfg.global_aiohttp_tcp_keepalive_idle_seconds == 60
         assert cfg.global_aiohttp_tcp_keepalive_interval_seconds == 10
         assert cfg.global_aiohttp_tcp_keepalive_probes == 3
-
-    @mark.parametrize("trust_env", [False, True])
-    async def test_global_aiohttp_client_trusts_proxy_environment_only_when_enabled(
-        self, monkeypatch: MonkeyPatch, trust_env: bool
-    ) -> None:
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-        monkeypatch.setattr(nemo_gym.server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 1)
-        monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: False)
-        monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
-
-        client = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig(global_aiohttp_client_trust_env=trust_env))
-        try:
-            assert client.trust_env is trust_env
-        finally:
-            await client.close()
-            monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
 
     @mark.parametrize(
         ("workers", "expected_total", "expected_per_host"),
