@@ -243,28 +243,6 @@ async def _validation_exception_handler(request: Request, exc: RequestValidation
 NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_NAME"
 NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_BASE_URL"
 
-# Pydantic-core context strings that describe the schema rather than the
-# rejected input. Keep this keyed by error type: custom validators may attach
-# arbitrary strings under otherwise familiar context keys.
-_VALIDATION_SCHEMA_STRING_CONTEXT_KEYS: dict[str, frozenset[str]] = {
-    "bytes_invalid_encoding": frozenset({"encoding"}),
-    "dataclass_exact_type": frozenset({"class_name"}),
-    "dataclass_type": frozenset({"class_name"}),
-    "enum": frozenset({"expected"}),
-    "is_instance_of": frozenset({"class"}),
-    "is_subclass_of": frozenset({"class"}),
-    "literal_error": frozenset({"expected"}),
-    "model_type": frozenset({"class_name"}),
-    "needs_python_object": frozenset({"method_name"}),
-    "no_such_attribute": frozenset({"attribute"}),
-    "string_pattern_mismatch": frozenset({"pattern"}),
-    "too_long": frozenset({"field_type"}),
-    "too_short": frozenset({"field_type"}),
-    "union_tag_invalid": frozenset({"discriminator", "expected_tags"}),
-    "union_tag_not_found": frozenset({"discriminator"}),
-    "url_scheme": frozenset({"expected_schemes"}),
-}
-
 
 def _validation_value_shape(value: Any) -> dict[str, Any]:
     """Describe validation input without logging its potentially sensitive payload."""
@@ -292,28 +270,6 @@ def _validation_body_shape(body: Any) -> dict[str, Any]:
         "field_count": len(body),
         "fields": {str(key): _validation_value_shape(value) for key, value in list(body.items())[:50]},
     }
-
-
-def _validation_errors_for_log(exc: RequestValidationError) -> list[dict[str, Any]]:
-    """Strip Pydantic's echoed ``input`` values while retaining actionable diagnostics."""
-
-    sanitized: list[dict[str, Any]] = []
-    for error in exc.errors():
-        item = {key: error[key] for key in ("type", "loc", "msg") if key in error}
-        context = error.get("ctx")
-        if isinstance(context, dict):
-            schema_string_keys = _VALIDATION_SCHEMA_STRING_CONTEXT_KEYS.get(str(error.get("type")), frozenset())
-            safe_context = {
-                str(key): value
-                for key, value in context.items()
-                if value is None
-                or isinstance(value, (bool, int, float))
-                or (isinstance(value, str) and str(key) in schema_string_keys)
-            }
-            if safe_context:
-                item["ctx"] = safe_context
-        sanitized.append(item)
-    return sanitized
 
 
 class _PickleSafeRequestInfo(NamedTuple):
