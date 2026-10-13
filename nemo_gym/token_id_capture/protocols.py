@@ -42,7 +42,6 @@ That closes the window where the final call's entry is lost without a trace.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum, auto
 from typing import Protocol, runtime_checkable
 
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
@@ -62,10 +61,8 @@ class TokenCaptureFrozenError(RuntimeError):
     """
 
 
-class ParentSelection(Enum):
-    """Distinguish an omitted candidate hint from no accepted predecessor."""
-
-    INFER = auto()
+class CaptureAdmissionError(ValueError):
+    """Refuse a request whose capture state cannot safely admit generation."""
 
 
 @dataclass(frozen=True)
@@ -154,6 +151,11 @@ class CaptureLedger(LineageResolver, Protocol):
     ``record_failure`` records a call that did not commit.
     ``manifest`` returns both kinds of rows without including token arrays.
     Records must be visible to every serving worker before ``record`` returns.
+
+    Framework-owned capture additionally requires ``begin_call(rollout_id,
+    model_call_id)`` and ``close_admissions(rollout_id)``. They share one atomic
+    admission boundary: close returns a manifest and rejects new calls, while
+    existing intents may still commit. These extensions do not freeze writes.
     """
 
     async def record(self, commit: CaptureLedgerCommit) -> None:

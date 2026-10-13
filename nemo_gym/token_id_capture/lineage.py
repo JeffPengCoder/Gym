@@ -58,40 +58,12 @@ from nemo_gym.token_id_capture.fingerprint import (
 from nemo_gym.token_id_capture.fingerprint import (
     canonicalize_tool_arguments as canonicalize_tool_arguments,
 )
-from nemo_gym.token_id_capture.protocols import LineageMatch, LineageResolution
+from nemo_gym.token_id_capture.protocols import CaptureAdmissionError, LineageMatch, LineageResolution
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, cumulative_tokens
 
 
 if TYPE_CHECKING:
     from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
-
-
-# Names of the token-free CallRecord custody columns a ledger row carries.
-# ``staging_digest`` is the worker's staged-record digest; the row's ``digest``
-# key remains the lineage digest over the cumulative token IDs.
-_CUSTODY_FIELDS = (
-    "parent_call_id",
-    "staging_key",
-    "weight_version",
-    "prev_len",
-    "delta_len",
-    "cum_len",
-    "staging_digest",
-    "extras_digest",
-    "mode",
-    "admitted_at",
-    "staging_chain",
-    "chain_hash",
-    "cumulative_hash",
-    "response_id",
-    "output_fingerprint",
-    "continuation_fingerprint",
-    "fingerprint_version",
-    "output_items",
-    "response_status",
-    "finish_reason",
-    "last_output_item",
-)
 
 
 def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[str] = ()) -> dict:
@@ -118,8 +90,8 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
         "output_fingerprint": record.output_fingerprint or None,
         "continuation_fingerprint": record.continuation_fingerprint or None,
         "fingerprint_version": record.fingerprint_version,
-        "replay": record.replay.model_dump() if record.replay is not None else None,
-        "output_items": [item.model_dump() for item in record.output_items]
+        "replay": record.replay.model_dump(exclude={"schema_version"}) if record.replay is not None else None,
+        "output_items": [item.model_dump(exclude={"schema_version"}) for item in record.output_items]
         if record.output_items is not None
         else None,
         "response_status": record.response_status,
@@ -219,13 +191,13 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
     return manifest.model_dump(mode="json")
 
 
-def _validate_sequential_intent(rollout_id: str, rows: list[dict], expected_latest_call_id: str | None) -> None:
-    manifest = _manifest_from_rows(rollout_id, rows)
-    if manifest["pending_call_ids"] or manifest["failures"]:
-        raise ValueError("Sequential capture has a pending or failed call")
-    latest = manifest["records"][-1]["model_call_id"] if manifest["records"] else None
-    if latest != expected_latest_call_id:
-        raise ValueError("Ledger changed before dispatch; concurrent calls are unsupported")
+def _validate_call_intent(rows: list[dict], model_call_id: str) -> None:
+    if any(row.get("admissions_closed") for row in rows):
+        raise CaptureAdmissionError("Capture admissions are closed for this rollout")
+    if any(row.get("model_call_id") == model_call_id for row in rows):
+        raise CaptureAdmissionError(f"Capture call ID already registered: {model_call_id}")
+    if any(row.get("failure_reason") is not None for row in rows):
+        raise CaptureAdmissionError("Cannot admit a call after failed capture in this attempt")
 
 
 @dataclass
@@ -491,10 +463,18 @@ class InMemoryLineageStore:
     def is_process_shared(self) -> bool:
         return False
 
-    async def begin_call(self, rollout_id: str, model_call_id: str, expected_latest_call_id: str | None) -> None:
+    async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        """Register one unique call before dispatch; independent calls may overlap."""
         rows = self._ledgers.setdefault(rollout_id, [])
-        _validate_sequential_intent(rollout_id, rows, expected_latest_call_id)
+        _validate_call_intent(rows, model_call_id)
         rows.append({"model_call_id": model_call_id, "intent": True})
+
+    async def close_admissions(self, rollout_id: str) -> dict:
+        """Stop new calls idempotently; admitted calls may still commit."""
+        rows = self._ledgers.setdefault(rollout_id, [])
+        if not any(row.get("admissions_closed") for row in rows):
+            rows.append({"admissions_closed": True})
+        return _manifest_from_rows(rollout_id, rows)
 
     async def record(self, commit: CaptureLedgerCommit) -> None:
         # Custody rows are token-free (mirrors FileLineageStore): the chain
@@ -927,14 +907,26 @@ class FileLineageStore(IncrementalLineageStore):
             chain_hash=str(record.get("chain_hash") or ""),
         )
 
-    async def begin_call(self, rollout_id: str, model_call_id: str, expected_latest_call_id: str | None) -> None:
-        await asyncio.to_thread(self._begin_call, rollout_id, model_call_id, expected_latest_call_id)
+    async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        """Register one unique call before dispatch; independent calls may overlap."""
+        await asyncio.to_thread(self._begin_call, rollout_id, model_call_id)
 
-    def _begin_call(self, rollout_id: str, model_call_id: str, expected_latest_call_id: str | None) -> None:
+    def _begin_call(self, rollout_id: str, model_call_id: str) -> None:
         with self._locked(rollout_id):
             rows = self._read(rollout_id)
-            _validate_sequential_intent(rollout_id, rows, expected_latest_call_id)
+            _validate_call_intent(rows, model_call_id)
             self._append(rollout_id, {"model_call_id": model_call_id, "intent": True}, rows)
+
+    async def close_admissions(self, rollout_id: str) -> dict:
+        """Close new admissions atomically with begin_call and return a snapshot."""
+        return await asyncio.to_thread(self._close_admissions, rollout_id)
+
+    def _close_admissions(self, rollout_id: str) -> dict:
+        with self._locked(rollout_id):
+            rows = self._read(rollout_id)
+            if not any(row.get("admissions_closed") for row in rows):
+                self._append(rollout_id, {"admissions_closed": True}, rows)
+            return _manifest_from_rows(rollout_id, rows)
 
     async def record(self, commit: CaptureLedgerCommit) -> None:
         await asyncio.to_thread(self._record, commit)
@@ -958,7 +950,7 @@ class FileLineageStore(IncrementalLineageStore):
             matches = [
                 existing
                 for existing in records
-                if existing["model_call_id"] == model_call_id and not existing.get("intent")
+                if existing.get("model_call_id") == model_call_id and not existing.get("intent")
             ]
             if matches:
                 if matches[0] != record:

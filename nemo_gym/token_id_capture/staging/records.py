@@ -19,7 +19,18 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    model_serializer,
+    model_validator,
+)
 
 from nemo_gym.token_id_capture.records import (  # noqa: F401  (re-exported for staging consumers)
     LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
@@ -112,7 +123,7 @@ class ReplayContext(_WireModel):
 class ReplaySummary(_WireModel):
     """Bounded evidence for an ordered source history, stored once per call.
 
-    The next request supplies its items transiently so the worker can compare
+    The next request supplies its items transiently so Gym can compare
     the corresponding prefix. Historical per-item arrays are not persisted.
     """
 
@@ -144,16 +155,29 @@ class CaptureAdmission(_WireModel):
     parent_chain_hash: DigestHex | None = None
     request_replay: ReplayContext | None = None
     candidate_replay: ReplaySummary | None = None
+    # Gym matched source history; RL qualifies the actual renderer when needed.
+    requires_empty_tool_content_equivalence: StrictBool | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_admission(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        result = handler(self)
+        # Keep legacy text/token-in payloads compatible with strict older schemas.
+        if self.requires_empty_tool_content_equivalence is None:
+            result.pop("requires_empty_tool_content_equivalence", None)
+        return result
 
     @model_validator(mode="after")
     def _validate_prefix_contract(self) -> Self:
         if any(token_id < 0 for token_id in self.required_prefix_token_ids):
             raise ValueError("required_prefix_token_ids must be non-negative")
-        if self.mode == "candidate" and self.request_replay is None:
-            raise ValueError("candidate admission requires source request evidence")
-        if self.mode == "candidate" and (self.parent_call_id is None) != (self.candidate_replay is None):
-            raise ValueError("candidate predecessor and its replay evidence must be supplied together")
-        if self.mode == "token_in" or (self.mode == "candidate" and self.parent_call_id is not None):
+        if self.mode == "candidate":
+            if self.request_replay is None or self.candidate_replay is None:
+                raise ValueError("candidate admission requires source request and predecessor evidence")
+            if self.requires_empty_tool_content_equivalence is None:
+                raise ValueError("candidate admission requires an explicit source-match proof")
+        elif self.candidate_replay is not None or self.requires_empty_tool_content_equivalence is not None:
+            raise ValueError("source-match proof is only valid for candidate admissions")
+        if self.mode in ("token_in", "candidate"):
             if self.parent_call_id is None or self.prev_len == 0:
                 raise ValueError("token_in admission requires a parent_call_id and prev_len > 0")
             if self.parent_chain_hash is None:

@@ -16,7 +16,7 @@ import nemo_gym.server_utils
 from nemo_gym.base_responses_api_model import _CaptureMiddleware
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.server_utils import ServerClient
-from nemo_gym.token_id_capture.sink import CAPTURE_PARENT_HEADER, NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
+from nemo_gym.token_id_capture.sink import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
 from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
 from nemo_gym.token_id_capture.staging.records import (
     CaptureAdmission,
@@ -26,7 +26,6 @@ from nemo_gym.token_id_capture.staging.records import (
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
-_INFER = object()
 HISTORY = [
     {"role": "user", "content": "old question"},
     {"role": "assistant", "content": "historical answer"},
@@ -59,10 +58,9 @@ class CaptureHarness:
     omit_coords: bool = False
     model: object = None
 
-    def post(self, rollout_id, input_items, *, parent=_INFER):
+    def post(self, rollout_id, input_items):
         path = f"/ng-rollout/{rollout_id}/training-token-capture/v1/responses" if rollout_id else "/v1/responses"
-        headers = {} if parent is _INFER else {CAPTURE_PARENT_HEADER: json.dumps(parent)}
-        return self.client.post(path, json={"input": input_items}, headers=headers)
+        return self.client.post(path, json={"input": input_items})
 
     def manifest(self, rollout_id):
         return RolloutManifest.model_validate(asyncio.run(self.ledger.manifest(rollout_id)))
@@ -207,15 +205,15 @@ def test_sequential_calls_share_attempt_and_store_independent_roots(monkeypatch,
     assert harness.worker_calls[1][0].parent_call_id == manifest.records[0].model_call_id
 
 
-@pytest.mark.parametrize("send_parent_hint", [False, True])
-def test_measurement_uses_same_candidate_without_ledger_writes(monkeypatch, tmp_path, send_parent_hint):
+def test_measurement_uses_same_candidate_without_ledger_writes(monkeypatch, tmp_path):
     harness = make_capture_harness(monkeypatch, tmp_path)
     first = assert_clean(harness.post("attempt", HISTORY))
-    assert_clean(harness.post("attempt", HISTORY, parent=None))  # A newer rejected response.
+    assert_clean(harness.post("attempt", HISTORY))  # A newer rejected response.
     before = harness.manifest("attempt")
     calls = []
 
     async def tokenize(client, **body):
+        assert client.retry_requests is True
         calls.append(body)
         return {"prompt_token_count": 19, "ng_context_measured": True}
 
@@ -223,25 +221,12 @@ def test_measurement_uses_same_candidate_without_ledger_writes(monkeypatch, tmp_
     response = harness.client.post(
         "/context/attempt/measure",
         json={"input": HISTORY + first["output"] + [{"role": "user", "content": "next"}]},
-        headers={CAPTURE_PARENT_HEADER: json.dumps(first["id"])} if send_parent_hint else {},
     )
     assert response.status_code == 200, response.text
     assert response.json() == {"prompt_token_count": 19}
     assert calls[0][NG_CAPTURE_FIELD]["mode"] == "candidate"
     assert calls[0][NG_CAPTURE_FIELD]["parent_call_id"] == before.records[0].model_call_id
     assert harness.manifest("attempt") == before
-
-
-@pytest.mark.parametrize("parent", ["not-json", '""', "3", "{}", "[]", "true"])
-def test_invalid_candidate_hint_is_rejected_before_generation(monkeypatch, tmp_path, parent):
-    harness = make_capture_harness(monkeypatch, tmp_path)
-    response = harness.client.post(
-        "/ng-rollout/attempt/training-token-capture/v1/responses",
-        json={"input": HISTORY},
-        headers={CAPTURE_PARENT_HEADER: parent},
-    )
-    assert response.status_code == 422
-    assert not harness.worker_calls
 
 
 def test_lost_capture_ack_is_terminal_and_preserves_attempt_identity(monkeypatch, tmp_path):
@@ -251,7 +236,9 @@ def test_lost_capture_ack_is_terminal_and_preserves_attempt_identity(monkeypatch
     manifest = harness.manifest("attempt")
     assert len(manifest.attempted_call_ids) == len(manifest.pending_call_ids) == 1
     assert len(harness.sink.records) == 1
-    assert harness.post("attempt", HISTORY).status_code == 500
+    response = harness.post("attempt", HISTORY)
+    assert response.status_code == 409
+    assert "incomplete capture" in response.json()["detail"]
     assert len(harness.worker_calls) == 1
 
 
@@ -274,7 +261,7 @@ def test_failed_call_keeps_intent_without_claiming_worker_custody(monkeypatch, t
     assert manifest.failures[0].model_call_id == manifest.pending_call_ids[0]
     # The framework can mask this attempt. A failure row must not fabricate a
     # successful acknowledgement or permit another call under the same owner.
-    assert harness.post("attempt", HISTORY).status_code == 500
+    assert harness.post("attempt", HISTORY).status_code == 409
     assert harness.manifest("attempt") == manifest
     harness.client.close()
     asyncio.run(harness.ledger.close())
@@ -317,12 +304,7 @@ def test_tool_arguments_beyond_the_64_bit_range_still_admit(monkeypatch, tmp_pat
 
 
 def test_an_unexplained_history_rewrite_roots_a_new_segment(monkeypatch, tmp_path):
-    """A request whose items extend a stored prefix with something other than
-    user/tool observations (a harness compaction that keeps the leading
-    context, or an echo shape no candidate explains) still admits as a
-    candidate proposing the latest record; the worker decides it cannot
-    splice and roots a new segment, and the ledger ends clean with a
-    parentless second record instead of a failed call."""
+    """Gym roots source rewrites before they reach the worker."""
     harness = make_capture_harness(monkeypatch, tmp_path)
     first = assert_clean(harness.post("attempt", HISTORY))
     rewritten = HISTORY + [
@@ -333,9 +315,8 @@ def test_an_unexplained_history_rewrite_roots_a_new_segment(monkeypatch, tmp_pat
     assert_clean(harness.post("attempt", rewritten))
     manifest = harness.manifest("attempt")
     assert len(manifest.records) == 2 and not manifest.failures and not manifest.pending_call_ids
-    # The gateway proposed its latest record; rooting is the worker's decision.
-    assert harness.worker_calls[1][0].mode == "candidate"
-    assert harness.worker_calls[1][0].parent_call_id == manifest.records[0].model_call_id
+    assert harness.worker_calls[1][0].mode == "text"
+    assert harness.worker_calls[1][0].parent_call_id is None
     # The rewrite rooted a new segment instead of chaining onto the first call.
     assert manifest.records[1].parent_call_id is None
 
@@ -408,3 +389,132 @@ def test_transport_loss_never_replays_inference(monkeypatch, tmp_path, failure):
     assert harness.worker_calls[0][1] is False
     manifest = harness.manifest("attempt")
     assert len(manifest.attempted_call_ids) == len(manifest.pending_call_ids) == 1
+
+
+def test_closed_capture_refuses_dispatch_without_poisoning(monkeypatch, tmp_path):
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    assert_clean(harness.post("attempt", [{"role": "user", "content": "task"}]))
+    path = "/training-token-capture/control/rollouts/attempt/close"
+    assert harness.client.post(path).status_code == 401
+    headers = {"Authorization": "Bearer test-control"}
+    response = harness.client.post(path, headers=headers)
+    assert response.status_code == 200
+    snapshot = response.json()
+    assert harness.client.post(path, headers=headers).json() == snapshot
+    refused = harness.post("attempt", [{"role": "user", "content": "late"}])
+    assert refused.status_code == 409
+    assert "closed" in refused.json()["detail"]
+    assert len(harness.worker_calls) == 1
+    assert harness.manifest("attempt").model_dump() == snapshot
+    assert_clean(harness.post("other", [{"role": "user", "content": "other rollout"}]))
+
+
+@pytest.mark.parametrize("first", [0, 1])
+def test_http_calls_overlap_and_drain_after_close(monkeypatch, tmp_path, first):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, Lock
+
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    entered, release = [Event(), Event()], [Event(), Event()]
+    lock, admitted = Lock(), []
+    worker = NeMoGymAsyncOpenAI.create_chat_completion
+
+    async def paused_worker(client, **body):
+        with lock:
+            index = len(admitted)
+            admitted.append(body[NG_CAPTURE_FIELD]["model_call_id"])
+        entered[index].set()
+        assert await asyncio.to_thread(release[index].wait, 5)
+        return await worker(client, **body)
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", paused_worker)
+    with harness.client, ThreadPoolExecutor(max_workers=2) as executor:
+        calls = []
+        try:
+            for index in range(2):
+                calls.append(executor.submit(harness.post, "attempt", [{"role": "user", "content": f"task {index}"}]))
+                assert entered[index].wait(5), "second call failed to reach the worker concurrently"
+            response = harness.client.post(
+                "/training-token-capture/control/rollouts/attempt/close",
+                headers={"Authorization": "Bearer test-control"},
+            )
+            assert response.status_code == 200
+            assert set(response.json()["pending_call_ids"]) == set(admitted)
+            for index in (first, 1 - first):
+                release[index].set()
+                assert_clean(calls[index].result(timeout=5))
+            manifest = harness.manifest("attempt")
+            assert [r.model_call_id for r in manifest.records] == [admitted[first], admitted[1 - first]]
+            assert not manifest.pending_call_ids and not manifest.failures
+        finally:
+            for event in release:
+                event.set()
+
+
+@pytest.mark.parametrize("route", ["responses", "responses-stream", "chat/completions", "measure"])
+@pytest.mark.parametrize("failure", ["ambiguous", "failed"])
+def test_capture_refusals_are_non_retryable(monkeypatch, tmp_path, route, failure):
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    if route == "chat/completions":
+        path = "/ng-rollout/attempt/training-token-capture/v1/chat/completions"
+        first = assert_clean(harness.client.post(path, json={"messages": HISTORY}))
+        assert_clean(harness.client.post(path, json={"messages": HISTORY}))
+        output = [{"role": "assistant", "content": first["choices"][0]["message"]["content"]}]
+    else:
+        first = assert_clean(harness.post("attempt", HISTORY))
+        assert_clean(harness.post("attempt", HISTORY))
+        output = [{**item, "id": "exporter-local-id"} for item in first["output"]]
+    if failure == "failed":
+        asyncio.run(harness.ledger.record_failure("attempt", "failed-call", "lost acknowledgement"))
+    before = harness.manifest("attempt")
+    # Equal source history from two generations supplies no occurrence identity.
+    history = HISTORY + output + [{"role": "user", "content": "next"}]
+    path = f"/ng-rollout/attempt/training-token-capture/v1/{route}"
+    if route == "measure":
+        path = "/context/attempt/measure"
+    body = {"messages" if route == "chat/completions" else "input": history}
+    if route == "responses-stream":
+        path = path.removesuffix("-stream")
+        body["stream"] = True
+    response = harness.client.post(path, json=body)
+    assert response.status_code == 409, response.text
+    assert ("Ambiguous" if failure == "ambiguous" else "incomplete capture") in response.json()["detail"]
+    assert len(harness.worker_calls) == 2
+    assert harness.manifest("attempt") == before
+
+
+@pytest.mark.parametrize("n", [None, 1])
+def test_chat_accepts_single_choice_default(monkeypatch, tmp_path, n):
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    response = harness.client.post(
+        "/ng-rollout/attempt/training-token-capture/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "task"}], "n": n},
+    )
+    assert_clean(response)
+    assert len(harness.manifest("attempt").records) == 1
+
+
+def test_internal_admission_fault_is_not_a_client_refusal(monkeypatch, tmp_path):
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    monkeypatch.setattr(harness.ledger, "begin_call", AsyncMock(side_effect=ValueError("ledger bug")))
+    assert harness.post("attempt", HISTORY).status_code == 500
+    assert not harness.worker_calls
+
+
+@pytest.mark.parametrize("change", ["dropped_template", "forwarded_template", "overridden_model"])
+def test_parent_choice_uses_effective_options_after_gateway_overrides(monkeypatch, tmp_path, change):
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    harness.model.config.forward_request_chat_template_kwargs = change == "forwarded_template"
+    path = "/ng-rollout/attempt/training-token-capture/v1/chat/completions"
+    first = assert_clean(harness.client.post(path, json={"model": "ignored", "messages": HISTORY}))
+    message = first["choices"][0]["message"]
+    items = HISTORY + [{"role": message["role"], "content": message["content"]}, {"role": "user", "content": "next"}]
+    payload = {"model": "different-ignored-model", "messages": items}
+    if change != "overridden_model":
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    assert_clean(harness.client.post(path, json=payload))
+    admission = harness.worker_calls[1][0]
+    root = change == "forwarded_template"
+    assert admission.mode == ("text" if root else "candidate")
+    assert admission.parent_call_id == (None if root else harness.manifest("attempt").records[0].model_call_id)
+    assert bool(admission.staging_chain) is not root

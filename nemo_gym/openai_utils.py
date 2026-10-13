@@ -1385,7 +1385,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
 
-    retry_requests: bool = True
+    retry_requests: bool = Field(
+        default=True,
+        description="Retry transport and HTTP failures. Disable when replaying a request may duplicate generation.",
+    )
 
     default_headers: Dict[str, str] = Field(
         default_factory=dict,

@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Expose rollout capture manifests over HTTP.
+"""Expose rollout capture manifests and admission closure over HTTP.
 
 The training framework reads one manifest for each rollout.
-The endpoint returns call metadata and does not read staged token data.
+The endpoints return call metadata and do not read staged token data.
 The framework builds receipts and removes staged data after use.
 """
 
@@ -29,7 +29,7 @@ def install_rollout_control_routes(
     *,
     auth_token: str,
 ) -> None:
-    """Install the bearer-protected manifest route."""
+    """Install bearer-protected manifest and admission-closure routes."""
     if not auth_token:
         raise ValueError("rollout control routes require a non-empty auth token")
     expected = f"Bearer {auth_token}"
@@ -50,6 +50,21 @@ def install_rollout_control_routes(
         check_auth(authorization)
         try:
             return await lineage_store.manifest(rollout_id)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/rollouts/{rollout_id}/close")
+    async def close_admissions(
+        rollout_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        check_auth(authorization)
+        # Optional ledger extension, like begin_call; ordinary capture is unchanged.
+        close = getattr(lineage_store, "close_admissions", None)
+        if close is None:
+            raise HTTPException(status_code=409, detail="capture ledger cannot close admissions")
+        try:
+            return await close(rollout_id)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 

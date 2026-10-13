@@ -36,10 +36,10 @@ from typing import TYPE_CHECKING, Any
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import stamp_continuation
 from nemo_gym.token_id_capture.protocols import (
+    CaptureAdmissionError,
     CaptureLedger,
     LineageResolution,
     LineageResolver,
-    ParentSelection,
     TokenCaptureFrozenError,
     TokenSink,
 )
@@ -65,7 +65,6 @@ if TYPE_CHECKING:
 # response under ``NG_COMMIT_COORDS_FIELD``.
 NG_CAPTURE_FIELD = "ng_capture"
 NG_COMMIT_COORDS_FIELD = "ng_commit_coords"
-CAPTURE_PARENT_HEADER = "x-nemo-gym-capture-parent"
 
 
 @dataclass
@@ -109,8 +108,8 @@ class CaptureContext:
     admitted_at: float | None = None
     capture_admission: CaptureAdmission | None = None
     parent_staging_chain: list[str] = field(default_factory=list)
-    # Intent registration checks the observed ledger head, not the selected candidate.
-    admitted_latest_call_id: str | None = None
+    # Only admitted writers participate in completion/failure accounting.
+    intent_registered: bool = False
     parent_chain_hash: str = ""
     # The request items as received from the harness, stashed by
     # ``resolve_parent`` so the commit hook can publish the ledger row with
@@ -192,11 +191,7 @@ def reset_token_sink(token: Token) -> None:
     _CAPTURE_CONTEXT.reset(token)
 
 
-async def resolve_parent(
-    request_messages: list | None,
-    *,
-    parent_response_id: str | None | ParentSelection = ParentSelection.INFER,
-) -> None:
+async def resolve_parent(request_messages: list | None) -> None:
     """Resolve which recorded call this request continues.
 
     Use the request representation received from the harness.
@@ -221,10 +216,8 @@ async def resolve_parent(
         return
     context.request_items = list(request_messages)
     if context.framework_owned_context:
-        await _admit_candidate(context, request_messages, parent_response_id=parent_response_id)
+        await _admit_candidate(context, request_messages)
         return
-    if parent_response_id is not ParentSelection.INFER:
-        raise ValueError("Explicit candidate selection requires framework-owned capture")
     try:
         if not assistant_fingerprint(request_messages):
             context.parent_resolution = LineageResolution(ParentResolutionStatus.ROOT)
@@ -319,16 +312,11 @@ async def resolve_parent(
     )
 
 
-async def _admit_candidate(
-    context: CaptureContext,
-    request_items: list[dict],
-    *,
-    parent_response_id: str | None | ParentSelection = ParentSelection.INFER,
-) -> None:
-    """Forward an accepted response as a candidate; RL decides context continuity.
+async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -> None:
+    """Select a source-prefix candidate or a root for rewritten history.
 
-    Without a hint, match existing source-prefix evidence, including an older
-    accepted call after a rejected attempt. Null denotes no accepted predecessor.
+    Match source-prefix evidence, including an older accepted call after a retry.
+    RL still verifies the renderer and converted-message boundary.
     """
     # Deferred to avoid the staging records/sink import cycle.
     from nemo_gym.token_id_capture.replay import replay_context, same_replay_source, summarize_replay
@@ -337,59 +325,50 @@ async def _admit_candidate(
     if not context.external_staging or not isinstance(context.lineage_store, CaptureLedger):
         raise ValueError("Framework context ownership requires an external capture ledger")
     manifest = RolloutManifest.model_validate(await context.lineage_store.manifest(context.rollout_id))
-    if manifest.failures or manifest.pending_call_ids:
-        raise ValueError("Cannot admit a call after incomplete capture in this attempt")
-    predecessor = manifest.records[-1] if manifest.records else None
-    context.admitted_latest_call_id = predecessor.model_call_id if predecessor is not None else None
+    if manifest.failures:
+        raise CaptureAdmissionError("Cannot admit a call after incomplete capture in this attempt")
+    predecessor = None
     request_replay = replay_context(request_items)
-    if parent_response_id is None:
-        predecessor = None
-    elif parent_response_id is not ParentSelection.INFER:
-        matches = [record for record in manifest.records if record.response_id == parent_response_id]
+    prefixes = {}
+    matches = []
+    for record in manifest.records:
+        replay = record.replay
+        if replay is None:
+            raise ValueError("Captured call is missing source replay evidence")
+        if replay.item_count > len(request_replay.items):
+            continue
+        if replay.item_count not in prefixes:
+            prefixes[replay.item_count] = summarize_replay(request_replay, item_count=replay.item_count)
+        suffix = request_replay.items[replay.item_count :]
+        if (
+            # This only proposes a predecessor. RL still requires renderer
+            # proof before using an empty-content-equivalent prefix.
+            same_replay_source(prefixes[replay.item_count], replay, allow_empty_tool_content=True)
+            and suffix
+            and all(item.role in ("user", "tool") for item in suffix)
+        ):
+            matches.append(record)
+    if matches:
+        # Prefer the longest complete prefix. Two equally long occurrences
+        # still need explicit identity; equal text is not acceptance evidence.
+        longest = max(record.replay.item_count for record in matches)
+        matches = [record for record in matches if record.replay.item_count == longest]
+        if len(matches) > 1:
+            echoed_ids = {item.get("id") for item in request_items if item.get("id")}
+            identified = [
+                record
+                for record in matches
+                if record.output_items
+                and any(item.id for item in record.output_items)
+                and all(item.id in echoed_ids for item in record.output_items if item.id)
+            ]
+            if len(identified) == 1:
+                matches = identified
         if len(matches) != 1:
-            raise ValueError("Selected candidate response is missing or ambiguous in this attempt")
+            raise CaptureAdmissionError("Ambiguous source-prefix candidate")
         predecessor = matches[0]
-    else:
-        prefixes = {}
-        matches = []
-        for record in manifest.records:
-            replay = record.replay
-            if replay is None or replay.item_count > len(request_replay.items):
-                continue
-            if replay.item_count not in prefixes:
-                prefixes[replay.item_count] = summarize_replay(request_replay, item_count=replay.item_count)
-            suffix = request_replay.items[replay.item_count :]
-            if (
-                # This only proposes a predecessor. RL still requires renderer
-                # proof before using an empty-content-equivalent prefix.
-                same_replay_source(prefixes[replay.item_count], replay, allow_empty_tool_content=True)
-                and suffix
-                and all(item.role in ("user", "tool") for item in suffix)
-            ):
-                matches.append(record)
-        if matches:
-            # Prefer the longest complete prefix. Two equally long occurrences
-            # still need explicit identity; equal text is not acceptance evidence.
-            longest = max(record.replay.item_count for record in matches)
-            matches = [record for record in matches if record.replay.item_count == longest]
-            if len(matches) > 1:
-                echoed_ids = {item.get("id") for item in request_items if item.get("id")}
-                identified = [
-                    record
-                    for record in matches
-                    if record.output_items
-                    and any(item.id for item in record.output_items)
-                    and all(item.id in echoed_ids for item in record.output_items if item.id)
-                ]
-                if len(identified) == 1:
-                    matches = identified
-            if len(matches) != 1:
-                raise ValueError("Ambiguous source-prefix candidate")
-            predecessor = matches[0]
     chain = []
     if predecessor is not None:
-        if predecessor.replay is None:
-            raise ValueError("Candidate predecessor is missing source replay evidence")
         by_id = {record.model_call_id: record for record in manifest.records}
         current = predecessor
         visited = set()
@@ -408,13 +387,18 @@ async def _admit_candidate(
     context.capture_admission = CaptureAdmission(
         rollout_id=context.rollout_id,
         model_call_id=context.model_call_id,
-        mode="candidate",
+        mode="candidate" if predecessor is not None else "text",
         parent_call_id=predecessor.model_call_id if predecessor is not None else None,
         prev_len=predecessor.cum_len if predecessor is not None else 0,
         parent_chain_hash=predecessor.chain_hash if predecessor is not None else None,
         staging_chain=chain,
         request_replay=request_replay,
         candidate_replay=predecessor.replay if predecessor is not None else None,
+        requires_empty_tool_content_equivalence=(
+            not same_replay_source(prefixes[predecessor.replay.item_count], predecessor.replay)
+            if predecessor is not None
+            else None
+        ),
     )
 
 
@@ -432,7 +416,8 @@ async def register_call_intent() -> None:
         begin = getattr(context.lineage_store, "begin_call", None)
         if begin is None or context.capture_admission is None:
             raise ValueError("Framework-owned capture requires durable call intents")
-        await begin(context.rollout_id, context.model_call_id, context.admitted_latest_call_id)
+        await begin(context.rollout_id, context.model_call_id)
+        context.intent_registered = True
         return
     if context is None or context.token_sink is None:
         return

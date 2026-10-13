@@ -116,13 +116,13 @@ class _BaseExternalCaptureHandler(ABC):
         admission = context.capture_admission
         if admission is None:
             return request_payload
-        if admission.mode == "candidate":
+        if context.framework_owned_context:
             if request_payload.get("truncate_prompt_tokens") is not None or request_payload.get(
                 "continue_final_message"
             ):
                 raise ValueError("Framework context requires explicit history without truncation or assistant prefill")
             if admission.request_replay is None:
-                raise ValueError("Candidate admission is missing source request evidence")
+                raise ValueError("Framework admission is missing source request evidence")
             admission = admission.model_copy(
                 update={
                     "request_replay": admission.request_replay.model_copy(
@@ -132,6 +132,18 @@ class _BaseExternalCaptureHandler(ABC):
                     ),
                 }
             )
+            if admission.mode == "candidate":
+                previous = admission.candidate_replay
+                if previous is None or previous.render_digest is None:
+                    raise ValueError("Missing predecessor render evidence")
+                if previous.render_digest != admission.request_replay.render_digest:
+                    admission = CaptureAdmission(
+                        rollout_id=admission.rollout_id,
+                        model_call_id=admission.model_call_id,
+                        mode="text",
+                        request_replay=admission.request_replay,
+                    )
+                    context.parent_staging_chain = []
             context.capture_admission = admission
             request_payload.pop("required_prefix_token_ids", None)
         return self._prepare_admitted_request(request_payload, admission)
@@ -321,16 +333,16 @@ class _BaseExternalCaptureHandler(ABC):
                         render_digest=admission.request_replay.render_digest,
                     )
                 )
-                if admission.mode == "candidate" and admission.request_replay is not None
+                if context.framework_owned_context and admission.request_replay is not None
                 else None
             ),
         )
         commit = CaptureLedgerCommit(
             rollout_id=context.rollout_id,
             record=record,
-            # Candidate admission reconstructs ancestry from CallRecord parents.
+            # Framework capture reconstructs ancestry from CallRecord parents.
             # Only ordinary capture uses this separately persisted lookup chain.
-            staging_chain=() if admission.mode == "candidate" else tuple(child_staging_chain),
+            staging_chain=() if context.framework_owned_context else tuple(child_staging_chain),
             request_items=list(context.request_items or []),
             response_items=response_items,
         )

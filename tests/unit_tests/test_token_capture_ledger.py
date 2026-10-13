@@ -471,3 +471,27 @@ async def test_unversioned_legacy_token_carrying_row_cannot_resolve_or_anchor_a_
     assert sorted(failure.reason for failure in manifest.failures) == sorted(
         ["ledger_row_missing_response_id", UNRESOLVED_PARENT_REASON]
     )
+
+
+async def test_persisted_replay_and_output_round_trip_without_nested_schema_versions(tmp_path):
+    import json
+
+    from nemo_gym.token_id_capture.completion import output_item_fingerprint
+    from nemo_gym.token_id_capture.replay import replay_context, summarize_replay
+    from nemo_gym.token_id_capture.staging.records import OutputItemEvidence
+
+    store = FileLineageStore(tmp_path)
+    record = _call_record("c1").model_copy(
+        update={
+            "replay": summarize_replay(replay_context([USER_1, ASSISTANT_1])),
+            "output_items": [OutputItemEvidence(fingerprint=output_item_fingerprint(ASSISTANT_1))],
+        }
+    )
+    await store.record(_commit(record, [USER_1], [ASSISTANT_1]))
+    rows = [json.loads(line) for line in (tmp_path / "r1.lineage.jsonl").read_text().splitlines()]
+    persisted = next(row for row in rows if row.get("staging_key"))
+    assert "schema_version" not in persisted["replay"]
+    assert persisted["output_items"]
+    assert all("schema_version" not in item for item in persisted["output_items"])
+    fresh = FileLineageStore(tmp_path)
+    assert RolloutManifest.model_validate(await fresh.manifest("r1")).records == [record]

@@ -97,9 +97,8 @@ from nemo_gym.token_id_capture.completion import completion_metadata
 from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capture_config
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
-from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
+from nemo_gym.token_id_capture.protocols import CaptureAdmissionError, CaptureLedger, LineageResolver
 from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
-from nemo_gym.token_id_capture.sink import CAPTURE_PARENT_HEADER
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -111,17 +110,6 @@ _SSE_KEEPALIVE = b": keep-alive\n\n"
 
 # Stateless; shared by every model server's default /v1/messages handler.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
-
-
-def _decode_capture_parent(value: str) -> str | None:
-    """Decode the accepted-response hint shared by generation and measurement."""
-    try:
-        parent = orjson.loads(value)
-    except orjson.JSONDecodeError as error:
-        raise HTTPException(status_code=422, detail="capture parent must be JSON null or a response ID") from error
-    if parent is not None and (not isinstance(parent, str) or not parent):
-        raise HTTPException(status_code=422, detail="capture parent must be JSON null or a response ID")
-    return parent
 
 
 class ModelExecutionOutcome(TypedDict):
@@ -407,7 +395,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         malformed ``stream`` with the same 422 as before.
         """
         context = current_capture_context()
-        if context is not None and context.framework_owned_context and (body.get("stream") or body.get("n", 1) != 1):
+        if (
+            context is not None
+            and context.framework_owned_context
+            and (body.get("stream") or body.get("n") not in (None, 1))
+        ):
             raise HTTPException(status_code=422, detail="Framework context requires one non-streaming Chat completion")
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
@@ -488,8 +480,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Exact prefix supply and capture share this decision.
         if current_capture_context() is not None:
             request_messages = _request_messages(params)
-            await resolve_parent(request_messages)
-            await register_call_intent()
+            try:
+                await resolve_parent(request_messages)
+                await register_call_intent()
+            except CaptureAdmissionError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
         else:
             request_messages = None
         if "request" in inspect.signature(self.chat_completions).parameters:
@@ -533,20 +528,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
         context = current_capture_context()
-        parent_header = request.headers.get(CAPTURE_PARENT_HEADER)
-        if parent_header is not None and (
-            context is None or not context.external_staging or not context.framework_owned_context
-        ):
-            raise HTTPException(status_code=409, detail="accepted parent selection requires framework-owned capture")
-        if parent_header is not None and request.url.path != "/v1/responses":
-            raise HTTPException(status_code=422, detail="accepted parent selection requires the Responses API")
         if context is not None:
             request_messages = _request_messages(params)
-            if parent_header is None:
+            try:
                 await resolve_parent(request_messages)
-            else:
-                await resolve_parent(request_messages, parent_response_id=_decode_capture_parent(parent_header))
-            await register_call_intent()
+                await register_call_intent()
+            except CaptureAdmissionError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
         else:
             request_messages = None
         if "request" in inspect.signature(self.responses).parameters:
@@ -1433,6 +1421,7 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         or not context.external_staging
         or context.capture_admission is None
         or context.committed
+        or (context.framework_owned_context and not context.intent_registered)
         or context.lineage_store is None
     ):
         return

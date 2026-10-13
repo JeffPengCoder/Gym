@@ -32,7 +32,6 @@ from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
     SimpleResponsesAPIModel,
-    _decode_capture_parent,
     _request_messages,
     start_model_execution,
 )
@@ -67,7 +66,7 @@ from nemo_gym.token_id_capture.external_capture import (
     ExternalCaptureHandler,
     make_external_capture_handler,
 )
-from nemo_gym.token_id_capture.sink import CAPTURE_PARENT_HEADER
+from nemo_gym.token_id_capture.protocols import CaptureAdmissionError
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
@@ -445,6 +444,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise HTTPException(status_code=409, detail="measurement requires external capture")
         if body.stream or body.previous_response_id or body.conversation:
             raise HTTPException(status_code=422, detail="measurement requires explicit non-streaming history")
+        client = self._resolve_client(request)
         context = CaptureContext(
             rollout_id=rollout_id,
             model_call_id="measurement",
@@ -455,16 +455,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
         token = set_token_sink(context)
         try:
-            parent_header = request.headers.get(CAPTURE_PARENT_HEADER)
-            if parent_header is None:
+            try:
                 await resolve_parent(_request_messages(body))
-            else:
-                await resolve_parent(_request_messages(body), parent_response_id=_decode_capture_parent(parent_header))
+            except CaptureAdmissionError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
             chat = self._converter.responses_to_chat_completion_create_params(body)
             processed = self._preprocess_chat_completion_create_params(request, chat.model_dump(exclude_unset=True))
             if processed.get("truncate_prompt_tokens") is not None:
                 raise HTTPException(status_code=422, detail="measurement does not support prompt truncation")
-            result = await self._resolve_client(request).create_tokenize(**self._get_tokenize_chat_body(processed))
+            result = await client.create_tokenize(**self._get_tokenize_chat_body(processed))
         finally:
             reset_token_sink(token)
         count = result.get("prompt_token_count")

@@ -3672,7 +3672,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         server_name=server_name,
                         url_path="/run",
                         json=request_body,
-                        **({"_retry": False} if not retry_requests else {}),
+                        _retry=retry_requests,
                     )
                     await raise_for_status(res)
                     result = await get_response_json(res)
