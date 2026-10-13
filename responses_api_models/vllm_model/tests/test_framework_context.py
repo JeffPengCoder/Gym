@@ -343,14 +343,14 @@ def test_engine_errors_preserve_unacknowledged_intents(monkeypatch, tmp_path, st
         "/ng-rollout/attempt/training-token-capture/v1/responses",
         json={"input": HISTORY, "stream": stream},
     )
-    if stream:
-        # The streaming contract reports the refusal as a terminal event.
+    if stream and status == 400:
+        # A synthesized context refusal becomes a terminal event; provider
+        # errors still preserve their HTTP status before streaming starts.
         assert response.status_code == 200, response.text
         assert "response.failed" in response.text
     else:
-        # Without propagate_context_overflow_errors the refusal surfaces as a
-        # plain server error; the ledger contract below is what matters.
-        assert response.status_code >= 400, response.text
+        # The legacy context-overflow conversion still becomes a server error.
+        assert response.status_code == (500 if status == 400 else status), response.text
     manifest = harness.manifest("attempt")
     assert len(manifest.pending_call_ids) == 1, manifest
     assert [f.reason for f in manifest.failures] == ["request_finished_without_staged_coordinates"]
@@ -518,3 +518,21 @@ def test_parent_choice_uses_effective_options_after_gateway_overrides(monkeypatc
     assert admission.mode == ("text" if root else "candidate")
     assert admission.parent_call_id == (None if root else harness.manifest("attempt").records[0].model_call_id)
     assert bool(admission.staging_chain) is not root
+
+
+@pytest.mark.parametrize("path", ["v1/responses", "v1/chat/completions", "measure"])
+def test_retired_capture_refuses_dispatch_and_measurement(monkeypatch, tmp_path, path):
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    assert_clean(harness.post("attempt", HISTORY))
+    response = harness.client.post(
+        "/training-token-capture/control/rollouts/retire",
+        json={"rollout_ids": ["attempt"]},
+        headers={"Authorization": "Bearer test-control"},
+    )
+    assert response.status_code == 200, response.text
+    url = "/context/attempt/measure" if path == "measure" else f"/ng-rollout/attempt/training-token-capture/{path}"
+    body = {"messages" if path.endswith("completions") else "input": HISTORY}
+    response = harness.client.post(url, json=body)
+    assert response.status_code == 409, response.text
+    assert "retired" in response.json()["detail"]
+    assert len(harness.worker_calls) == 1

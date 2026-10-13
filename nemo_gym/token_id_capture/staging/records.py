@@ -28,6 +28,7 @@ from pydantic import (
     StrictFloat,
     StrictInt,
     StrictStr,
+    ValidationInfo,
     model_serializer,
     model_validator,
 )
@@ -52,7 +53,11 @@ CaptureDisposition = Literal["staged", "capture_failed"]
 CaptureMode = Literal["token_in", "text"]
 Identifier = Annotated[StrictStr, Field(min_length=1)]
 NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
+PositiveInt = Annotated[StrictInt, Field(ge=1)]
 DigestHex = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
+
+# Only the explicit local builder supplies this identity; it is never a wire field.
+_BUILD_STAGING_DIGEST = object()
 
 
 def staging_key(rollout_id: str, model_call_id: str) -> str:
@@ -135,6 +140,34 @@ class ReplaySummary(_WireModel):
     render_digest: DigestHex | None = None
 
 
+class GenerationCutContinuation(_WireModel):
+    """A checkpointed prefix of the same call, which the worker continues instead of regenerating.
+
+    The replacement attempt re-issues the call that was in flight at the checkpoint.
+    The worker reads the staged prefix named by ``staging_keys``, verifies its length and digest,
+    and generates only the remaining tokens within ``effective_output_limit``.
+    A terminal finish reason means the cut captured a finished generation
+    that the worker returns without generating more.
+    """
+
+    source_capture_key: Identifier
+    source_model_call_id: Identifier
+    staging_keys: tuple[Identifier, ...] = Field(min_length=1)
+    prefix_token_count: NonNegativeInt
+    prefix_digest: DigestHex
+    effective_output_limit: PositiveInt
+    terminal_finish_reason: Literal["stop", "length"] | None = None
+    terminal_stop_reason: str | int | None = None
+
+    @model_validator(mode="after")
+    def _validate_staging_keys(self) -> Self:
+        if len(self.staging_keys) != len(set(self.staging_keys)):
+            raise ValueError("generation-cut staging_keys must be unique")
+        if self.terminal_stop_reason is not None and self.terminal_finish_reason is None:
+            raise ValueError("terminal_stop_reason requires terminal_finish_reason")
+        return self
+
+
 class CaptureAdmission(_WireModel):
     """Gate-to-worker identity and exact-prefix contract for one model call.
 
@@ -153,6 +186,7 @@ class CaptureAdmission(_WireModel):
     required_prefix_token_ids: list[StrictInt] = Field(default_factory=list)
     staging_chain: list[str] = Field(default_factory=list)
     parent_chain_hash: DigestHex | None = None
+    generation_cut: GenerationCutContinuation | None = None
     request_replay: ReplayContext | None = None
     candidate_replay: ReplaySummary | None = None
     # Gym matched source history; RL qualifies the actual renderer when needed.
@@ -227,7 +261,7 @@ class StagedCallBaseSnapshot(_DigestWireModel):
         return staging_key(self.rollout_id, self.model_call_id)
 
     @model_validator(mode="after")
-    def _validate_base_integrity(self) -> Self:
+    def _validate_base_integrity(self, info: ValidationInfo) -> Self:
         if self.parent_call_id is None and self.prev_len != 0:
             raise ValueError("a parentless staged call must have prev_len == 0")
         if self.parent_call_id is not None and self.prev_len == 0:
@@ -266,7 +300,10 @@ class StagedCallBaseSnapshot(_DigestWireModel):
             chain_hash=self.chain_hash,
             cumulative_hash=self.cumulative_hash,
         )
-        if self.digest != actual_digest:
+        if info.context is _BUILD_STAGING_DIGEST:
+            # Construction-time assignment requires a mutable model without validate_assignment.
+            self.digest = actual_digest
+        elif self.digest != actual_digest:
             raise ValueError("digest does not match staged call contents")
         return self
 
@@ -275,6 +312,66 @@ class StagedCallRecord(StagedCallBaseSnapshot):
     """One normalized token delta made durable by a framework staging sink."""
 
     extras: dict[str, Any] | None = None
+
+    @classmethod
+    def from_components(
+        cls,
+        *,
+        rollout_id: str,
+        model_call_id: str,
+        parent_call_id: str | None,
+        mode: CaptureMode,
+        prev_len: int,
+        delta_len: int,
+        cum_len: int,
+        weight_version: int,
+        token_ids_delta: list[int],
+        token_mask_delta: list[float],
+        generation_log_probs_delta: list[float],
+        extras: dict[str, Any] | None,
+        extras_digest: str,
+        chain_hash: str,
+        cumulative_hash: str,
+    ) -> Self:
+        """Validate local components and compute their digest exactly once.
+
+        Runs normal field, integrity, and extras validators. Wire constructors
+        still require a supplied digest and verify it against the contents.
+
+        Raises:
+            ValueError: A mask or log probability is not an exact Python float.
+            ValidationError: Other components fail field or integrity validation.
+        """
+        # Pydantic StrictFloat accepts integers. Local builders historically
+        # hashed before model construction and required exact Python floats.
+        for name, values in (
+            ("token_mask_delta", token_mask_delta),
+            ("generation_log_probs_delta", generation_log_probs_delta),
+        ):
+            if any(type(value) is not float for value in values):
+                raise ValueError(f"{name} values must be Python floats")
+        return cls.model_validate(
+            {
+                "rollout_id": rollout_id,
+                "model_call_id": model_call_id,
+                "parent_call_id": parent_call_id,
+                "mode": mode,
+                "prev_len": prev_len,
+                "delta_len": delta_len,
+                "cum_len": cum_len,
+                "weight_version": weight_version,
+                "token_ids_delta": token_ids_delta,
+                "token_mask_delta": token_mask_delta,
+                "generation_log_probs_delta": generation_log_probs_delta,
+                "extras": extras,
+                "extras_digest": extras_digest,
+                "chain_hash": chain_hash,
+                "cumulative_hash": cumulative_hash,
+                # Replaced by the integrity validator, after field validation.
+                "digest": "0" * 64,
+            },
+            context=_BUILD_STAGING_DIGEST,
+        )
 
     @model_validator(mode="after")
     def _validate_extras_integrity(self) -> Self:
@@ -385,6 +482,12 @@ class CallRecord(_DigestWireModel):
     finish_reason: str | None = None
     last_output_item: dict | None = None
 
+    # The capture key this call was staged under, when it is not the receipt's own.
+    # A checkpoint restore continues an episode under its next attempt,
+    # and the calls made before the checkpoint stay staged under the earlier attempt's key.
+    # ``None`` means the receipt's own rollout staged the call.
+    capture_key: Identifier | None = None
+
     @model_validator(mode="after")
     def _validate_lengths(self) -> Self:
         if self.delta_len == 0 or self.cum_len != self.prev_len + self.delta_len:
@@ -432,6 +535,15 @@ class RolloutManifest(_WireModel):
     # or wrote nothing. A terminal consumer may mask the attempt, but must leave
     # these calls' possible late staging writes out of immediate cleanup.
     pending_call_ids: list[Identifier] = Field(default_factory=list)
+
+
+class RolloutRemoval(_WireModel):
+    """The result of retiring or deleting rollouts in a capture store or ledger."""
+
+    # Rollouts whose captured data existed and was removed.
+    removed: list[Identifier] = Field(default_factory=list)
+    # Rollouts with no captured data: already removed, or never recorded a call.
+    absent: list[Identifier] = Field(default_factory=list)
 
 
 class RolloutReceipt(_DigestWireModel):

@@ -20,7 +20,7 @@ from time import perf_counter, time
 from typing import Any
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -56,7 +56,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.server_utils import request as http_request
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 
@@ -64,12 +64,16 @@ from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 LOG = logging.getLogger(__name__)
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+RESOURCE_ONLY_METADATA_KEYS = frozenset(
+    {"baseline_response", "baseline_model", "baseline_dataset_file", "baseline_row_index"}
+)
 
 
 @dataclass
 class SimpleAgentSessionState(AgentSessionState):
     tool_access: DirectHTTPToolAccess | None
-    resources_cookies: dict[str, str]
+    # None means the session holds no resources cookie jar, so close leaves the Environment Server's jar unchanged.
+    resources_cookies: dict[str, str] | None
     observations: AgentObservationBundle | None = None
     activations: int = 0
 
@@ -78,6 +82,13 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     max_steps: int = None
+    execute_tools: bool = Field(
+        default=True,
+        description=(
+            "Whether to execute model-requested tools. Disabling tool execution is supported only for agent-session "
+            "requests, where unresolved function calls are returned to the Environment Server."
+        ),
+    )
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -93,8 +104,17 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 
 
 class SimpleAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: SimpleAgentConfig
+
+    @staticmethod
+    def _strip_resource_only_metadata(
+        body: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        # Keep judge-only baseline data out of policy requests to avoid unnecessary payload.
+        metadata = dict(body.metadata or {})
+        for key in RESOURCE_ONLY_METADATA_KEYS:
+            metadata.pop(key, None)
+        return body.model_copy(update={"metadata": metadata or None})
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
         if body.sandbox_access is not None:
@@ -112,7 +132,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return SimpleAgentSessionState(
             request=body,
             tool_access=direct_access,
-            resources_cookies=dict(direct_access.cookies) if direct_access is not None else {},
+            resources_cookies=dict(direct_access.cookies) if direct_access is not None else None,
         )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
@@ -132,6 +152,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         resources_server_cookies: Any = None,
         tool_access: DirectHTTPToolAccess | None = None,
         in_session: bool = False,
+        execute_tools: bool = True,
         invocation_id: str = "root",
         task_id: str = "unscoped",
         rollout_id: str = "unscoped",
@@ -142,6 +163,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         turns: list[TrajectoryTurn] = []
         trajectory_gaps: list[ObservationGap] = []
         body = body.model_copy(deep=True)
+        body = self._strip_resource_only_metadata(body)
 
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -243,6 +265,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         rollout_id,
                         step,
                     )
+                break
+
+            if not execute_tools:
                 break
 
             for output_function_call in all_fn_calls:
@@ -359,6 +384,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         state = self._require_agent_session(agent_session_id) if agent_session_id is not None else None
         if state is not None and not isinstance(state, SimpleAgentSessionState):
             raise TypeError("Expected Simple Agent session state")
+        if state is None and not self.config.execute_tools:
+            raise ValueError(
+                "Simple Agent execute_tools=false is supported only for agent-session requests; "
+                "seed an agent session before calling /v1/responses"
+            )
         invocation_id = "root"
         if state is not None:
             # A session spans several activations, and its observations keep one invocation per activation.
@@ -372,12 +402,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             resources_server_cookies=state.resources_cookies if state is not None else request.cookies,
             tool_access=state.tool_access if state is not None else None,
             in_session=state is not None,
+            execute_tools=self.config.execute_tools,
             invocation_id=invocation_id,
             rollout_id=rollout_id or "unscoped",
             collect_trajectory=collect_trajectory,
         )
         if state is not None:
-            state.resources_cookies = dict(resources_server_cookies or {})
+            if state.tool_access is not None:
+                state.resources_cookies = dict(resources_server_cookies or {})
             if trajectory is not None:
                 # A session returns agent evidence at close, where the Environment Server records it.
                 previous = state.observations
@@ -401,6 +433,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+        if not self.config.execute_tools:
+            raise ValueError(
+                "Simple Agent execute_tools=false is supported only for agent-session requests; "
+                "the legacy /run route requires execute_tools=true"
+            )
         if self.config.resources_server is None:
             raise ValueError("resources_server is required when invoking the legacy Simple Agent /run route")
         cookies = request.cookies
@@ -417,7 +454,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         response = await self.server_client.post(
             server_name=self.config.name,
             url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
+            json=self._strip_resource_only_metadata(body.responses_create_params),
             cookies=cookies,
         )
         await raise_for_status(response)
@@ -499,3 +536,5 @@ def _cookies(response: Any) -> dict[str, str]:
 
 if __name__ == "__main__":
     SimpleAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = SimpleAgent.run_webserver()  # noqa: F401
