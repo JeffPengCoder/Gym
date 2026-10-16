@@ -20,6 +20,7 @@ from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant
 from nemo_gym.token_id_capture.protocols import CaptureLedger
 from nemo_gym.token_id_capture.records import (
     TOKEN_FIELDS,
+    response_finish_reason,
     response_to_output_items,
     strip_token_fields,
 )
@@ -288,7 +289,7 @@ class _BaseExternalCaptureHandler(ABC):
             str(coords.staging_key)
         ]
         response_items, _ = strip_token_fields(response_to_output_items(served_payload))
-        response_status, finish_reason = completion_metadata(served_payload)
+        response_status, _ = completion_metadata(served_payload)
         evidence_items = completion_items(served_payload)
         # Content-witness keys, hashed while the response is still
         # server-side: this call's own output, and request + output (the
@@ -324,7 +325,7 @@ class _BaseExternalCaptureHandler(ABC):
                 for item in evidence_items
             ],
             response_status=response_status,
-            finish_reason=finish_reason,
+            finish_reason=response_finish_reason(served_payload),
             last_output_item=output_validation_item(evidence_items[-1]) if evidence_items else None,
             output_fingerprint=output_fingerprint,
             continuation_fingerprint=continuation_fingerprint,
