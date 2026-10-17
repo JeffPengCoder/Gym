@@ -53,6 +53,9 @@ class VisualBrowserDriverConfig(WebResourcesServerConfig):
     task_image_root: str | None = None
     max_task_image_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
     max_evidence_screenshots: int = Field(default=200, ge=1, le=500)
+    # Debug only: log one JSON record per screenshot with timing and page state
+    # (event=visual_browser_debug_capture). Off in every scored profile.
+    debug_capture_log: bool = False
 
     @model_validator(mode="after")
     def validate_visual_browser(self) -> "VisualBrowserDriverConfig":
@@ -342,6 +345,7 @@ class VisualBrowserDriver:
         if self._page is None:
             raise RuntimeError("visual browser has not been reset")
         self._last_action = action.raw_model_output or action.name
+        self._debug_step_started = time.time()
         self._last_error = ""
         execution_ok = True
         started = time.monotonic()
@@ -588,9 +592,49 @@ class VisualBrowserDriver:
             config["password"] = unquote(parsed.password)
         return config
 
+    def _debug_page_state(self) -> dict[str, Any]:
+        try:
+            return self._page.evaluate(
+                """() => ({readyState: document.readyState, hasFocus: document.hasFocus(),
+                visibility: document.visibilityState, scrollX: window.scrollX, scrollY: window.scrollY,
+                innerWidth: window.innerWidth, innerHeight: window.innerHeight,
+                screenX: window.screenX, screenY: window.screenY, outerWidth: window.outerWidth,
+                outerHeight: window.outerHeight,
+                activeTag: document.activeElement ? document.activeElement.tagName : null,
+                resources: performance.getEntriesByType('resource').length,
+                loadEnd: (performance.getEntriesByType('navigation')[0] || {}).loadEventEnd || null})"""
+            )
+        except Exception as exc:  # noqa: BLE001 - debug probe must never change the rollout
+            return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
     def _capture(self) -> WebObservation:
         from PIL import ImageGrab
 
+        if self.config.debug_capture_log and self._page is not None:
+            import json as _json
+
+            now = time.time()
+            started = getattr(self, "_debug_step_started", None)
+            input_done = getattr(self, "_debug_last_input_done", None)
+            LOG.info(
+                "event=visual_browser_debug_capture %s",
+                _json.dumps(
+                    {
+                        "session": self.session_id,
+                        "task": self._task.task_id if self._task is not None else None,
+                        "step": self._step,
+                        "pid": os.getpid(),
+                        "display": os.environ.get("DISPLAY"),
+                        "ts": round(now, 3),
+                        "since_step_start": round(now - started, 3) if started else None,
+                        "since_last_input": round(now - input_done, 3) if input_done else None,
+                        "url": self._page.url[:300],
+                        "pages": len(self._context.pages) if self._context is not None else None,
+                        "page": self._debug_page_state(),
+                    },
+                    sort_keys=True,
+                ),
+            )
         image = ImageGrab.grab(xdisplay=os.environ.get("DISPLAY"))
         screenshot = self.artifacts.save_screenshot(self.session_id, self._step, image)
         if screenshot.artifact is not None:
@@ -787,6 +831,7 @@ class VisualBrowserDriver:
         else:
             raise ValueError(f"unsupported computer action: {name}")
         time.sleep(0.3)
+        self._debug_last_input_done = time.time()
 
     def _pixel(self, coordinate: Any) -> tuple[int, int]:
         if not isinstance(coordinate, (list, tuple)) or len(coordinate) != 2:
