@@ -1,5 +1,11 @@
 # Complete Nemotron 3 Nano Omni OSWorld profile: the upstream agent scaffold,
 # the external vLLM transport, and Gym Docker Sandbox execution.
+#
+# The sampling, step and history values below are the tested recipe. They
+# reproduce the reference scores only when vLLM serves the checkpoint as
+# described under "Serve the checkpoint" in benchmarks/osworld/README.md: chat
+# template SHA-256 ab7813c3abdd9cb655905a410728b26c7884eca45ddfab8d9f931553485a7862
+# and the nano_v3 reasoning parser.
 config_paths:
   - responses_api_agents/osworld_agent/configs/osworld_agent.yaml
 
