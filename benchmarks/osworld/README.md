@@ -294,6 +294,31 @@ the quickstart.
 profile for every request, so pass these flags only to change the recipe on
 purpose.
 
+#### Tune the output limit
+
+The per-step output limit is tunable. The profile uses 4096 tokens, and the
+AgentENV reference runs passed `--max-output-tokens 16384`. Both values
+produced the reference scores below; they were not compared in isolation.
+
+Reasoning tokens count against the limit. A response that reaches it ends with
+`finish_reason='length'`, and the agent rejects it as unfinished and samples
+again. A rollout whose retries also reach the limit ends with
+`termination_reason=model_output_truncated`. To choose a value:
+
+1. Run a representative sample of tasks with the profile's value.
+2. Count the model calls whose `finish_reason` is `length` and the rollouts
+   that end with `model_output_truncated`. Each rollout's trajectory record and
+   the [full model I/O log](#full-model-io) record `finish_reason` for every
+   model call.
+3. If more than a small share of calls stop at the limit, raise it with
+   `--max-output-tokens`. At 16384, one AgentENV run had 1 of its 15,565 model
+   calls stop at the limit.
+4. Keep the longest prompt plus the limit within the server's
+   `--max-model-len`. With three screenshots, prompts in the reference runs
+   reached about 38,000 tokens at most (P99 about 24,000), so 16384 fits in
+   64,000.
+5. Report the value with the results.
+
 #### Reference scores for Omni v3
 
 Use these Omni v3 results on the 361 tasks to check that a deployment follows
@@ -763,7 +788,8 @@ Its `temperature=0.6` and `top_p=0.95` values follow NVIDIA's thinking-mode
 recommendation in the
 [checkpoint model card](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16/blob/24e67ea000b7c2837fc8f9488aa2008524fac8ba/README.md#model-parameters).
 The 4096-token output limit is the tested OSWorld agent setting rather than the
-model card's longer general-purpose reasoning budget; these values are
+model card's longer general-purpose reasoning budget, and it can be tuned as
+described in [Tune the output limit](#tune-the-output-limit); these values are
 model-specific and do not change defaults for other runners.
 
 ### Proxy-required tasks
