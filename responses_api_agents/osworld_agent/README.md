@@ -183,8 +183,9 @@ the same executable payload twice; this behavior is part of the standard
 `NemotronV3NanoOmniAgent`, not a run-local subclass or import overlay.
 
 The response this parser reads also depends on how the model is served. The
-Nano Omni chat template and `nano_v3` reasoning parser are listed under
-[Serve the checkpoint](../../benchmarks/osworld/README.md#serve-the-checkpoint).
+chat template and `nano_v3` reasoning parser for Omni v3 are listed under
+[Serve the checkpoint](../../benchmarks/osworld/README.md#serve-the-checkpoint);
+other Nemotron generations ship their own tokenizer, template and parser.
 
 When adding or upgrading a model, capture representative lossless responses
 and add focused parser regressions for heading placement, fenced and unfenced

@@ -198,8 +198,11 @@ Docker daemon on the environment host validates that the device is available.
 
 ### Nemotron 3 Nano Omni with vLLM
 
-The Nano Omni profile reproduces the tested benchmark only together with the
-serving configuration below. The profile fixes the agent side: the
+This section applies to Nemotron 3 Nano Omni, the Omni v3 checkpoint
+`nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` at revision
+`24e67ea000b7c2837fc8f9488aa2008524fac8ba`. The `nano_omni` profile reproduces
+the tested benchmark only together with the serving configuration below. The
+profile fixes the agent side: the
 `NemotronV3NanoOmniAgent` prompt and response parser, 100 steps, the fixed
 three-image history, temperature 0.6, top_p 0.95, and a 4096-token output limit
 per step. The model server must use the same chat template and reasoning parser.
@@ -221,6 +224,19 @@ serves the checkpoint's separate `chat_template.jinja` (SHA-256
 `nemotron_v3` parser. Keep the checkpoint's own tokenizer: the text-only
 tokenizer in the 30B repository does not match the Omni processor's image
 placeholders.
+
+The tokenizer, chat template and reasoning parser belong to this checkpoint
+revision and change as the models evolve. A later revision of this checkpoint,
+or another Nemotron generation such as Nemotron 3.5 Super or Nemotron 4, ships
+its own tokenizer and chat template and may need a different reasoning parser.
+For example, the Nemotron 3.5 Super launchers in
+`benchmarks/nemotron_3.5_super/vllm_configs/` serve that checkpoint's own
+template with vLLM's `nemotron_v3` parser. Take each model's tokenizer, template
+and parser from its own checkpoint and model card, and record their digests as
+in the table above. Do not reuse this section's files, digests or reference
+scores for another model. Validate the `nano_omni` profile before using it with
+one: its `model_protocol_id` (`nano-omni-v3-osworld-v1`), prompt and response
+parser were validated on Omni v3 only.
 
 With the checkpoint's default template and the built-in parser, many responses
 put a literal `\n` before `## Action`. An agent with a strict action parser
@@ -278,10 +294,11 @@ the quickstart.
 profile for every request, so pass these flags only to change the recipe on
 purpose.
 
-#### Reference scores
+#### Reference scores for Omni v3
 
-Use these results on the 361 tasks to check that a deployment follows the
-recipe. Repeated runs of one configuration have differed by 1.2 to 2.8 points.
+Use these Omni v3 results on the 361 tasks to check that a deployment follows
+the recipe. Repeated runs of one configuration have differed by 1.2 to 2.8
+points.
 
 | Backend | Proxy-required tasks | Output limit | Raw reward rate | Binary success rate |
 | --- | --- | ---: | ---: | ---: |
@@ -443,8 +460,9 @@ The `gym_agentenv` backend restores each task's desktop from an AgentENV
 (kvcache-ai/AgentENV) template and drives it through Gym's E2B provider, because
 AgentENV implements the E2B control-plane API. The template must contain the
 OSWorld guest, so there is no qcow2 to pass. `configs/osworld_agentenv.yaml`
-documents the provider settings. This backend needs the E2B service endpoints
-(`E2BProvider.endpoint()` and `connection.port_routing`) added in #4822.
+documents the provider settings, including the gateway routing
+(`connection.port_routing`) that `E2BProvider.endpoint()` uses to reach the
+guest's service ports.
 
 ```bash
 export AGENTENV_URL=https://AGENTENV_CONTROL_PLANE
@@ -735,8 +753,9 @@ defaults, and explicit CLI overrides have the highest priority. `prepare.py`
 writes `responses_create_params` into `env.yaml` only for the sampling flags
 passed to it, so a profile's own values apply otherwise.
 
-The Nano Omni overlay uses the tested three-image window, a 4096-token response
-limit, a five-second post-action wait, and parser retries. Optional parser-error
+The Nano Omni overlay, tested with the Omni v3 checkpoint, uses the
+three-image window, a 4096-token response limit, a five-second post-action
+wait, and parser retries. Optional parser-error
 feedback, repeated-action guidance, and a pre-DONE checklist are available in
 `agent_kwargs` without requiring another agent class.
 
