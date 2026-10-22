@@ -372,7 +372,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     ray_task_resources: Dict[str, float] = Field(default_factory=dict)
     docker_port_lock_timeout: float = Field(default=300.0, gt=0)  # concurrent Docker VM port allocation
     evaluator_disable_gpu: bool = True
-    reward_mode: Literal["binary", "raw"] = "binary"
+    reward_mode: Literal["binary", "raw", "signed_v1"] = "binary"  # see reward_modes.py
     runner_name: str = DEFAULT_RUNNER_NAME
     action_space: Optional[str] = None
     observation_type: Optional[str] = None
