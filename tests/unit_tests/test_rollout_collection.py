@@ -6468,7 +6468,7 @@ class TestRunExamplesAclose:
         consumed = asyncio.Queue()
         consumer_calls = 0
 
-        async def post(server_name, url_path, json):  # noqa: A002
+        async def post(server_name, url_path, json, *, _retry=True):  # noqa: A002
             index = json[TASK_INDEX_KEY_NAME]
             await gates[index].wait()
             return FakeResponse(200, {"task": index})
@@ -6517,7 +6517,7 @@ class TestRunExamplesAclose:
         gate = asyncio.Event()
         finished = asyncio.Event()
 
-        async def post(server_name, url_path, json):  # noqa: A002
+        async def post(server_name, url_path, json, *, _retry=True):  # noqa: A002
             index = json[TASK_INDEX_KEY_NAME]
             if index != 0:
                 await asyncio.Event().wait()
@@ -6561,7 +6561,7 @@ class TestRunExamplesAclose:
         finished = asyncio.Event()
         started, cancelled = [], []
 
-        async def post(server_name, url_path, json):  # noqa: A002
+        async def post(server_name, url_path, json, *, _retry=True):  # noqa: A002
             index = json[TASK_INDEX_KEY_NAME]
             started.append(index)
             try:
@@ -6758,7 +6758,7 @@ class TestRunExamplesAclose:
 
     @staticmethod
     def _helper(slow_task_indices: set, started: list, cancelled: list) -> RolloutCollectionHelper:
-        async def post(server_name, url_path, json):  # noqa: A002
+        async def post(server_name, url_path, json, *, _retry=True):  # noqa: A002
             task_index = json[TASK_INDEX_KEY_NAME]
             started.append(task_index)
             if task_index in slow_task_indices:
