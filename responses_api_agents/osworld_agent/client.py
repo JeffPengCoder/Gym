@@ -46,6 +46,8 @@ from responses_api_agents.osworld_agent.rollout_outcome import (
     classify_rollout_outcome,
 )
 from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
+from responses_api_agents.osworld_agent.reward_modes import REWARD_MODES, reward_from_score
+from responses_api_agents.osworld_agent.taskgen_plugins import register_task_plugins
 from responses_api_agents.osworld_agent.runtime_errors import (
     OSWorldActionTimeoutError,
     OSWorldModelTimeoutError,
@@ -1731,7 +1733,7 @@ def run_osworld_task(
     this module on a machine without OSWorld installed still works — only
     actually *running* a rollout requires it.
     """
-    if reward_mode not in {"raw", "binary"}:
+    if reward_mode not in REWARD_MODES:
         raise ValueError(f"Unsupported reward_mode: {reward_mode!r}")
     if step_timeout <= 0:
         raise ValueError("step_timeout must be positive")
@@ -1990,6 +1992,11 @@ def run_osworld_task(
             LOG.info(
                 "Linked %d pre-staged setup cache entries for task %s", linked_cache_files, _safe_task_id(task_config)
             )
+        # Generated tasks may judge with getters/metrics they carry themselves; DesktopEnv resolves them by name
+        # during reset(), so they are registered first (and refused on the remote Resources Server path).
+        plugin_functions = register_task_plugins(task_config, remote=use_remote_resources)
+        if plugin_functions:
+            LOG.info("Registered %d task evaluator plugin function(s) for task %s", len(plugin_functions), _safe_task_id(task_config))
         rollout_phase = "environment_reset"
         env.reset(task_config=task_config)
         if use_gym_sandbox and runner_spec.kind == "pointer_agent":
@@ -2584,10 +2591,7 @@ def run_osworld_task(
             except Exception:
                 LOG.exception("env.close() raised")
 
-    if reward_mode == "raw":
-        reward = float(final_score)
-    else:
-        reward = 1.0 if final_score >= 1.0 else 0.0
+    reward = reward_from_score(reward_mode, final_score, agent_terminal_action)
 
     if timed_out:
         infrastructure_failure_reason = "timeout"
