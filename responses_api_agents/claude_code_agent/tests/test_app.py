@@ -873,6 +873,56 @@ class TestRolloutCorrelation:
         assert base_url == "http://model-server:9000/ng-rollout/task3-roll1/training-token-capture"
 
 
+class TestModelCallEnvironment:
+    """A Gym model server sends a reply only once it is fully generated, so the CLI must wait for it."""
+
+    MODEL_CALL_TIMEOUTS = {"API_FORCE_IDLE_TIMEOUT", "API_TIMEOUT_MS", "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS"}
+
+    def _run_and_capture_env(self, agent: ClaudeCodeAgent, tmp_path: Path) -> dict[str, str]:
+        captured: dict = {}
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b'{"type":"result","usage":{"input_tokens":1,"output_tokens":1}}\n', b""
+
+        async def fake_exec(*cmd, **kwargs):
+            captured["env"] = kwargs["env"]
+            return FakeProc()
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            asyncio.run(agent._run_claude_code("hi"))
+        return captured["env"]
+
+    def test_model_calls_may_run_as_long_as_the_run_behind_a_gym_model_server(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name in self.MODEL_CALL_TIMEOUTS | {"CLAUDE_CODE_MAX_CONTEXT_TOKENS"}:
+            monkeypatch.delenv(name, raising=False)
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            timeout=1800,
+            max_context_tokens=131072,
+        )
+        env = self._run_and_capture_env(agent, tmp_path)
+        assert env["API_FORCE_IDLE_TIMEOUT"] == "0"
+        assert env["API_TIMEOUT_MS"] == env["CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS"] == "1800000"
+        assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "131072"
+
+    def test_direct_anthropic_endpoint_keeps_the_cli_timeouts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name in self.MODEL_CALL_TIMEOUTS | {"CLAUDE_CODE_MAX_CONTEXT_TOKENS"}:
+            monkeypatch.delenv(name, raising=False)
+        env = self._run_and_capture_env(_make_agent(anthropic_base_url="https://api.anthropic.com"), tmp_path)
+        assert not (self.MODEL_CALL_TIMEOUTS | {"CLAUDE_CODE_MAX_CONTEXT_TOKENS"}) & set(env)
+
+
 class TestExtractInstruction:
     def test_user_only(self) -> None:
         items = [NeMoGymEasyInputMessage(role="user", content="hello")]

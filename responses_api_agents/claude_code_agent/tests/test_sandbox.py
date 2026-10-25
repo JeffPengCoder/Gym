@@ -442,6 +442,33 @@ async def test_sandbox_only_receives_direct_credentials_without_gym_model_server
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_server", [None, {"type": "responses_api_models", "name": "policy"}])
+async def test_model_call_timeouts_follow_the_activation_deadline_behind_a_gym_model_server(monkeypatch, model_server):
+    instance = agent(
+        model_server=model_server, anthropic_base_url="http://direct", timeout=300, max_context_tokens=262144
+    )
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+    )
+    execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(""))
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
+    monkeypatch.setattr(app.ClaudeCodeAgent, "_resolve_call_base_url", lambda *_: "http://model-server")
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Question", metadata={"agent_timeout_sec": "212.5"})
+    await instance._sandbox_response(state, body, prompt="Question", system=None)
+    env = execute.await_args.args[0]["env"]
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "262144"
+    if model_server:
+        # One call may use the task's whole 212.5 s deadline without the CLI resending it.
+        assert env["API_FORCE_IDLE_TIMEOUT"] == "0"
+        assert env["API_TIMEOUT_MS"] == env["CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS"] == "212500"
+    else:
+        # A direct Anthropic endpoint streams as it generates; keep the CLI's own timeouts.
+        assert not {"API_FORCE_IDLE_TIMEOUT", "API_TIMEOUT_MS", "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS"} & set(env)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("timed_out,expected", [(False, "cancelled"), (True, "timeout")])
 async def test_cancelled_activation_reports_sandbox_outcome(monkeypatch, timed_out, expected):
     instance = agent()

@@ -98,6 +98,9 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     claude_code_version: Optional[str] = None
     thinking: Optional[str] = None
     max_thinking_tokens: Optional[int] = None
+    # Context window the CLI assumes, via CLAUDE_CODE_MAX_CONTEXT_TOKENS. The CLI knows the window only for
+    # Anthropic model names and uses its own default for any other model, such as one served by a Gym model server.
+    max_context_tokens: Optional[int] = Field(default=None, gt=0)
     # Runtime capability knobs. The default (bare=True, no mcp_config/settings) reproduces the original
     # isolated behavior: Claude Code skips hooks, LSP, plugin sync, attribution, auto-memory, background
     # prefetches, keychain reads, and CLAUDE.md auto-discovery (skills still resolve via /skill-name).
@@ -201,6 +204,28 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             user_env = user_settings.get("env") or {}
             settings = {**settings, **user_settings, "env": {**settings["env"], **user_env}}
         return settings
+
+    def _model_call_env(self, *, run_timeout_s: float) -> dict[str, str]:
+        """Return the CLI environment for model calls, given the deadline of the run that makes them.
+
+        A Gym model server sends its ``/v1/messages`` stream only after the whole reply is generated, so the CLI
+        receives no bytes while the model generates. The CLI's HTTP client then gives up after 361 seconds of
+        silence and resends the request, whatever ``API_TIMEOUT_MS`` says, unless ``API_FORCE_IDLE_TIMEOUT`` is 0
+        (observed with Claude Code 2.1.302). Its per-call timeout and its subagent stall timeout, which ends a
+        subagent after 600 seconds without progress, would cut a long generation the same way, so behind a Gym
+        model server both follow the run's own deadline instead.
+        """
+        env: dict[str, str] = {}
+        if self.config.model_server:
+            call_timeout_ms = str(max(1, int(run_timeout_s * 1000)))
+            env.update(
+                API_FORCE_IDLE_TIMEOUT="0",
+                API_TIMEOUT_MS=call_timeout_ms,
+                CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS=call_timeout_ms,
+            )
+        if self.config.max_context_tokens is not None:
+            env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(self.config.max_context_tokens)
+        return env
 
     def _setup_config_dir(self, skills_path: Optional[str] = None) -> Path:
         """Create a per-run CLAUDE_CONFIG_DIR and stage settings (and optionally skills) into it.
@@ -317,6 +342,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             if base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
                 env["ANTHROPIC_AUTH_TOKEN"] = api_key or "local"
+            env.update(self._model_call_env(run_timeout_s=self.config.timeout))
 
             cmd = self._build_command(
                 model,
@@ -687,6 +713,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         directory = state.session.session_dir
         base_url = self._resolve_call_base_url(state.request.episode_id.capture_key)
         model = self.config.model if base_url else self.config.model.split("/")[-1]
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         env = {
             "CLAUDE_CONFIG_DIR": directory + "/config",
             "IS_SANDBOX": "1",
@@ -704,6 +731,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 ANTHROPIC_BASE_URL=base_url,
                 ANTHROPIC_AUTH_TOKEN="gym" if self.config.model_server else self.config.anthropic_api_key or "local",
             )
+        env.update(self._model_call_env(run_timeout_s=timeout))
         artifacts = None
         failure = None
         try:
@@ -725,7 +753,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "mcp_config": self._get_static_mcp_config() if mcp_config else None,
                         "skills_path": skills_path,
                     },
-                    timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
+                    timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
                 )
         except BaseException as error:

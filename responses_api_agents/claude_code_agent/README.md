@@ -48,6 +48,8 @@ gym env start \
 
 This path needs only the model server's `policy_base_url`, `policy_api_key`, and `policy_model_name` (in `env.yaml` or as `+` overrides) — no `anthropic_*` vars.
 
+A Gym model server streams a `/v1/messages` reply only after the whole reply is generated, so the CLI receives no bytes while the model generates. With `model_server` set, the agent therefore sets `API_FORCE_IDLE_TIMEOUT=0`; otherwise the CLI resends any call that takes longer than 361 seconds. It also sets the CLI's per-call timeout (`API_TIMEOUT_MS`) and its subagent stall timeout (`CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS`, 600 seconds by default) to the run's `timeout`. The CLI knows context windows only for Anthropic model names, so set `max_context_tokens` to the served model's window.
+
 Use `vllm_model` for OpenAI-compatible **chat** endpoints (vLLM, NVIDIA build, most providers) — it forwards to `/chat/completions`. `openai_model` forwards to the OpenAI **Responses** API (`/responses`), which only OpenAI/Azure implement, so it 404s against chat-only providers.
 
 ### Run the agent
@@ -113,6 +115,7 @@ claude_code_agent:
       claude_code_version: null
       thinking: null
       max_thinking_tokens: null
+      max_context_tokens: null
       bare: true
       mcp_config: null
       settings: null
@@ -130,6 +133,7 @@ claude_code_agent:
 - `claude_code_version`: npm version to pin on auto-install (null means latest)
 - `thinking`: passed to `--thinking` (`disabled`, `adaptive`, or `enabled`)
 - `max_thinking_tokens`: passed to `--max-thinking-tokens` to cap thinking token usage
+- `max_context_tokens`: context window the CLI assumes, set as `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. The CLI knows the window only for Anthropic model names; set this for any other model
 - `bare`: when `true` (default), pass `--bare` to skip auto-discovery of hooks, skills, plugins, MCP servers, memory, and CLAUDE.md. Set to `false` to let Claude Code discover those from `CLAUDE_CONFIG_DIR` and the working directory
 - `mcp_config`: path to an MCP server config file, passed to `--mcp-config`. Explicit, so it works regardless of `bare`
 - `settings`: path to a settings JSON layered into the per-run `CLAUDE_CONFIG_DIR/settings.json`. Top-level keys override the defaults; the `env` block is shallow-merged so telemetry stays disabled unless you override it
@@ -295,7 +299,13 @@ Sandbox requests may set `metadata.agent_timeout_sec` to a positive number of
 seconds, encoded as a string. This bounds the activation's model and tool work,
 capped by the configured `timeout`; missing or invalid values use that ceiling.
 Other metadata keys are rejected with HTTP 422. Setup and cleanup keep their
-separate limits.
+separate limits. With `model_server`, the CLI's per-call and subagent stall
+timeouts follow this bound (see "Against a Gym model server").
+
+The CLI keeps its own state, such as `.cc-writes`, in a `.claude` directory under
+its working directory, which is the task `workdir`. The sandbox runner removes a
+`.claude` directory that the activation created, so it does not end up in the
+graded workspace; a `.claude` directory that the task already had is left alone.
 
 The shared `SandboxSession` supervisor stops the harness before reading its
 dedicated stdout stream and native transcripts. The runner keeps `events.jsonl`,
