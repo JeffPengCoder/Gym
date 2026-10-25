@@ -4574,6 +4574,89 @@ class TestAssistantReasoningHistoryPreprocess:
         assert assistant == {"role": "assistant", "content": original}
 
 
+def _make_later_system_model(*, enabled: bool) -> VLLMModel:
+    config = _make_reasoning_history_config(replace_later_system_role_with_user=enabled)
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestLaterSystemMessages:
+    @staticmethod
+    def _body() -> dict[str, Any]:
+        # The order Claude Code 2.1.302 produces through /v1/messages: its environment description after the first
+        # user turn and a token-budget reminder after a tool result.
+        return {
+            "model": "caller-model",
+            "messages": [
+                {"role": "system", "content": "you are a coding agent"},
+                {"role": "user", "content": "build it"},
+                {"role": "system", "content": "# Environment\ncwd: /workspace"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "Bash", "arguments": "{}"}}
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "start.md"},
+                {
+                    "role": "developer",
+                    "content": [{"type": "text", "text": "<total_tokens>9 tokens left</total_tokens>"}],
+                },
+            ],
+        }
+
+    def test_off_by_default(self) -> None:
+        model = _make_later_system_model(enabled=False)
+        result = model._preprocess_chat_completion_create_params(MagicMock(), self._body())
+
+        assert [m["role"] for m in result["messages"]] == [
+            "system",
+            "user",
+            "system",
+            "assistant",
+            "tool",
+            "developer",
+        ]
+
+    def test_later_system_messages_become_marked_user_turns_in_place(self) -> None:
+        model = _make_later_system_model(enabled=True)
+        result = model._preprocess_chat_completion_create_params(MagicMock(), self._body())
+
+        assert [m["role"] for m in result["messages"]] == ["system", "user", "user", "assistant", "tool", "user"]
+        assert result["messages"][0] == {"role": "system", "content": "you are a coding agent"}
+        assert result["messages"][2] == {
+            "role": "user",
+            "content": "<system-reminder>\n# Environment\ncwd: /workspace\n</system-reminder>",
+        }
+        assert result["messages"][5] == {
+            "role": "user",
+            "content": "<system-reminder>\n<total_tokens>9 tokens left</total_tokens>\n</system-reminder>",
+        }
+
+    def test_leading_system_and_developer_messages_stay(self) -> None:
+        model = _make_later_system_model(enabled=True)
+        body = {
+            "model": "caller-model",
+            "messages": [
+                {"role": "system", "content": "first"},
+                {"role": "developer", "content": "second"},
+                {"role": "user", "content": "go"},
+            ],
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        assert result["messages"] == [
+            {"role": "system", "content": "first"},
+            {"role": "developer", "content": "second"},
+            {"role": "user", "content": "go"},
+        ]
+
+    def test_responses_native_path_rejects_the_switch(self) -> None:
+        model = _make_later_system_model(enabled=True)
+        with raises(NotImplementedError):
+            asyncio.run(model._responses_native(MagicMock(), NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+
+
 class TestReasoningFieldConfig:
     @staticmethod
     def _body(content: Any) -> dict[str, Any]:

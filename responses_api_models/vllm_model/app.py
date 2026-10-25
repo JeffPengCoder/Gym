@@ -335,6 +335,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # ``uses_reasoning_parser``.
     preserve_reasoning_in_assistant_content: bool = False
     replace_developer_role_with_system: bool = False
+    # Some chat templates accept a system message only at the start (Qwen3.8's raises "System message must be at
+    # the beginning."), but some harnesses send more later: Claude Code 2.1.302 puts its environment description
+    # after the first user turn and a token-budget reminder after each tool result. When set, each system or
+    # developer message after the leading ones becomes a user message where it is, wrapped in <system-reminder>
+    # tags, the way Claude Code marks reminders inside user turns. Moving them to the front instead would change
+    # the prompt prefix on every turn and defeat prefix caching. Chat Completions path only.
+    replace_later_system_role_with_user: bool = False
 
     drop_unrepresentable_request_fields: bool = Field(
         default=False,
@@ -718,6 +725,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise NotImplementedError
         if self.config.replace_developer_role_with_system:
             raise NotImplementedError
+        if self.config.replace_later_system_role_with_user:
+            raise NotImplementedError
         if not self.config.sequential_reasoning_allowed:
             raise NotImplementedError
         if "audio_ref" in (body.metadata or {}):
@@ -846,6 +855,25 @@ class VLLMModel(SimpleResponsesAPIModel):
             if tool_dict.get("type") == "function":
                 (tool_dict.get("function") or {}).pop("strict", None)
 
+    @staticmethod
+    def _replace_later_system_role_with_user(messages: List[Dict[str, Any]]) -> None:
+        """Turn each system or developer message after the leading ones into a user message, in place.
+
+        The text is wrapped in ``<system-reminder>`` tags so the model can still tell it apart from what the user
+        wrote; non-text content parts of such a message are dropped.
+        """
+        leading = 0
+        while leading < len(messages) and messages[leading].get("role") in ("system", "developer"):
+            leading += 1
+        for message_dict in messages[leading:]:
+            if message_dict.get("role") not in ("system", "developer"):
+                continue
+            content = message_dict.get("content")
+            if not isinstance(content, str):
+                content = "".join(part.get("text", "") for part in content or [] if isinstance(part, dict))
+            message_dict["role"] = "user"
+            message_dict["content"] = f"<system-reminder>\n{content}\n</system-reminder>"
+
     def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Preprocess the body dict before issuing a chat completion request.
 
@@ -868,6 +896,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") == "developer":
                     message_dict["role"] = "system"
+
+        if self.config.replace_later_system_role_with_user:
+            self._replace_later_system_role_with_user(body_dict["messages"])
 
         body_dict["model"] = self.config.model
 
