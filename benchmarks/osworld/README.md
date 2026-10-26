@@ -215,6 +215,7 @@ per step. The model server must use the same chat template and reasoning parser.
 | vLLM | 0.23.0 |
 | Chat template | `chat_template.jinja` from `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`, SHA-256 `ab7813c3abdd9cb655905a410728b26c7884eca45ddfab8d9f931553485a7862` |
 | Reasoning parser | `nano_v3`, from `nano_v3_reasoning_parser.py` in the same repository, SHA-256 `aafb12208054504f619cbdd01837e1532a482ad937ed987bfe9a13fb812ae2b7` |
+| Chat template arguments | `truncate_history_thinking=true`, set in the profile's `chat_template_kwargs` |
 | Context length | 64,000 tokens |
 
 The checkpoint embeds this template in its `tokenizer_config.json`, but vLLM
@@ -243,6 +244,17 @@ put a literal `\n` before `## Action`. An agent with a strict action parser
 scored about 20% raw with that serving and about 48% with the configuration
 below. This profile's parser tolerates the escaped newline, but every reference
 score in this section uses the configuration below.
+
+`truncate_history_thinking=true` is the template's own default. With it, the
+template renders each earlier assistant message as an empty `<think></think>`
+followed by the turn's Action, so the image-backed history turns carry no
+reasoning. Turns folded into the text history still include their
+`## Thought`. Every reference score in this section was measured this way, and
+the profile sets the argument explicitly so that it cannot drift. Sending
+`truncate_history_thinking=false` keeps the reasoning in those turns. NVIDIA's
+[computer-use cookbook for this model](https://github.com/NVIDIA-NeMo/Nemotron/tree/main/usage-cookbook/Nemotron-3-Nano-Omni/computer-use-agent-with-omni)
+does that by default, but it changes the model input, so validate it as a
+separate recipe before comparing its scores with these.
 
 ```bash
 hf download nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
