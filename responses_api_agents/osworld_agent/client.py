@@ -40,18 +40,18 @@ import requests
 
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
 from responses_api_agents.osworld_agent.proxy import inspect_proxy_config_file, task_requires_proxy
+from responses_api_agents.osworld_agent.reward_modes import REWARD_MODES, reward_from_score
 from responses_api_agents.osworld_agent.rollout_outcome import (
     RUNTIME_ADMISSION_POLICY_ID,
     RolloutOutcomeFacts,
     classify_rollout_outcome,
 )
 from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
-from responses_api_agents.osworld_agent.reward_modes import REWARD_MODES, reward_from_score
-from responses_api_agents.osworld_agent.taskgen_plugins import register_task_plugins
 from responses_api_agents.osworld_agent.runtime_errors import (
     OSWorldActionTimeoutError,
     OSWorldModelTimeoutError,
 )
+from responses_api_agents.osworld_agent.taskgen_plugins import register_task_plugins
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.client")
@@ -1996,7 +1996,11 @@ def run_osworld_task(
         # during reset(), so they are registered first (and refused on the remote Resources Server path).
         plugin_functions = register_task_plugins(task_config, remote=use_remote_resources)
         if plugin_functions:
-            LOG.info("Registered %d task evaluator plugin function(s) for task %s", len(plugin_functions), _safe_task_id(task_config))
+            LOG.info(
+                "Registered %d task evaluator plugin function(s) for task %s",
+                len(plugin_functions),
+                _safe_task_id(task_config),
+            )
         rollout_phase = "environment_reset"
         env.reset(task_config=task_config)
         if use_gym_sandbox and runner_spec.kind == "pointer_agent":

@@ -166,7 +166,11 @@ def test_capture_on_output_returns_every_served_generation_in_call_order() -> No
     assert dumped["terminal_response_id"] == "chatcmpl-5"
     # Semantic per-step evidence is unchanged.
     transitions = dumped["response"]["trajectory_transitions"]
-    assert [t["action"]["raw_completion"] for t in transitions] == ["pyautogui.click(1, 2)", "pyautogui.click(3, 4)", "DONE"]
+    assert [t["action"]["raw_completion"] for t in transitions] == [
+        "pyautogui.click(1, 2)",
+        "pyautogui.click(3, 4)",
+        "DONE",
+    ]
     assert dumped["response"]["trajectory_contract"]["capabilities"]["exact_model_call_evidence"] is False
 
 
@@ -203,7 +207,13 @@ def test_structured_model_call_keeps_served_response_id(mock_openai, _mock_http_
 
     normalized = call(
         messages,
-        {"model": "policy", "messages": messages, "max_tokens": 64, "temperature": 0.6, "_nemo_gym_return_message": True},
+        {
+            "model": "policy",
+            "messages": messages,
+            "max_tokens": 64,
+            "temperature": 0.6,
+            "_nemo_gym_return_message": True,
+        },
     )
 
     assert normalized["response_id"] == "chatcmpl-1"

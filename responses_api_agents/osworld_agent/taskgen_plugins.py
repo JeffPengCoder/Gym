@@ -25,6 +25,7 @@ import json
 import types
 from typing import Any, Dict, List, Mapping
 
+
 SCHEMA = "taskgen-plugins/1"
 _REGISTERED: Dict[str, str] = {}  # function name -> digest of the plugin that defined it (this process)
 

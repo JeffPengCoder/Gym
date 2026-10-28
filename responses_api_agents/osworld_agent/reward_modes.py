@@ -15,10 +15,13 @@ from __future__ import annotations
 
 from typing import Optional
 
+
 REWARD_MODES = ("binary", "raw", "signed_v1")
 
 
-def reward_from_score(mode: str, score: float, terminal_action: Optional[str], success_threshold: float = 1.0) -> float:
+def reward_from_score(
+    mode: str, score: float, terminal_action: Optional[str], success_threshold: float = 1.0
+) -> float:
     if mode == "raw":
         return float(score)
     success = float(score) >= success_threshold

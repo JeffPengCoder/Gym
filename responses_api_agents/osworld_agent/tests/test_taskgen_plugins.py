@@ -22,21 +22,32 @@ def fake_desktop_env(monkeypatch):
     metrics.compare_csv = lambda result, expected: 1.0  # a built-in
     evaluators.getters, evaluators.metrics = getters, metrics
     root.evaluators = evaluators
-    for name, module in (("desktop_env", root), ("desktop_env.evaluators", evaluators),
-                         ("desktop_env.evaluators.getters", getters), ("desktop_env.evaluators.metrics", metrics)):
+    for name, module in (
+        ("desktop_env", root),
+        ("desktop_env.evaluators", evaluators),
+        ("desktop_env.evaluators.getters", getters),
+        ("desktop_env.evaluators.metrics", metrics),
+    ):
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(taskgen_plugins, "_REGISTERED", {})
     return getters, metrics
 
 
 GETTERS = "def get_rows__ab12(env, config):\n    return config['value']\n"
-METRICS = "def check_rows__ab12(result, expected, **options):\n    return 1.0 if result == expected['value'] else 0.0\n"
+METRICS = (
+    "def check_rows__ab12(result, expected, **options):\n    return 1.0 if result == expected['value'] else 0.0\n"
+)
 
 
 def _task(getters_source=GETTERS, metrics_source=METRICS, **overrides):
     modules = {"getters": getters_source, "metrics": metrics_source}
-    block = {"schema": "taskgen-plugins/1", "getters": ["rows__ab12"], "metrics": ["check_rows__ab12"],
-             "modules": modules, "sha256": plugin_digest(modules)}
+    block = {
+        "schema": "taskgen-plugins/1",
+        "getters": ["rows__ab12"],
+        "metrics": ["check_rows__ab12"],
+        "modules": modules,
+        "sha256": plugin_digest(modules),
+    }
     block.update(overrides)
     return {"id": "ctb-0123456789abcdef", "evaluator": {"func": "check_rows__ab12"}, "taskgen_plugins": block}
 
